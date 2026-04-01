@@ -31,6 +31,9 @@ func (o *OSInfo) InstallScript(goProxy string) string {
 	// Install Docker
 	parts = append(parts, o.dockerScript())
 
+	// Add warpgate user to docker group (after Docker creates it)
+	parts = append(parts, o.postDockerUserScript())
+
 	// Install SecretSauce
 	parts = append(parts, o.secretSauceScript(goProxy))
 
@@ -48,14 +51,21 @@ func (o *OSInfo) InstallScript(goProxy string) string {
 func (o *OSInfo) userScript() string {
 	return `echo "Creating warpgate user..."
 if ! id -u warpgate &>/dev/null; then
-    sudo useradd -m -s /bin/bash -G sudo,docker warpgate || true
+    sudo useradd -m -s /bin/bash warpgate
     echo "warpgate user created"
 else
     echo "warpgate user already exists"
 fi
 
-# Ensure warpgate user can use docker
-sudo usermod -aG docker warpgate || true`
+if [ ! -f /home/warpgate/.bashrc ]; then
+    sudo touch /home/warpgate/.bashrc
+    sudo chown warpgate:warpgate /home/warpgate/.bashrc
+fi`
+}
+
+func (o *OSInfo) postDockerUserScript() string {
+	return `echo "Adding warpgate user to docker group..."
+sudo usermod -aG docker warpgate`
 }
 
 func (o *OSInfo) goScript() string {
@@ -135,10 +145,10 @@ if ! command -v docker &>/dev/null; then
     sudo chmod a+r /etc/apt/keyrings/docker.gpg
     
     # Add repository
-    echo \
-      "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/\
-      "$(. /etc/os-release && echo "$ID")" \
-      "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
+    DOCKER_DIST=$(. /etc/os-release && echo "$ID")
+    DOCKER_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+    DOCKER_ARCH=$(dpkg --print-architecture)
+    echo "deb [arch=${DOCKER_ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${DOCKER_DIST} ${DOCKER_CODENAME} stable" | \
       sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
     
     # Install Docker
@@ -259,27 +269,27 @@ func (o *OSInfo) secretSauceScript(goProxy string) string {
 
 	return fmt.Sprintf(`echo "Installing SecretSauce..."
 
-export GOPATH="/home/warpgate/go"
-export PATH="$PATH:/usr/local/go/bin:$GOPATH/bin"
-
-if ! command -v secretsauce &>/dev/null && ! [ -f /home/warpgate/go/bin/secretsauce ]; then
-    sudo -u warpgate bash -c 'export GOPROXY="%s,https://proxy.golang.org,direct" && \
+if [ ! -f /home/warpgate/go/bin/secretsauce ]; then
+    sudo -u warpgate bash -c '\
+        export GOPROXY="%s,https://proxy.golang.org,direct" && \
         export GONOSUMDB="github.com/pangobit/*" && \
         export GOPATH="/home/warpgate/go" && \
-        export PATH="$PATH:/usr/local/go/bin:$GOPATH/bin" && \
+        export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH" && \
+        mkdir -p "$GOPATH/bin" && \
         go install github.com/pangobit/secretsauce@latest'
     echo "SecretSauce installed successfully"
 else
     echo "SecretSauce already installed"
 fi
 
-# Persist proxy config for warpgate user
 if ! grep -q 'GOPROXY' /home/warpgate/.bashrc 2>/dev/null; then
     echo 'export GOPROXY="%s,https://proxy.golang.org,direct"' | sudo tee -a /home/warpgate/.bashrc
     echo 'export GONOSUMDB="github.com/pangobit/*"' | sudo tee -a /home/warpgate/.bashrc
     echo 'export GOPATH="/home/warpgate/go"' | sudo tee -a /home/warpgate/.bashrc
-    echo 'export PATH="$PATH:$GOPATH/bin"' | sudo tee -a /home/warpgate/.bashrc
-fi`, goProxy, goProxy)
+    echo 'export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"' | sudo tee -a /home/warpgate/.bashrc
+fi
+
+sudo ln -sf /home/warpgate/go/bin/secretsauce /usr/local/bin/secretsauce 2>/dev/null || true`, goProxy, goProxy)
 }
 
 func (o *OSInfo) goArch() string {

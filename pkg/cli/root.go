@@ -306,10 +306,11 @@ If a node ID is given, generates only for that node. Otherwise generates for all
 
 // Bootstrap flags
 var (
-	bootstrapHost   string
-	bootstrapUser   string
-	bootstrapSSHKey string
-	bootstrapDryRun bool
+	bootstrapHost         string
+	bootstrapUser         string
+	bootstrapSSHKey       string
+	bootstrapDryRun       bool
+	bootstrapTailscaleSSH bool
 )
 
 var bootstrapCmd = &cobra.Command{
@@ -319,65 +320,69 @@ var bootstrapCmd = &cobra.Command{
 - Go (1.26.1)
 - Docker (distro packages)
 - Docker Compose (plugin)
+- SecretSauce (if go_proxy configured)
 - warpgate user with proper permissions
 
 The node must have Tailscale and SSH already configured.
 
 Examples:
-  # Bootstrap node from config
-  warpgate bootstrap node-1
-  
-  # Bootstrap by IP (ad-hoc)
-  warpgate bootstrap --host 10.0.0.5 --user ubuntu --ssh-key ~/.ssh/id_rsa
-  
+  # Bootstrap node via Tailscale SSH (recommended)
+  warpgate bootstrap test-node --tailscale-ssh
+
+  # Bootstrap by IP (ad-hoc, Tailscale SSH)
+  warpgate bootstrap --host 100.95.115.81 --tailscale-ssh
+
+  # Bootstrap with SSH key
+  warpgate bootstrap node-1 --ssh-key ~/.ssh/id_rsa
+
   # Dry run (show script without executing)
   warpgate bootstrap node-1 --dry-run`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Validate SSH key
-		if bootstrapSSHKey == "" {
-			// Try to find default SSH key
-			homeDir, _ := os.UserHomeDir()
-			for _, key := range []string{
-				filepath.Join(homeDir, ".ssh", "id_ed25519"),
-				filepath.Join(homeDir, ".ssh", "id_rsa"),
-			} {
-				if _, err := os.Stat(key); err == nil {
-					bootstrapSSHKey = key
-					break
+		if !bootstrapTailscaleSSH {
+			if bootstrapSSHKey == "" {
+				homeDir, _ := os.UserHomeDir()
+				for _, key := range []string{
+					filepath.Join(homeDir, ".ssh", "id_ed25519"),
+					filepath.Join(homeDir, ".ssh", "id_rsa"),
+				} {
+					if _, err := os.Stat(key); err == nil {
+						bootstrapSSHKey = key
+						break
+					}
 				}
+			}
+
+			if bootstrapSSHKey == "" {
+				return fmt.Errorf("no SSH key found — use --ssh-key or --tailscale-ssh")
+			}
+
+			if _, err := os.Stat(bootstrapSSHKey); err != nil {
+				return fmt.Errorf("SSH key not found: %s", bootstrapSSHKey)
 			}
 		}
 
-		if bootstrapSSHKey == "" {
-			return fmt.Errorf("no SSH key specified - use --ssh-key or ensure ~/.ssh/id_ed25519 or ~/.ssh/id_rsa exists")
-		}
-
-		if _, err := os.Stat(bootstrapSSHKey); err != nil {
-			return fmt.Errorf("SSH key not found: %s", bootstrapSSHKey)
-		}
-
-		// Create bootstrapper
 		var bs *bootstrap.Bootstrapper
 		if cfg != nil {
 			bs = bootstrap.NewBootstrapper(cfg, bootstrapSSHKey)
 		} else {
-			// Ad-hoc mode - create minimal config
 			minimalCfg := &config.ClusterConfig{
 				Nodes: []config.NodeConfig{},
 			}
 			bs = bootstrap.NewBootstrapper(minimalCfg, bootstrapSSHKey)
 		}
 		bs.DryRun = bootstrapDryRun
+		bs.TailscaleSSH = bootstrapTailscaleSSH
 
-		// Determine target
 		if len(args) > 0 {
-			// Bootstrap by node ID from config
 			if cfg == nil {
-				return fmt.Errorf("config file required to bootstrap by node ID - provide with -c flag")
+				return fmt.Errorf("config file required to bootstrap by node ID — provide with -c flag")
 			}
-			return bs.BootstrapNode(args[0])
+			node := cfg.GetNode(args[0])
+			if node == nil {
+				return fmt.Errorf("node '%s' not found in config", args[0])
+			}
+			return bs.BootstrapHost(node.Host, bootstrapUser)
 		} else if bootstrapHost != "" {
-			// Bootstrap by host (ad-hoc)
 			return bs.BootstrapHost(bootstrapHost, bootstrapUser)
 		}
 
@@ -390,6 +395,7 @@ func init() {
 	bootstrapCmd.Flags().StringVar(&bootstrapUser, "user", "", "SSH user (defaults to current user)")
 	bootstrapCmd.Flags().StringVar(&bootstrapSSHKey, "ssh-key", "", "Path to SSH private key")
 	bootstrapCmd.Flags().BoolVar(&bootstrapDryRun, "dry-run", false, "Show installation script without executing")
+	bootstrapCmd.Flags().BoolVar(&bootstrapTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH (no key needed)")
 }
 
 // Execute runs the root cobra command.

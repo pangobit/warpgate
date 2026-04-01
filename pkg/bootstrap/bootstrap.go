@@ -13,8 +13,10 @@ import (
 type Bootstrapper struct {
 	// Config is the cluster configuration.
 	Config *config.ClusterConfig
-	// SSHKey is the path to the SSH private key.
+	// SSHKey is the path to the SSH private key (empty when using Tailscale SSH).
 	SSHKey string
+	// TailscaleSSH uses the ssh binary with Tailscale auth instead of key-based auth.
+	TailscaleSSH bool
 	// DryRun prints the install script without executing it.
 	DryRun bool
 	// Verbose enables verbose logging.
@@ -82,9 +84,15 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 		user = "root"
 	}
 
-	client, err := NewSSHClient(node.Host, user, b.SSHKey)
-	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
+	var client *SSHClient
+	if b.TailscaleSSH {
+		client = NewTailscaleSSHClient(node.Host, user)
+	} else {
+		var err error
+		client, err = NewSSHClient(node.Host, user, b.SSHKey)
+		if err != nil {
+			return fmt.Errorf("failed to create SSH client: %w", err)
+		}
 	}
 
 	b.log.Info("Connecting to node...")
@@ -116,10 +124,9 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 	}
 
 	b.log.Infof("Node %s bootstrapped successfully!", node.ID)
-	b.log.Info("Next steps:")
-	b.log.Info("1. Copy the SSH public key to your authorized_keys on other nodes")
-	b.log.Info("2. Test: warpgate status")
-	b.log.Info("3. Deploy: warpgate deploy <app>")
+	b.log.Info("Next steps (from your local machine):")
+	b.log.Info("1. Generate compose files: warpgate generate")
+	b.log.Info("2. Deploy to this node: warpgate deploy <app>")
 
 	return nil
 }

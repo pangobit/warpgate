@@ -41,8 +41,8 @@ type DependsOnCondition struct {
 type Service struct {
 	// Image is the Docker image reference.
 	Image string `yaml:"image"`
-	// Command overrides the container command.
-	Command string `yaml:"command,omitempty"`
+	// Command overrides the container command (string for shell form, []string for exec form).
+	Command interface{} `yaml:"command,omitempty"`
 	// ContainerName sets an explicit container name.
 	ContainerName string `yaml:"container_name,omitempty"`
 	// Restart is the restart policy.
@@ -164,7 +164,12 @@ func (p *Project) Generate() (string, error) {
 		p.collectVolumes(compose.Volumes, app.Sidecars, app.Init)
 	}
 
-	compose.Networks["warpgate"] = Network{External: true}
+	if len(p.Networking.Traefik.EntryPoints) > 0 {
+		compose.Services["traefik"] = p.buildTraefikService()
+		compose.Volumes["traefik-acme"] = Volume{}
+	}
+
+	compose.Networks["warpgate"] = Network{}
 
 	yamlBytes, err := yaml.Marshal(compose)
 	if err != nil {
@@ -326,6 +331,55 @@ func (p *Project) buildTraefikLabels(app *config.AppConfig) map[string]string {
 	}
 
 	return labels
+}
+
+func (p *Project) buildTraefikService() Service {
+	cmd := []string{
+		"--providers.docker=true",
+		"--providers.docker.network=warpgate",
+		"--providers.docker.exposedbydefault=false",
+	}
+
+	portMap := map[string]int{
+		"web":       80,
+		"websecure": 443,
+	}
+
+	var ports []string
+	for _, ep := range p.Networking.Traefik.EntryPoints {
+		port, ok := portMap[ep]
+		if !ok {
+			continue
+		}
+		cmd = append(cmd, fmt.Sprintf("--entrypoints.%s.address=:%d", ep, port))
+		ports = append(ports, fmt.Sprintf("%d:%d", port, port))
+	}
+
+	if p.Networking.Traefik.ACME.Enabled {
+		resolver := p.Networking.Traefik.ACME.Provider
+		cmd = append(cmd,
+			fmt.Sprintf("--certificatesresolvers.%s.acme.tlschallenge=true", resolver),
+			fmt.Sprintf("--certificatesresolvers.%s.acme.email=%s", resolver, p.Networking.Traefik.ACME.Email),
+			fmt.Sprintf("--certificatesresolvers.%s.acme.storage=/letsencrypt/acme.json", resolver),
+		)
+		if p.Networking.Traefik.ACME.Staging {
+			cmd = append(cmd,
+				fmt.Sprintf("--certificatesresolvers.%s.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory", resolver),
+			)
+		}
+	}
+
+	return Service{
+		Image:   "traefik:v3.4",
+		Restart: "unless-stopped",
+		Command: cmd,
+		Ports:   ports,
+		Volumes: []string{
+			"/var/run/docker.sock:/var/run/docker.sock:ro",
+			"traefik-acme:/letsencrypt",
+		},
+		Networks: []string{"warpgate"},
+	}
 }
 
 func (p *Project) collectVolumes(volumes map[string]Volume, sidecars []config.SidecarConfig, inits []config.InitContainerConfig) {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,26 +22,41 @@ type SSHClient struct {
 	Port int
 	// User is the SSH username.
 	User string
-	// PrivateKey is the path to the SSH private key file.
+	// PrivateKey is the path to the SSH private key file (empty for Tailscale SSH).
 	PrivateKey string
+	// TailscaleSSH uses the ssh binary (Tailscale handles auth) instead of key-based auth.
+	TailscaleSSH bool
 
 	client *ssh.Client
 }
 
 // NewSSHClient creates a new SSH client configuration.
 func NewSSHClient(host, user, privateKeyPath string) (*SSHClient, error) {
-	client := &SSHClient{
+	return &SSHClient{
 		Host:       host,
 		Port:       22,
 		User:       user,
 		PrivateKey: privateKeyPath,
-	}
+	}, nil
+}
 
-	return client, nil
+// NewTailscaleSSHClient creates an SSH client that uses Tailscale SSH (no keys needed).
+func NewTailscaleSSHClient(host, user string) *SSHClient {
+	return &SSHClient{
+		Host:         host,
+		Port:         22,
+		User:         user,
+		TailscaleSSH: true,
+	}
 }
 
 // Connect establishes an SSH connection to the remote host.
+// For Tailscale SSH mode, this is a no-op since we shell out per command.
 func (c *SSHClient) Connect() error {
+	if c.TailscaleSSH {
+		return nil
+	}
+
 	key, err := os.ReadFile(c.PrivateKey)
 	if err != nil {
 		return fmt.Errorf("failed to read private key: %w", err)
@@ -77,6 +93,9 @@ func (c *SSHClient) Connect() error {
 
 // Close closes the SSH connection.
 func (c *SSHClient) Close() error {
+	if c.TailscaleSSH {
+		return nil
+	}
 	if c.client != nil {
 		return c.client.Close()
 	}
@@ -85,6 +104,10 @@ func (c *SSHClient) Close() error {
 
 // RunCommand executes a command on the remote host and returns stdout, stderr, and any error.
 func (c *SSHClient) RunCommand(cmd string) (string, string, error) {
+	if c.TailscaleSSH {
+		return c.runCommandViaBinary(cmd)
+	}
+
 	if c.client == nil {
 		return "", "", fmt.Errorf("not connected")
 	}
@@ -138,8 +161,28 @@ func (c *SSHClient) RunCommand(cmd string) (string, string, error) {
 	return stdoutBuf.String(), stderrBuf.String(), err
 }
 
+func (c *SSHClient) runCommandViaBinary(cmd string) (string, string, error) {
+	target := fmt.Sprintf("%s@%s", c.User, c.Host)
+	sshCmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", target, cmd)
+	var stdoutBuf, stderrBuf strings.Builder
+	sshCmd.Stdout = &stdoutBuf
+	sshCmd.Stderr = &stderrBuf
+	err := sshCmd.Run()
+	if err != nil {
+		errMsg := strings.TrimSpace(stderrBuf.String())
+		if errMsg != "" {
+			return stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("%w: %s", err, errMsg)
+		}
+	}
+	return stdoutBuf.String(), stderrBuf.String(), err
+}
+
 // RunScript pipes a script to bash on the remote host and executes it.
 func (c *SSHClient) RunScript(script string) error {
+	if c.TailscaleSSH {
+		return c.runScriptViaBinary(script)
+	}
+
 	if c.client == nil {
 		return fmt.Errorf("not connected")
 	}
@@ -158,6 +201,17 @@ func (c *SSHClient) RunScript(script string) error {
 	}
 
 	fmt.Println(string(output))
+	return nil
+}
+
+func (c *SSHClient) runScriptViaBinary(script string) error {
+	sshCmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", fmt.Sprintf("%s@%s", c.User, c.Host), "bash -s")
+	sshCmd.Stdin = strings.NewReader(script)
+	sshCmd.Stdout = os.Stdout
+	sshCmd.Stderr = os.Stderr
+	if err := sshCmd.Run(); err != nil {
+		return fmt.Errorf("script failed: %w", err)
+	}
 	return nil
 }
 
