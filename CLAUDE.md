@@ -35,5 +35,6 @@ go vet ./...                   # Vet
 
 - `warpgate` (CLI) lives in `cmd/warpgate/` and uses `pkg/cli/`
 - `warpd` (daemon) lives in `cmd/warpd/` and uses `pkg/daemon/`
-- Config loading is in `pkg/config/`, Compose generation in `pkg/compose/`, node bootstrap in `pkg/bootstrap/`
+- Config loading and app discovery in `pkg/config/`, compose override generation in `pkg/compose/`
+- Deploy orchestration in `pkg/deploy/`, SSH client in `pkg/ssh/`, node bootstrap in `pkg/bootstrap/`
 - The CLI and daemon are separate binaries — don't add daemon commands to the CLI

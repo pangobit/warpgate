@@ -1,172 +1,55 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
 
-func TestGetAppsForNode(t *testing.T) {
-	cfg := &ClusterConfig{
-		Nodes: []NodeConfig{
-			{ID: "node-1", Host: "10.0.0.1"},
-			{ID: "node-2", Host: "10.0.0.2"},
-		},
-		Apps: []AppConfig{
-			{Name: "auth", Image: "auth:latest", Targets: []string{"node-1"}},
-			{Name: "api", Image: "api:latest", Targets: []string{"all"}},
-			{Name: "admin", Image: "admin:latest", Targets: []string{"node-2"}},
-			{Name: "app-no-targets", Image: "app:latest"},
-		},
+func TestGetTargetNodes(t *testing.T) {
+	nodes := []NodeConfig{
+		{ID: "node-1", Host: "10.0.0.1"},
+		{ID: "node-2", Host: "10.0.0.2"},
 	}
 
 	tests := []struct {
 		name     string
-		nodeID   string
+		app      AppConfig
 		expected []string
 	}{
 		{
-			name:     "node-1 gets auth, api, and app-no-targets",
-			nodeID:   "node-1",
-			expected: []string{"auth", "api", "app-no-targets"},
+			name:     "specific target",
+			app:      AppConfig{Name: "auth", Targets: []string{"node-1"}},
+			expected: []string{"node-1"},
 		},
 		{
-			name:     "node-2 gets api, admin, and app-no-targets",
-			nodeID:   "node-2",
-			expected: []string{"api", "admin", "app-no-targets"},
+			name:     "multiple targets",
+			app:      AppConfig{Name: "api", Targets: []string{"node-1", "node-2"}},
+			expected: []string{"node-1", "node-2"},
 		},
 		{
-			name:     "unknown node gets nothing",
-			nodeID:   "node-3",
-			expected: nil,
+			name:     "empty targets means all nodes",
+			app:      AppConfig{Name: "app"},
+			expected: []string{"node-1", "node-2"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			apps := cfg.GetAppsForNode(tt.nodeID)
-			if len(apps) != len(tt.expected) {
-				t.Fatalf("expected %d apps, got %d", len(tt.expected), len(apps))
+			got := tt.app.GetTargetNodes(nodes)
+			if len(got) != len(tt.expected) {
+				t.Fatalf("expected %d targets, got %d", len(tt.expected), len(got))
 			}
-			for i, app := range apps {
-				if app.Name != tt.expected[i] {
-					t.Errorf("expected app %q at index %d, got %q", tt.expected[i], i, app.Name)
+			for i, id := range got {
+				if id != tt.expected[i] {
+					t.Errorf("expected %q at index %d, got %q", tt.expected[i], i, id)
 				}
 			}
 		})
 	}
 }
 
-func TestSidecarConfigParsing(t *testing.T) {
-	tests := []struct {
-		name        string
-		input       string
-		wantErr     bool
-		wantSidecar int
-		wantInit    int
-	}{
-		{
-			name: "valid sidecars and init",
-			input: `
-name: test-app
-image: ghcr.io/org/app
-sidecars:
-  - name: litestream
-    image: litestream/litestream:0.5.6
-    volumes: [app-data:/data]
-    env:
-      LITESTREAM_URL: s3://bucket/db
-init:
-  - name: restore
-    image: litestream/litestream:0.5.6
-    command: "litestream restore /data/app.db"
-    volumes: [app-data:/data]
-`,
-			wantErr:     false,
-			wantSidecar: 1,
-			wantInit:    1,
-		},
-		{
-			name: "no sidecars or init",
-			input: `
-name: simple-app
-image: ghcr.io/org/app`,
-			wantErr:     false,
-			wantSidecar: 0,
-			wantInit:    0,
-		},
-		{
-			name:    "invalid yaml",
-			input:   `sidecars: [[[invalid`,
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var app AppConfig
-			err := yaml.Unmarshal([]byte(tt.input), &app)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Unmarshal() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-			if len(app.Sidecars) != tt.wantSidecar {
-				t.Errorf("expected %d sidecars, got %d", tt.wantSidecar, len(app.Sidecars))
-			}
-			if len(app.Init) != tt.wantInit {
-				t.Errorf("expected %d init containers, got %d", tt.wantInit, len(app.Init))
-			}
-		})
-	}
-}
-
-func TestSidecarConfigFields(t *testing.T) {
-	input := `
-name: test-app
-image: ghcr.io/org/app
-sidecars:
-  - name: litestream
-    image: litestream/litestream:0.5.6
-    volumes: [app-data:/data]
-    env:
-      LITESTREAM_URL: s3://bucket/db
-init:
-  - name: restore
-    image: litestream/litestream:0.5.6
-    command: "litestream restore /data/app.db"
-    volumes: [app-data:/data]
-`
-	var app AppConfig
-	if err := yaml.Unmarshal([]byte(input), &app); err != nil {
-		t.Fatalf("failed to parse: %v", err)
-	}
-
-	sc := app.Sidecars[0]
-	if sc.Name != "litestream" {
-		t.Errorf("expected sidecar name litestream, got %s", sc.Name)
-	}
-	if sc.Image != "litestream/litestream:0.5.6" {
-		t.Errorf("expected sidecar image litestream/litestream:0.5.6, got %s", sc.Image)
-	}
-	if len(sc.Volumes) != 1 || sc.Volumes[0] != "app-data:/data" {
-		t.Errorf("unexpected sidecar volumes: %v", sc.Volumes)
-	}
-	if sc.Env["LITESTREAM_URL"] != "s3://bucket/db" {
-		t.Errorf("unexpected sidecar env: %v", sc.Env)
-	}
-
-	init := app.Init[0]
-	if init.Name != "restore" {
-		t.Errorf("expected init name restore, got %s", init.Name)
-	}
-	if init.Command != "litestream restore /data/app.db" {
-		t.Errorf("expected init command, got %s", init.Command)
-	}
-}
-
-func TestValidate(t *testing.T) {
+func TestClusterValidate(t *testing.T) {
 	tests := []struct {
 		name    string
 		config  ClusterConfig
@@ -199,37 +82,10 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "app missing name",
-			config: ClusterConfig{
-				Project: "test",
-				Nodes:   []NodeConfig{{ID: "n", Host: "h"}},
-				Apps:    []AppConfig{{Image: "img"}},
-			},
-			wantErr: true,
-		},
-		{
-			name: "app missing image",
-			config: ClusterConfig{
-				Project: "test",
-				Nodes:   []NodeConfig{{ID: "n", Host: "h"}},
-				Apps:    []AppConfig{{Name: "a"}},
-			},
-			wantErr: true,
-		},
-		{
 			name: "valid minimal config",
 			config: ClusterConfig{
 				Project: "test",
 				Nodes:   []NodeConfig{{ID: "n", Host: "h"}},
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid config with apps",
-			config: ClusterConfig{
-				Project: "test",
-				Nodes:   []NodeConfig{{ID: "n", Host: "h"}},
-				Apps:    []AppConfig{{Name: "a", Image: "img"}},
 			},
 			wantErr: false,
 		},
@@ -240,6 +96,39 @@ func TestValidate(t *testing.T) {
 			err := tt.config.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateApp(t *testing.T) {
+	tests := []struct {
+		name    string
+		app     AppConfig
+		wantErr bool
+	}{
+		{
+			name:    "missing name",
+			app:     AppConfig{Image: "img"},
+			wantErr: true,
+		},
+		{
+			name:    "missing image",
+			app:     AppConfig{Name: "app"},
+			wantErr: true,
+		},
+		{
+			name:    "valid app",
+			app:     AppConfig{Name: "app", Image: "ghcr.io/org/app"},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateApp(&tt.app)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateApp() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -287,5 +176,117 @@ func TestExpandEnvVars(t *testing.T) {
 				t.Errorf("expected %q, got %q", tt.expected, result)
 			}
 		})
+	}
+}
+
+func TestLoadAppConfig(t *testing.T) {
+	dir := t.TempDir()
+	appDir := filepath.Join(dir, "myapp")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	yml := `image: ghcr.io/org/myapp
+version: v1.0.0
+targets: [node-1]
+domains: [myapp.example.com]
+secrets_prefix: myapp/prod
+port: 8080
+`
+	if err := os.WriteFile(filepath.Join(appDir, "app.yml"), []byte(yml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	app, err := LoadAppConfig(appDir)
+	if err != nil {
+		t.Fatalf("LoadAppConfig() error: %v", err)
+	}
+
+	if app.Image != "ghcr.io/org/myapp" {
+		t.Errorf("expected image ghcr.io/org/myapp, got %s", app.Image)
+	}
+	if app.Version != "v1.0.0" {
+		t.Errorf("expected version v1.0.0, got %s", app.Version)
+	}
+	if len(app.Targets) != 1 || app.Targets[0] != "node-1" {
+		t.Errorf("unexpected targets: %v", app.Targets)
+	}
+	if len(app.Domains) != 1 || app.Domains[0] != "myapp.example.com" {
+		t.Errorf("unexpected domains: %v", app.Domains)
+	}
+	if app.SecretsPrefix != "myapp/prod" {
+		t.Errorf("expected secrets_prefix myapp/prod, got %s", app.SecretsPrefix)
+	}
+	if app.Port != 8080 {
+		t.Errorf("expected port 8080, got %d", app.Port)
+	}
+}
+
+func TestDiscoverApps(t *testing.T) {
+	dir := t.TempDir()
+	appsDir := filepath.Join(dir, "apps")
+
+	for _, name := range []string{"auth", "api", "site"} {
+		appDir := filepath.Join(appsDir, name)
+		if err := os.MkdirAll(appDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		yml := "image: ghcr.io/org/" + name + "\n"
+		if err := os.WriteFile(filepath.Join(appDir, "app.yml"), []byte(yml), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Directory without app.yml should be skipped
+	if err := os.MkdirAll(filepath.Join(appsDir, "no-config"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	apps, err := DiscoverApps(dir)
+	if err != nil {
+		t.Fatalf("DiscoverApps() error: %v", err)
+	}
+
+	if len(apps) != 3 {
+		t.Fatalf("expected 3 apps, got %d", len(apps))
+	}
+
+	// Should be sorted alphabetically
+	expected := []string{"api", "auth", "site"}
+	for i, app := range apps {
+		if app.Name != expected[i] {
+			t.Errorf("expected app %q at index %d, got %q", expected[i], i, app.Name)
+		}
+	}
+}
+
+func TestRepoConfigGetAppsForNode(t *testing.T) {
+	repo := &RepoConfig{
+		Cluster: &ClusterConfig{
+			Nodes: []NodeConfig{
+				{ID: "node-1", Host: "10.0.0.1"},
+				{ID: "node-2", Host: "10.0.0.2"},
+			},
+		},
+		Apps: []*AppConfig{
+			{Name: "auth", Image: "auth", Targets: []string{"node-1"}},
+			{Name: "api", Image: "api"},
+			{Name: "admin", Image: "admin", Targets: []string{"node-2"}},
+		},
+	}
+
+	node1Apps := repo.GetAppsForNode("node-1")
+	if len(node1Apps) != 2 {
+		t.Fatalf("expected 2 apps for node-1, got %d", len(node1Apps))
+	}
+
+	node2Apps := repo.GetAppsForNode("node-2")
+	if len(node2Apps) != 2 {
+		t.Fatalf("expected 2 apps for node-2, got %d", len(node2Apps))
+	}
+
+	node3Apps := repo.GetAppsForNode("node-3")
+	if len(node3Apps) != 0 {
+		t.Fatalf("expected 0 apps for node-3, got %d", len(node3Apps))
 	}
 }

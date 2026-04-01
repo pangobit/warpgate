@@ -3,17 +3,19 @@ package bootstrap
 import (
 	"fmt"
 	"strings"
+
+	"github.com/pangobit/warpgate/pkg/compose"
+	"github.com/pangobit/warpgate/pkg/config"
 )
 
 const goVersion = "1.26.1"
 
 // InstallScript generates the installation script for the detected OS.
-// goProxy is the URL of a private Go module proxy (on the tailnet) for installing
-// private packages like SecretSauce. If empty, SecretSauce installation is skipped.
-func (o *OSInfo) InstallScript(goProxy string) string {
+// goProxy is the URL of a private Go module proxy for installing private packages.
+// networking is the cluster networking config used to generate the Traefik compose file.
+func (o *OSInfo) InstallScript(goProxy string, networking *config.NetworkingConfig) string {
 	var parts []string
 
-	// Header
 	parts = append(parts, "#!/bin/bash")
 	parts = append(parts, "set -e")
 	parts = append(parts, "")
@@ -22,25 +24,14 @@ func (o *OSInfo) InstallScript(goProxy string) string {
 	parts = append(parts, fmt.Sprintf("# Arch: %s", o.Arch))
 	parts = append(parts, "")
 
-	// Create warpgate user
 	parts = append(parts, o.userScript())
-
-	// Install Go
 	parts = append(parts, o.goScript())
-
-	// Install Docker
 	parts = append(parts, o.dockerScript())
-
-	// Add warpgate user to docker group (after Docker creates it)
 	parts = append(parts, o.postDockerUserScript())
-
-	// Install SecretSauce
 	parts = append(parts, o.secretSauceScript(goProxy))
-
-	// Setup SSH keys
 	parts = append(parts, o.sshScript())
+	parts = append(parts, o.warpgateSetupScript(networking))
 
-	// Finalization
 	parts = append(parts, "")
 	parts = append(parts, "echo 'Bootstrap complete!'")
 	parts = append(parts, "echo 'Node is ready for Warpgate deployments'")
@@ -83,17 +74,17 @@ if ! command -v go &>/dev/null || ! go version | grep -q "${GO_VERSION}"; then
     cd /tmp
     echo "Downloading Go..."
     curl -fsSL "${GO_URL}" -o "${GO_TARBALL}"
-    
+
     echo "Installing Go..."
     sudo rm -rf /usr/local/go
     sudo tar -C /usr/local -xzf "${GO_TARBALL}"
     rm "${GO_TARBALL}"
-    
+
     # Add to warpgate user PATH
     if ! grep -q '/usr/local/go/bin' /home/warpgate/.bashrc 2>/dev/null; then
         echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee -a /home/warpgate/.bashrc
     fi
-    
+
     echo "Go ${GO_VERSION} installed successfully"
 else
     echo "Go ${GO_VERSION} already installed"
@@ -122,7 +113,7 @@ setup_registry_auth() {
         echo "Configuring Docker registry authentication..."
         sudo -u warpgate mkdir -p /home/warpgate/.docker
         echo "${REGISTRY_TOKEN}" | docker login "${REGISTRY_SERVER}" -u "${REGISTRY_USERNAME}" --password-stdin
-        
+
         # Copy config to warpgate user
         if [ -f ~/.docker/config.json ]; then
             cp ~/.docker/config.json /home/warpgate/.docker/
@@ -137,24 +128,24 @@ if ! command -v docker &>/dev/null; then
     # Install prerequisites
     sudo apt-get update
     sudo apt-get install -y ca-certificates curl gnupg lsb-release
-    
+
     # Add Docker's official GPG key
     sudo install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg || \
     curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     sudo chmod a+r /etc/apt/keyrings/docker.gpg
-    
+
     # Add repository
     DOCKER_DIST=$(. /etc/os-release && echo "$ID")
     DOCKER_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
     DOCKER_ARCH=$(dpkg --print-architecture)
     echo "deb [arch=${DOCKER_ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${DOCKER_DIST} ${DOCKER_CODENAME} stable" | \
       sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-    
+
     # Install Docker
     sudo apt-get update
     sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    
+
     echo "Docker installed successfully"
 else
     echo "Docker already installed"
@@ -177,7 +168,7 @@ setup_registry_auth() {
         echo "Configuring Docker registry authentication..."
         sudo -u warpgate mkdir -p /home/warpgate/.docker
         echo "${REGISTRY_TOKEN}" | docker login "${REGISTRY_SERVER}" -u "${REGISTRY_USERNAME}" --password-stdin
-        
+
         # Copy config to warpgate user
         if [ -f ~/.docker/config.json ]; then
             cp ~/.docker/config.json /home/warpgate/.docker/
@@ -192,18 +183,18 @@ if ! command -v docker &>/dev/null; then
     # Remove old versions
     sudo yum remove -y docker docker-client docker-client-latest docker-common docker-latest \
         docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true
-    
+
     # Install yum-utils
     sudo yum install -y yum-utils
-    
+
     # Add repository
     sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || \
     sudo yum-config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo || \
     sudo yum-config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
-    
+
     # Install Docker
     sudo yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    
+
     echo "Docker installed successfully"
 else
     echo "Docker already installed"
@@ -225,7 +216,7 @@ if ! command -v docker &>/dev/null; then
     curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
     sudo sh /tmp/get-docker.sh
     rm /tmp/get-docker.sh
-    
+
     echo "Docker installed successfully"
 else
     echo "Docker already installed"
@@ -290,6 +281,37 @@ if ! grep -q 'GOPROXY' /home/warpgate/.bashrc 2>/dev/null; then
 fi
 
 sudo ln -sf /home/warpgate/go/bin/secretsauce /usr/local/bin/secretsauce 2>/dev/null || true`, goProxy, goProxy)
+}
+
+func (o *OSInfo) warpgateSetupScript(networking *config.NetworkingConfig) string {
+	var parts []string
+
+	parts = append(parts, `
+echo "Setting up Warpgate directories..."
+sudo mkdir -p /opt/warpgate/apps
+sudo mkdir -p /opt/warpgate/traefik
+sudo chown -R warpgate:warpgate /opt/warpgate`)
+
+	parts = append(parts, `
+echo "Creating warpgate Docker network..."
+docker network create warpgate 2>/dev/null || echo "warpgate network already exists"`)
+
+	if networking != nil && len(networking.Traefik.EntryPoints) > 0 {
+		traefikYAML, err := compose.GenerateTraefikCompose(networking)
+		if err == nil {
+			// Escape single quotes for shell heredoc
+			escaped := strings.ReplaceAll(traefikYAML, "'", "'\\''")
+			parts = append(parts, fmt.Sprintf(`
+echo "Setting up Traefik..."
+cat > /opt/warpgate/traefik/compose.yml << 'TRAEFIKEOF'
+%s
+TRAEFIKEOF
+cd /opt/warpgate/traefik && docker compose up -d
+echo "Traefik started"`, escaped))
+		}
+	}
+
+	return strings.Join(parts, "\n")
 }
 
 func (o *OSInfo) goArch() string {

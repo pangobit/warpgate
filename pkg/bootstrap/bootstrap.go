@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/pangobit/warpgate/pkg/config"
+	"github.com/pangobit/warpgate/pkg/ssh"
 	"github.com/sirupsen/logrus"
 )
 
@@ -68,7 +69,7 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 			Version: "22.04",
 			Arch:    "amd64",
 		}
-		script := osInfo.InstallScript(b.Config.GoProxy)
+		script := osInfo.InstallScript(b.Config.GoProxy, &b.Config.Networking)
 		b.log.Info("DRY RUN - Sample script that would be generated after OS detection:")
 		fmt.Println("=====================================")
 		fmt.Println(script)
@@ -84,12 +85,12 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 		user = "root"
 	}
 
-	var client *SSHClient
+	var client *ssh.Client
 	if b.TailscaleSSH {
-		client = NewTailscaleSSHClient(node.Host, user)
+		client = ssh.NewTailscaleClient(node.Host, user)
 	} else {
 		var err error
-		client, err = NewSSHClient(node.Host, user, b.SSHKey)
+		client, err = ssh.NewClient(node.Host, user, b.SSHKey)
 		if err != nil {
 			return fmt.Errorf("failed to create SSH client: %w", err)
 		}
@@ -103,7 +104,7 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 	b.log.Info("Connected successfully")
 
 	b.log.Info("Detecting operating system...")
-	osInfo, err := client.DetectOS()
+	osInfo, err := b.detectOS(client)
 	if err != nil {
 		return fmt.Errorf("failed to detect OS: %w", err)
 	}
@@ -114,7 +115,7 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 		b.log.Warn(osInfo.GetUnsupportedMessage())
 	}
 
-	script := osInfo.InstallScript(b.Config.GoProxy)
+	script := osInfo.InstallScript(b.Config.GoProxy, &b.Config.Networking)
 
 	b.log.Info("Running installation script...")
 	b.log.Info("This may take a few minutes depending on network speed")
@@ -124,11 +125,24 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 	}
 
 	b.log.Infof("Node %s bootstrapped successfully!", node.ID)
-	b.log.Info("Next steps (from your local machine):")
-	b.log.Info("1. Generate compose files: warpgate generate")
-	b.log.Info("2. Deploy to this node: warpgate deploy <app>")
+	b.log.Info("Next steps:")
+	b.log.Info("1. Deploy apps: warpgate deploy <app>")
 
 	return nil
+}
+
+func (b *Bootstrapper) detectOS(client *ssh.Client) (*OSInfo, error) {
+	arch, _, err := client.RunCommand("uname -m")
+	if err != nil {
+		return nil, fmt.Errorf("failed to detect arch: %w", err)
+	}
+
+	stdout, _, err := client.RunCommand("cat /etc/os-release 2>/dev/null || echo 'NOT_FOUND'")
+	if err != nil || stdout == "NOT_FOUND\n" {
+		stdout, _, _ = client.RunCommand("cat /etc/lsb-release 2>/dev/null || echo 'NOT_FOUND'")
+	}
+
+	return DetectOSFromOutput(stdout, arch), nil
 }
 
 // ValidatePrerequisites checks that the local machine has SSH installed.

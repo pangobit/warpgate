@@ -1,289 +1,234 @@
 # Warpgate
 
-Warpgate (named after the Starcraft Protoss building) is a lightweight app deployment and orchestration toolset written in Go. It replaces our k3s + Flux setup with something simpler built on Docker Compose.
+Warpgate is a lightweight app deployment tool written in Go. It replaces our k3s + Flux setup with something simpler: Docker Compose on bare metal, orchestrated over Tailscale SSH.
 
 ## Stack
 
-- **Orchestration**: Docker Compose + daemon for change detection
-- **Persistent Storage**: Named volumes; SQLite apps replicate via Litestream
-- **Cluster Networking**: Tailscale mesh
-- **Reverse Proxy**: Traefik with automatic HTTPS (Let's Encrypt)
-- **Secrets**: [SecretSauce](https://github.com/pangobit/secretsauce)
+- **Runtime**: Docker Compose (user-written, not generated)
+- **Reverse Proxy**: Traefik with automatic HTTPS via Let's Encrypt
+- **Networking**: Tailscale mesh (node-to-node, admin-to-node, CI-to-node)
+- **Secrets**: [SecretSauce](https://github.com/pangobit/secretsauce) — injects secrets as env vars at runtime
 - **DNS**: Cloudflare
-- **Access**: Tailscale SSH (admin to cluster, CI to cluster, node to node)
+- **Storage**: Named Docker volumes; SQLite apps replicate via Litestream
 
-## Getting Started
+## How It Works
 
-### Build
+Warpgate is an orchestrator, not a config generator. You write standard Docker Compose files for your apps. Warpgate handles:
 
-```bash
-go build ./cmd/warpgate
-go build ./cmd/warpd
+1. **Bootstrap** — SSH to a node, install Docker, Traefik, SecretSauce
+2. **Deploy** — Upload your compose file, inject Traefik labels via a thin override, pull and start containers with secrets
+3. **Rollback** — Re-deploy the previous version
+
+### Infra Repo Layout
+
+Your deployment configs live in a shared infrastructure repo:
+
+```
+infrastructure/
+├── cluster.yml                  # Nodes, networking, registry
+├── apps/
+│   ├── auth/
+│   │   ├── app.yml              # Deploy metadata (image, version, targets, domains)
+│   │   └── compose.yml          # Standard Docker Compose file
+│   ├── api/
+│   │   ├── app.yml
+│   │   └── compose.yml
+│   └── ...
 ```
 
-### Initialize a Project
-
-```bash
-warpgate init my-project
-```
-
-Creates a `warpgate.yml` config file. Edit it with your node details, apps, and networking.
-
-### Commands
-
-```bash
-warpgate status                         # Show cluster and app status
-warpgate deploy <app> [version]         # Deploy an app
-warpgate logs <app>                     # Stream app logs
-warpgate rollback <app>                 # Rollback to previous version
-warpgate exec <app> <command>           # Run command in container
-warpgate generate [node-id]             # Generate Docker Compose files (all nodes if omitted)
-warpgate bootstrap <node-id>            # Bootstrap a node via SSH
-warpgate bootstrap --host 10.0.0.5      # Ad-hoc bootstrap by IP
-warpgate bootstrap <node-id> --dry-run  # Preview bootstrap script
-```
-
-### Daemon
-
-```bash
-warpd server                    # Start control plane
-WARPGATE_MODE=agent warpd       # Start as agent only
-```
-
-### Environment-Specific Configs
-
-```bash
-warpgate -c warpgate.dev.yml status
-warpgate -c warpgate.prod.yml deploy my-app
-```
-
-Environment variable expansion is supported in configs:
+**`cluster.yml`** defines your infrastructure:
 
 ```yaml
+version: "2"
+project: myapp
+
+nodes:
+  - id: node-1
+    host: 10.0.0.1
+    tailscale_ip: 100.x.x.x
+
+networking:
+  tailnet: my-tailnet.ts.net
+  dns:
+    provider: cloudflare
+    zone: example.com
+  traefik:
+    entry_points: [web, websecure]
+    acme:
+      enabled: true
+      email: admin@example.com
+      provider: letsencrypt
+
 registry:
+  server: ghcr.io
   username: ${REGISTRY_USERNAME}
   password: ${REGISTRY_TOKEN}
 
-apps:
-  - name: my-app
-    version: ${MYAPP_VERSION:-latest}
+go_proxy: http://100.x.x.x:3000  # Private Go proxy for SecretSauce install
+```
+
+**`apps/<name>/app.yml`** is a small deployment descriptor — the app doesn't need to know about your cluster:
+
+```yaml
+image: ghcr.io/org/auth
+version: v3.1.0
+targets: [node-1]           # Which nodes to deploy to (omit for all)
+domains: [auth.example.com] # Traefik routing (omit if no ingress needed)
+secrets_prefix: auth/prod   # SecretSauce prefix (omit if no secrets)
+port: 8085                  # Container port for Traefik load balancer
+```
+
+**`apps/<name>/compose.yml`** is a standard Docker Compose file you write and maintain. Warpgate doesn't generate or modify it — it uploads it as-is. Secrets referenced as `${VAR}` are injected by SecretSauce at runtime:
+
+```yaml
+services:
+  auth:
+    image: ghcr.io/org/auth
+    restart: unless-stopped
+    ports: ["8085:8085"]
+    environment:
+      DB_PATH: "/data/auth.db"
+      SESSION_AUTH_KEY: ${SESSION_AUTH_KEY}  # Injected by SecretSauce
+    volumes: [auth-data:/data]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8085"]
+      interval: 10s
+
+  litestream:
+    image: litestream/litestream:0.5.6
+    command: "replicate -config /etc/litestream.yml"
+    volumes: [auth-data:/data]
+    depends_on:
+      auth: { condition: service_started }
+    restart: unless-stopped
+
+volumes:
+  auth-data:
+```
+
+## Commands
+
+```bash
+# Setup
+warpgate init my-project                    # Scaffold cluster.yml + apps/ structure
+warpgate bootstrap node-1 --tailscale-ssh   # Install Docker, Traefik, SecretSauce on a node
+warpgate bootstrap --host 100.x.x.x --tailscale-ssh  # Ad-hoc bootstrap by IP
+
+# Deploy
+warpgate deploy auth                        # Deploy app at version from app.yml
+warpgate deploy auth v3.2.0                 # Deploy specific version
+warpgate deploy auth --dry-run              # Preview what would happen
+warpgate rollback auth                      # Re-deploy previous version
+
+# Inspect
+warpgate status                             # Show cluster, nodes, and all apps
+warpgate logs auth                          # Stream app logs (WIP)
+warpgate exec auth -- sh                    # Exec into container (WIP)
+```
+
+### Deploy Flow
+
+`warpgate deploy auth v3.2.0` does the following on each target node:
+
+1. Uploads `apps/auth/compose.yml` to `/opt/warpgate/apps/auth/compose.yml`
+2. Generates a thin `docker-compose.override.yml` with Traefik labels and the image tag
+3. Runs `docker compose pull`
+4. Runs `secretsauce run auth/prod -- docker compose -f compose.yml -f docker-compose.override.yml up -d`
+5. Saves deploy state (`state.json`) for rollback
+
+The generated override is the **only** thing Warpgate creates — it looks like:
+
+```yaml
+services:
+  auth:
+    image: ghcr.io/org/auth:v3.2.0
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.auth.rule: "Host(`auth.example.com`)"
+      traefik.http.routers.auth.entrypoints: "web,websecure"
+      traefik.http.routers.auth.tls.certresolver: "letsencrypt"
+      traefik.http.services.auth.loadbalancer.server.port: "8085"
+    networks: [warpgate]
+networks:
+  warpgate:
+    external: true
+```
+
+## Bootstrap
+
+Bootstrap installs dependencies on target nodes via Tailscale SSH:
+
+- Docker and Docker Compose plugin
+- Go (for SecretSauce installation)
+- [SecretSauce](https://github.com/pangobit/secretsauce) via private Go proxy on tailnet
+- Traefik reverse proxy (as a Docker Compose service on the `warpgate` network)
+- `warpgate` system user with docker group access
+- SSH keys for node-to-node access
+
+**Prerequisites**: Tailscale installed with SSH enabled, passwordless sudo.
+
+**Supported OS**: Ubuntu 18.04+, Debian 10+, CentOS 7+, Rocky Linux 8+, AlmaLinux 8+, Fedora 33+, Amazon Linux.
+
+### Remote Node Layout
+
+After bootstrap and deploys, each node has:
+
+```
+/opt/warpgate/
+├── traefik/
+│   └── compose.yml              # Traefik service (started at bootstrap)
+├── apps/
+│   ├── auth/
+│   │   ├── compose.yml              # Uploaded from infra repo
+│   │   ├── docker-compose.override.yml  # Generated by warpgate
+│   │   └── state.json               # Deploy state (version, previous version)
+│   └── ...
 ```
 
 ## Networking Model
 
-Warpgate generates **one Docker Compose file per node** containing all apps targeted at that node.
-
-- **Same-node**: Services resolve each other by service name via Docker DNS (e.g. `auth:8085`). No configuration needed.
-- **Cross-node**: Services communicate via their Traefik domains (e.g. `https://auth.brighter.io`). Traefik provides load balancing for multi-node services.
-
-## Configuration
-
-See `examples/cluster-config/warpgate.yml` for a full example and `examples/environments/` for dev/prod variants.
-
-All string values support `${VAR}` and `${VAR:-default}` environment variable expansion.
-
-### Top-Level Fields
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `version` | No | Config version. Defaults to `"1"` |
-| `project` | Yes | Project name, used as Docker Compose project prefix |
-| `nodes` | Yes | List of cluster nodes (at least one) |
-| `networking` | No | Tailscale, DNS, and Traefik settings |
-| `apps` | No | List of applications to deploy |
-| `registry` | No | Docker registry credentials |
-| `secrets` | No | Secrets provider configuration |
-| `go_proxy` | No | Private Go module proxy URL (on tailnet). Used by bootstrap to install SecretSauce |
-
-### `nodes[]`
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `id` | Yes | Unique node identifier (e.g. `node-1`) |
-| `host` | Yes | IP address or hostname |
-| `tailscale_ip` | No | Tailscale mesh IP |
-| `roles` | No | List of `control-plane` and/or `worker`. Defaults to both if omitted |
-| `labels` | No | Key-value labels (e.g. `region: us-east`) |
-
-### `networking`
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `tailnet` | No | Tailscale tailnet name (e.g. `your-tailnet.ts.net`) |
-| `dns.provider` | No | DNS provider (`cloudflare`) |
-| `dns.zone` | No | DNS zone (e.g. `example.com`) |
-| `dns.api_token` | No | DNS provider API token |
-| `traefik.entry_points` | No | Traefik entrypoints, typically `[web, websecure]` |
-| `traefik.acme.enabled` | No | Enable automatic HTTPS via Let's Encrypt |
-| `traefik.acme.email` | No | ACME registration email |
-| `traefik.acme.provider` | No | ACME provider: `letsencrypt` or `zerossl` |
-| `traefik.acme.staging` | No | Use staging certs (avoids rate limits during testing) |
-
-### `registry`
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `server` | No | Registry hostname (e.g. `ghcr.io`) |
-| `username` | No | Registry username |
-| `password` | No | Registry password/token |
-
-### `secrets`
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `provider` | No | Secrets backend: `secretsauce`, `env`, or `file` |
-| `config` | No | Provider-specific key-value config (e.g. `endpoint`, `token`) |
-
-### `apps[]`
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Application name |
-| `image` | Yes | Docker image (e.g. `ghcr.io/org/app`) |
-| `version` | No | Image tag. Defaults to `latest` |
-| `replicas` | No | Per-node replica count |
-| `targets` | No | Node IDs to deploy to, or `[all]`. Defaults to all nodes |
-| `domains` | No | Domain names for Traefik routing (auto-generates router labels) |
-| `ports` | No | Port mappings (see below) |
-| `env` | No | Environment variables as key-value pairs |
-| `secrets` | No | List of secret names to inject from the secrets provider |
-| `resources` | No | CPU/memory requests and limits (see below) |
-| `volumes` | No | Named volume mounts (see below) |
-| `health_check` | No | Health check configuration (see below) |
-| `sidecars` | No | Sidecar containers that run alongside the app (see below) |
-| `init` | No | Init containers that run before the app starts (see below) |
-| `compose_file` | No | Path to a custom Docker Compose file override |
-
-### `apps[].ports[]`
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `container` | Yes | Container port |
-| `host` | No | Explicit host port. If omitted, only the container port is exposed |
-| `protocol` | No | `tcp` (default) or `udp` |
-
-### `apps[].resources`
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `cpus` | No | CPU reservation (e.g. `"0.5"`) |
-| `memory` | No | Memory reservation (e.g. `"512M"`) |
-| `cpu_limit` | No | CPU limit (e.g. `"1.0"`) |
-| `memory_limit` | No | Memory limit (e.g. `"1G"`) |
-
-### `apps[].volumes[]`
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Named volume identifier |
-| `path` | Yes | Mount path inside the container |
-| `size` | No | Size hint |
-| `backup` | No | Include in backups |
-
-### `apps[].health_check`
-
-Either `path` or `command` should be set, not both.
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `path` | No | HTTP health check path (e.g. `/health`) |
-| `port` | No | Port for HTTP health check |
-| `command` | No | Shell command health check (alternative to HTTP) |
-| `interval` | No | Check interval (e.g. `"10s"`) |
-| `timeout` | No | Check timeout (e.g. `"5s"`) |
-| `retries` | No | Failure count before unhealthy |
-
-### `apps[].sidecars[]`
-
-Sidecar containers run alongside the main app. In the generated compose file, each sidecar becomes a service with `depends_on` the main app (`condition: service_started`) and `restart: unless-stopped`.
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Sidecar name (compose service becomes `{app}-{name}`) |
-| `image` | Yes | Docker image |
-| `command` | No | Override container command |
-| `volumes` | No | Volume mounts in `name:/path` format |
-| `env` | No | Environment variables |
-
-### `apps[].init[]`
-
-Init containers run before the main app starts. In the generated compose file, the main app `depends_on` each init container with `condition: service_completed_successfully`. Init containers use `restart: "no"`.
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Init container name (compose service becomes `{app}-{name}`) |
-| `image` | Yes | Docker image |
-| `command` | No | Command to run |
-| `volumes` | No | Volume mounts in `name:/path` format |
-| `env` | No | Environment variables |
-
-**Example (auth with litestream):**
-
-```yaml
-apps:
-  - name: auth
-    image: ghcr.io/pangobit/auth:v3.1.0
-    volumes:
-      - name: auth-data
-        path: /data
-    sidecars:
-      - name: litestream
-        image: litestream/litestream:0.5.6
-        volumes: [auth-data:/data]
-        env:
-          LITESTREAM_URL: ${LITESTREAM_URL}
-    init:
-      - name: litestream-restore
-        image: litestream/litestream:0.5.6
-        command: "litestream restore /data/auth.db"
-        volumes: [auth-data:/data]
-        env:
-          LITESTREAM_URL: ${LITESTREAM_URL}
-```
+- **Same-node**: Services resolve each other by service name via Docker DNS (e.g. `auth:8085`)
+- **Cross-node**: Services communicate via Traefik domains (e.g. `https://auth.example.com`)
+- **Traefik** runs per-node, discovers containers via Docker labels on the shared `warpgate` network
+- All nodes and some services are on the Tailscale tailnet
 
 ## Project Structure
 
 ```
 warpgate/
 ├── cmd/
-│   ├── warpgate/       # CLI tool
-│   └── warpd/          # Daemon (server + agent)
+│   ├── warpgate/       # CLI binary
+│   └── warpd/          # Daemon binary (future)
 ├── pkg/
 │   ├── cli/            # Cobra commands
-│   ├── compose/        # Docker Compose generation
-│   ├── config/         # warpgate.yml types and loading
-│   ├── daemon/         # Daemon implementation
-│   └── bootstrap/      # Node bootstrap via SSH (OS detection, install scripts)
+│   ├── config/         # Config types, loading, app discovery
+│   ├── compose/        # Compose override generator (Traefik labels)
+│   ├── deploy/         # Deploy orchestration, state management
+│   ├── ssh/            # SSH client (key-based and Tailscale)
+│   ├── bootstrap/      # Node provisioning (OS detection, install scripts)
+│   └── daemon/         # Daemon (future)
 └── examples/
-    ├── cluster-config/ # Full cluster config example
-    └── environments/   # Dev/prod config examples
+    └── infra-repo/     # Example infrastructure repo layout
 ```
 
-## Bootstrap
+## Build
 
-Bootstrap installs dependencies on target nodes via SSH:
-- Go, Docker, Docker Compose plugin
-- SecretSauce (via private Go proxy on tailnet, if `go_proxy` is configured)
-- `warpgate` system user with docker group access
-- SSH keys for node-to-node access
-
-**Prerequisites**: Tailscale installed, SSH server running, passwordless sudo.
-
-**Supported OS**: Ubuntu 18.04+, Debian 10+, CentOS 7+, Rocky Linux 8+, AlmaLinux 8+, Fedora 33+, Amazon Linux.
+```bash
+go build ./cmd/warpgate    # Build CLI
+go test ./...              # Run tests
+go vet ./...               # Vet
+```
 
 ## Status
 
-WIP. See roadmap:
+Core deployment flow is implemented. Remaining work:
 
-- [ ] Core deployment orchestration
-- [ ] Rolling update strategy
-- [ ] TUI dashboard (Charmbracelet)
-- [ ] Web UI
-- [ ] CI webhook API
-- [ ] SecretSauce integration
-- [ ] File watcher (GitOps)
-- [ ] Backup/restore commands
+- [ ] Rolling update strategy (blue/green via Traefik)
+- [ ] Image watcher / CI push trigger
+- [ ] Log streaming and exec commands
+- [ ] TUI/Web dashboard
+- [ ] Backup/restore for volumes
 
 ## Credits
 
-Inspired by [Kamal](https://kamal-deploy.org/). Built with [Charmbracelet](https://charm.sh/).
+Inspired by [Kamal](https://kamal-deploy.org/) by 37signals.
