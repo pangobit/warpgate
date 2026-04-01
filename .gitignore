@@ -1,6 +1,6 @@
-# Binary
-warpgate
-warpd
+# Binaries (root only, not cmd/ directories)
+/warpgate
+/warpd
 
 # Generated compose files
 generated/
