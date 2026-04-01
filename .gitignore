@@ -1,0 +1,14 @@
+# Binary
+warpgate
+warpd
+
+# Generated compose files
+generated/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
