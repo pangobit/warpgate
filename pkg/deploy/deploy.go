@@ -4,6 +4,7 @@ package deploy
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -57,6 +58,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 		app.Version = version
 	}
 
+	appDir := d.Repo.AppDir(appName)
 	composePath := d.Repo.AppComposePath(appName)
 	if _, err := os.Stat(composePath); os.IsNotExist(err) {
 		return fmt.Errorf("compose.yml not found for app '%s' at %s", appName, composePath)
@@ -93,7 +95,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 
 		d.log.Infof("[%d/%d] Deploying to node %s...", i+1, len(targetNodes), nodeID)
 
-		if err := d.deployToNode(app, node, composePath, override); err != nil {
+		if err := d.deployToNode(app, node, appDir, composePath, override); err != nil {
 			d.log.Warnf("Deploy to node %s failed: %v", nodeID, err)
 			if len(deployed) > 0 {
 				d.log.Warnf("Nodes already updated: %v", deployed)
@@ -114,7 +116,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 	return nil
 }
 
-func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, composePath, override string) error {
+func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, appDir, composePath, override string) error {
 	client, err := d.connect(node)
 	if err != nil {
 		return err
@@ -138,6 +140,10 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 
 	if err := client.UploadFile(composePath, remoteDir+"/compose.yml"); err != nil {
 		return fmt.Errorf("failed to upload compose.yml: %w", err)
+	}
+
+	if err := d.uploadExtraFiles(client, appDir, remoteDir); err != nil {
+		return err
 	}
 
 	if err := client.WriteFile(remoteDir+"/docker-compose.override.yml", override); err != nil {
@@ -476,6 +482,27 @@ func (d *Deployer) updateInternalRoutes(app *config.AppConfig) error {
 		client.Close()
 	}
 
+	return nil
+}
+
+func (d *Deployer) uploadExtraFiles(client *ssh.Client, appDir, remoteDir string) error {
+	entries, err := os.ReadDir(appDir)
+	if err != nil {
+		return fmt.Errorf("failed to read app directory: %w", err)
+	}
+
+	skip := map[string]bool{"app.yml": true, "compose.yml": true}
+	for _, entry := range entries {
+		if entry.IsDir() || skip[entry.Name()] {
+			continue
+		}
+		localPath := filepath.Join(appDir, entry.Name())
+		remotePath := remoteDir + "/" + entry.Name()
+		d.log.Infof("Uploading %s", entry.Name())
+		if err := client.UploadFile(localPath, remotePath); err != nil {
+			return fmt.Errorf("failed to upload %s: %w", entry.Name(), err)
+		}
+	}
 	return nil
 }
 
