@@ -7,14 +7,15 @@ import (
 	"path/filepath"
 
 	"github.com/pangobit/warpgate/pkg/bootstrap"
-	"github.com/pangobit/warpgate/pkg/compose"
+	"github.com/pangobit/warpgate/pkg/cleanup"
 	"github.com/pangobit/warpgate/pkg/config"
+	"github.com/pangobit/warpgate/pkg/deploy"
 	"github.com/spf13/cobra"
 )
 
 var (
 	configPath string
-	cfg        *config.ClusterConfig
+	repo       *config.RepoConfig
 )
 
 var rootCmd = &cobra.Command{
@@ -30,7 +31,7 @@ using Docker Compose, Traefik, Tailscale, and your own infrastructure.`,
 		}
 
 		if configPath == "" {
-			configPath = "warpgate.yml"
+			configPath = "cluster.yml"
 		}
 
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
@@ -38,7 +39,7 @@ using Docker Compose, Traefik, Tailscale, and your own infrastructure.`,
 		}
 
 		var err error
-		cfg, err = config.LoadClusterConfig(configPath)
+		repo, err = config.LoadRepo(configPath)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
@@ -48,17 +49,16 @@ using Docker Compose, Traefik, Tailscale, and your own infrastructure.`,
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "Path to warpgate.yml config file")
+	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "Path to cluster.yml config file")
 
-	// Add commands
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(logsCmd)
 	rootCmd.AddCommand(rollbackCmd)
 	rootCmd.AddCommand(execCmd)
-	rootCmd.AddCommand(generateCmd)
 	rootCmd.AddCommand(bootstrapCmd)
+	rootCmd.AddCommand(cleanupCmd)
 }
 
 var initCmd = &cobra.Command{
@@ -71,22 +71,18 @@ var initCmd = &cobra.Command{
 			projectName = args[0]
 		}
 
-		configPath := "warpgate.yml"
-		if _, err := os.Stat(configPath); err == nil {
-			return fmt.Errorf("warpgate.yml already exists")
+		if _, err := os.Stat("cluster.yml"); err == nil {
+			return fmt.Errorf("cluster.yml already exists")
 		}
 
-		defaultConfig := fmt.Sprintf(`version: "1"
+		clusterConfig := fmt.Sprintf(`version: "2"
 project: %s
 
-# Cluster nodes
 nodes:
   - id: node-1
     host: 10.0.0.1
     tailscale_ip: 100.x.x.x
-    roles: [control-plane, worker]
 
-# Networking configuration
 networking:
   tailnet: your-tailnet.ts.net
   dns:
@@ -99,65 +95,76 @@ networking:
       email: admin@example.com
       provider: letsencrypt
 
-# Container registry
 registry:
   server: ghcr.io
 
-# Secrets provider
 secrets:
-  provider: secretsauce
-  config:
-    endpoint: https://secretsauce.internal
-
-# Applications to deploy
-apps:
-  - name: example-app
-    image: ghcr.io/org/example-app
-    version: latest
-    replicas: 1
-    targets: [all]
-    domains:
-      - example-app.example.com
-    ports:
-      - container: 8080
-    env:
-      LOG_LEVEL: info
-    secrets:
-      - DATABASE_URL
-    health_check:
-      path: /health
-      port: 8080
-      interval: 10s
-    # Optional: sidecar containers (run alongside the app)
-    # sidecars:
-    #   - name: litestream
-    #     image: litestream/litestream:0.5.6
-    #     volumes: [app-data:/data]
-    # Optional: init containers (run before the app starts)
-    # init:
-    #   - name: restore
-    #     image: litestream/litestream:0.5.6
-    #     command: "litestream restore /data/app.db"
-    #     volumes: [app-data:/data]
+  server: http://100.x.x.x:8090    # SecretSauce server URL on tailnet
 `, projectName)
 
-		if err := os.WriteFile(configPath, []byte(defaultConfig), 0644); err != nil {
-			return fmt.Errorf("failed to create warpgate.yml: %w", err)
+		if err := os.WriteFile("cluster.yml", []byte(clusterConfig), 0644); err != nil {
+			return fmt.Errorf("failed to create cluster.yml: %w", err)
 		}
 
-		fmt.Printf("Created warpgate.yml for project '%s'\n", projectName)
+		exampleDir := filepath.Join("apps", "example-app")
+		if err := os.MkdirAll(exampleDir, 0755); err != nil {
+			return fmt.Errorf("failed to create apps directory: %w", err)
+		}
+
+		appConfig := `image: ghcr.io/org/example-app
+version: latest
+domains:
+  - example-app.example.com
+secrets_prefix: example-app/prod
+port: 8080
+`
+		if err := os.WriteFile(filepath.Join(exampleDir, "app.yml"), []byte(appConfig), 0644); err != nil {
+			return fmt.Errorf("failed to create app.yml: %w", err)
+		}
+
+		composeConfig := `services:
+  example-app:
+    image: ghcr.io/org/example-app
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+`
+		if err := os.WriteFile(filepath.Join(exampleDir, "compose.yml"), []byte(composeConfig), 0644); err != nil {
+			return fmt.Errorf("failed to create compose.yml: %w", err)
+		}
+
+		fmt.Printf("Created project '%s'\n", projectName)
+		fmt.Println("\nFiles created:")
+		fmt.Println("  cluster.yml              - Cluster configuration")
+		fmt.Println("  apps/example-app/app.yml - Example app deployment config")
+		fmt.Println("  apps/example-app/compose.yml - Example Docker Compose file")
 		fmt.Println("\nNext steps:")
-		fmt.Println("1. Edit warpgate.yml with your node details")
-		fmt.Println("2. Run 'warpgate generate' to generate Docker Compose files")
-		fmt.Println("3. Run 'warpgate deploy <app-name>' to deploy")
+		fmt.Println("1. Edit cluster.yml with your node details")
+		fmt.Println("2. Edit apps/example-app/ or create new app directories")
+		fmt.Println("3. Run 'warpgate bootstrap <node-id>' to prepare a node")
+		fmt.Println("4. Run 'warpgate deploy <app-name>' to deploy")
 
 		return nil
 	},
 }
 
+// Deploy flags
+var (
+	deployDryRun       bool
+	deployTailscaleSSH bool
+	deploySSHKey       string
+)
+
 var deployCmd = &cobra.Command{
 	Use:   "deploy <app-name> [version]",
-	Short: "Deploy an application",
+	Short: "Deploy an application to its target nodes",
 	Args:  cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		appName := args[0]
@@ -166,53 +173,50 @@ var deployCmd = &cobra.Command{
 			version = args[1]
 		}
 
-		app := cfg.GetApp(appName)
-		if app == nil {
-			return fmt.Errorf("app '%s' not found in config", appName)
-		}
+		d := deploy.NewDeployer(repo, deploySSHKey)
+		d.TailscaleSSH = deployTailscaleSSH
+		d.DryRun = deployDryRun
 
-		if version != "" {
-			app.Version = version
-		}
-
-		fmt.Printf("Deploying %s:%s to targets: %v\n", app.Name, app.Version, app.GetTargetNodes(cfg.Nodes))
-
-		// TODO: Implement actual deployment
-		fmt.Println("Deployment command executed (implementation pending)")
-
-		return nil
+		return d.Deploy(appName, version)
 	},
 }
 
-var statusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show cluster and application status",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Printf("Project: %s\n", cfg.Project)
-		fmt.Printf("Nodes: %d\n\n", len(cfg.Nodes))
+func init() {
+	deployCmd.Flags().BoolVar(&deployDryRun, "dry-run", false, "Show actions without executing")
+	deployCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	deployCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
+}
 
-		for _, node := range cfg.Nodes {
-			roles := node.Roles
-			if len(roles) == 0 {
-				roles = []string{"control-plane", "worker"}
+var statusCmd = &cobra.Command{
+	Use:   "status [app-name]",
+	Short: "Show cluster and application status",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		fmt.Printf("Project: %s\n", repo.Cluster.Project)
+		fmt.Printf("Nodes: %d\n\n", len(repo.Cluster.Nodes))
+
+		for _, node := range repo.Cluster.Nodes {
+			fmt.Printf("  %s (%s)", node.ID, node.Host)
+			if node.TailscaleIP != "" {
+				fmt.Printf(" [ts: %s]", node.TailscaleIP)
 			}
-			fmt.Printf("Node: %s\n", node.ID)
-			fmt.Printf("  Host: %s\n", node.Host)
-			fmt.Printf("  Roles: %v\n", roles)
-			fmt.Printf("  Tailscale: %s\n", node.TailscaleIP)
 			fmt.Println()
 		}
 
-		fmt.Printf("Apps: %d\n\n", len(cfg.Apps))
-		for _, app := range cfg.Apps {
-			fmt.Printf("App: %s\n", app.Name)
-			fmt.Printf("  Image: %s:%s\n", app.Image, app.Version)
-			fmt.Printf("  Targets: %v\n", app.GetTargetNodes(cfg.Nodes))
-			fmt.Printf("  Replicas: %d\n", app.Replicas)
-			if len(app.Domains) > 0 {
-				fmt.Printf("  Domains: %v\n", app.Domains)
+		fmt.Printf("\nApps: %d\n\n", len(repo.Apps))
+		for _, app := range repo.Apps {
+			version := app.Version
+			if version == "" {
+				version = "latest"
 			}
-			fmt.Println()
+			fmt.Printf("  %s (%s:%s)\n", app.Name, app.Image, version)
+			fmt.Printf("    Targets: %v\n", app.GetTargetNodes(repo.Cluster.Nodes))
+			if len(app.Domains) > 0 {
+				fmt.Printf("    Domains: %v\n", app.Domains)
+			}
+			if app.SecretsPrefix != "" {
+				fmt.Printf("    Secrets: %s\n", app.SecretsPrefix)
+			}
 		}
 
 		return nil
@@ -226,7 +230,7 @@ var logsCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		appName := args[0]
 		fmt.Printf("Streaming logs for %s...\n", appName)
-		// TODO: Implement log streaming
+		// TODO: SSH to target nodes and run docker compose logs
 		return nil
 	},
 }
@@ -236,10 +240,9 @@ var rollbackCmd = &cobra.Command{
 	Short: "Rollback an application to the previous version",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		appName := args[0]
-		fmt.Printf("Rolling back %s...\n", appName)
-		// TODO: Implement rollback
-		return nil
+		d := deploy.NewDeployer(repo, deploySSHKey)
+		d.TailscaleSSH = deployTailscaleSSH
+		return d.Rollback(args[0])
 	},
 }
 
@@ -251,133 +254,95 @@ var execCmd = &cobra.Command{
 		appName := args[0]
 		command := args[1:]
 		fmt.Printf("Executing %v in %s...\n", command, appName)
-		// TODO: Implement exec
-		return nil
-	},
-}
-
-var generateCmd = &cobra.Command{
-	Use:   "generate [node-id]",
-	Short: "Generate Docker Compose files for nodes",
-	Long: `Generate a single docker-compose.yml per node containing all apps targeted at that node.
-If a node ID is given, generates only for that node. Otherwise generates for all nodes.`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		var nodes []config.NodeConfig
-		if len(args) > 0 {
-			node := cfg.GetNode(args[0])
-			if node == nil {
-				return fmt.Errorf("node '%s' not found in config", args[0])
-			}
-			nodes = []config.NodeConfig{*node}
-		} else {
-			nodes = cfg.Nodes
-		}
-
-		for _, node := range nodes {
-			apps := cfg.GetAppsForNode(node.ID)
-			if len(apps) == 0 {
-				fmt.Printf("No apps targeted at node %s, skipping\n", node.ID)
-				continue
-			}
-
-			n := node
-			project := compose.NewProject(cfg.Project, apps, &n, cfg.Networking)
-			composeYAML, err := project.Generate()
-			if err != nil {
-				return fmt.Errorf("failed to generate compose for node %s: %w", node.ID, err)
-			}
-
-			outputPath := filepath.Join("generated", node.ID, "docker-compose.yml")
-			if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
-				return err
-			}
-
-			if err := os.WriteFile(outputPath, []byte(composeYAML), 0644); err != nil {
-				return err
-			}
-
-			fmt.Printf("Generated %s (%d apps)\n", outputPath, len(apps))
-		}
-
+		// TODO: SSH to target node and run docker compose exec
 		return nil
 	},
 }
 
 // Bootstrap flags
 var (
-	bootstrapHost   string
-	bootstrapUser   string
-	bootstrapSSHKey string
-	bootstrapDryRun bool
+	bootstrapHost          string
+	bootstrapUser          string
+	bootstrapSSHKey        string
+	bootstrapDryRun        bool
+	bootstrapTailscaleSSH  bool
+	bootstrapSecretsServer bool
 )
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap [node-id]",
 	Short: "Bootstrap a node with Warpgate dependencies",
 	Long: `Bootstrap a node by installing required dependencies:
-- Go (1.26.1)
-- Docker (distro packages)
-- Docker Compose (plugin)
+- Docker and Docker Compose plugin
+- Go and SecretSauce (if go_proxy configured)
+- Traefik reverse proxy
 - warpgate user with proper permissions
+- SecretSauce server as systemd service (with --secrets-server)
 
 The node must have Tailscale and SSH already configured.
 
+When --secrets-server is used, the vault is automatically initialized:
+- If SS_MASTER_PASSWORD is set, that password is used
+- Otherwise, a strong password is auto-generated and displayed once
+- The master key file is created and the service is started
+- Manage secrets via the SecretSauce web UI at http://<node-ip>:8090
+
 Examples:
-  # Bootstrap node from config
-  warpgate bootstrap node-1
-  
-  # Bootstrap by IP (ad-hoc)
-  warpgate bootstrap --host 10.0.0.5 --user ubuntu --ssh-key ~/.ssh/id_rsa
-  
-  # Dry run (show script without executing)
+  warpgate bootstrap test-node --tailscale-ssh
+  warpgate bootstrap node-1 --secrets-server --tailscale-ssh
+  SS_MASTER_PASSWORD=secret warpgate bootstrap node-1 --secrets-server --tailscale-ssh
+  warpgate bootstrap --host 100.95.115.81 --tailscale-ssh
   warpgate bootstrap node-1 --dry-run`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Validate SSH key
-		if bootstrapSSHKey == "" {
-			// Try to find default SSH key
-			homeDir, _ := os.UserHomeDir()
-			for _, key := range []string{
-				filepath.Join(homeDir, ".ssh", "id_ed25519"),
-				filepath.Join(homeDir, ".ssh", "id_rsa"),
-			} {
-				if _, err := os.Stat(key); err == nil {
-					bootstrapSSHKey = key
-					break
+		if !bootstrapTailscaleSSH {
+			if bootstrapSSHKey == "" {
+				homeDir, err := os.UserHomeDir()
+				if err != nil {
+					return fmt.Errorf("failed to determine home directory: %w", err)
 				}
+				for _, key := range []string{
+					filepath.Join(homeDir, ".ssh", "id_ed25519"),
+					filepath.Join(homeDir, ".ssh", "id_rsa"),
+				} {
+					if _, err := os.Stat(key); err == nil {
+						bootstrapSSHKey = key
+						break
+					}
+				}
+			}
+
+			if bootstrapSSHKey == "" {
+				return fmt.Errorf("no SSH key found — use --ssh-key or --tailscale-ssh")
+			}
+
+			if _, err := os.Stat(bootstrapSSHKey); err != nil {
+				return fmt.Errorf("SSH key not found: %s", bootstrapSSHKey)
 			}
 		}
 
-		if bootstrapSSHKey == "" {
-			return fmt.Errorf("no SSH key specified - use --ssh-key or ensure ~/.ssh/id_ed25519 or ~/.ssh/id_rsa exists")
-		}
-
-		if _, err := os.Stat(bootstrapSSHKey); err != nil {
-			return fmt.Errorf("SSH key not found: %s", bootstrapSSHKey)
-		}
-
-		// Create bootstrapper
 		var bs *bootstrap.Bootstrapper
-		if cfg != nil {
-			bs = bootstrap.NewBootstrapper(cfg, bootstrapSSHKey)
+		if repo != nil {
+			bs = bootstrap.NewBootstrapper(repo.Cluster, bootstrapSSHKey)
 		} else {
-			// Ad-hoc mode - create minimal config
 			minimalCfg := &config.ClusterConfig{
 				Nodes: []config.NodeConfig{},
 			}
 			bs = bootstrap.NewBootstrapper(minimalCfg, bootstrapSSHKey)
 		}
 		bs.DryRun = bootstrapDryRun
+		bs.TailscaleSSH = bootstrapTailscaleSSH
+		bs.SecretsServer = bootstrapSecretsServer
 
-		// Determine target
 		if len(args) > 0 {
-			// Bootstrap by node ID from config
-			if cfg == nil {
-				return fmt.Errorf("config file required to bootstrap by node ID - provide with -c flag")
+			if repo == nil {
+				return fmt.Errorf("config file required to bootstrap by node ID — provide with -c flag")
 			}
-			return bs.BootstrapNode(args[0])
+			node := repo.Cluster.GetNode(args[0])
+			if node == nil {
+				return fmt.Errorf("node '%s' not found in config", args[0])
+			}
+			return bs.BootstrapHost(node.Host, bootstrapUser)
 		} else if bootstrapHost != "" {
-			// Bootstrap by host (ad-hoc)
 			return bs.BootstrapHost(bootstrapHost, bootstrapUser)
 		}
 
@@ -390,6 +355,114 @@ func init() {
 	bootstrapCmd.Flags().StringVar(&bootstrapUser, "user", "", "SSH user (defaults to current user)")
 	bootstrapCmd.Flags().StringVar(&bootstrapSSHKey, "ssh-key", "", "Path to SSH private key")
 	bootstrapCmd.Flags().BoolVar(&bootstrapDryRun, "dry-run", false, "Show installation script without executing")
+	bootstrapCmd.Flags().BoolVar(&bootstrapTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH (no key needed)")
+	bootstrapCmd.Flags().BoolVar(&bootstrapSecretsServer, "secrets-server", false, "Set up SecretSauce server on this node")
+}
+
+var (
+	cleanupHost         string
+	cleanupUser         string
+	cleanupSSHKey       string
+	cleanupTailscaleSSH bool
+	cleanupForce        bool
+	cleanupRemoveGo     bool
+	cleanupRemoveDocker bool
+)
+
+var cleanupCmd = &cobra.Command{
+	Use:   "cleanup [node-id]",
+	Short: "Remove Warpgate dependencies from a node",
+	Long: `Remove all Warpgate-installed dependencies from a node:
+- Stop and remove app and Traefik compose stacks
+- Remove /opt/warpgate/ directory
+- Remove warpgate Docker network and user
+
+Optional:
+  --remove-go      Also remove Go installation
+  --remove-docker  Also remove Docker (use with caution)
+
+Examples:
+  warpgate cleanup test-node --tailscale-ssh
+  warpgate cleanup --host 100.95.115.81 --tailscale-ssh --force
+  warpgate cleanup test-node --tailscale-ssh --remove-go --remove-docker`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if !cleanupTailscaleSSH {
+			if cleanupSSHKey == "" {
+				homeDir, err := os.UserHomeDir()
+				if err != nil {
+					return fmt.Errorf("failed to determine home directory: %w", err)
+				}
+				for _, key := range []string{
+					filepath.Join(homeDir, ".ssh", "id_ed25519"),
+					filepath.Join(homeDir, ".ssh", "id_rsa"),
+				} {
+					if _, err := os.Stat(key); err == nil {
+						cleanupSSHKey = key
+						break
+					}
+				}
+			}
+
+			if cleanupSSHKey == "" {
+				return fmt.Errorf("no SSH key found — use --ssh-key or --tailscale-ssh")
+			}
+		}
+
+		if !cleanupForce {
+			fmt.Println("This will remove Warpgate dependencies from the target node.")
+			if cleanupRemoveGo {
+				fmt.Println("  - Go installation will be removed")
+			}
+			if cleanupRemoveDocker {
+				fmt.Println("  - Docker will be removed (other services may depend on it)")
+			}
+			fmt.Print("\nContinue? [y/N] ")
+			var answer string
+			fmt.Scanln(&answer)
+			if answer != "y" && answer != "Y" {
+				fmt.Println("Aborted.")
+				return nil
+			}
+		}
+
+		var cl *cleanup.Cleaner
+		if repo != nil {
+			cl = cleanup.NewCleaner(repo.Cluster, cleanupSSHKey)
+		} else {
+			minimalCfg := &config.ClusterConfig{
+				Nodes: []config.NodeConfig{},
+			}
+			cl = cleanup.NewCleaner(minimalCfg, cleanupSSHKey)
+		}
+		cl.TailscaleSSH = cleanupTailscaleSSH
+		cl.RemoveGo = cleanupRemoveGo
+		cl.RemoveDocker = cleanupRemoveDocker
+
+		if len(args) > 0 {
+			if repo == nil {
+				return fmt.Errorf("config file required to cleanup by node ID — provide with -c flag")
+			}
+			node := repo.Cluster.GetNode(args[0])
+			if node == nil {
+				return fmt.Errorf("node '%s' not found in config", args[0])
+			}
+			return cl.CleanupHost(node.Host, cleanupUser)
+		} else if cleanupHost != "" {
+			return cl.CleanupHost(cleanupHost, cleanupUser)
+		}
+
+		return fmt.Errorf("specify node-id from config, or use --host for ad-hoc cleanup")
+	},
+}
+
+func init() {
+	cleanupCmd.Flags().StringVar(&cleanupHost, "host", "", "Target host IP or hostname (ad-hoc mode)")
+	cleanupCmd.Flags().StringVar(&cleanupUser, "user", "", "SSH user (defaults to current user)")
+	cleanupCmd.Flags().StringVar(&cleanupSSHKey, "ssh-key", "", "Path to SSH private key")
+	cleanupCmd.Flags().BoolVar(&cleanupTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH (no key needed)")
+	cleanupCmd.Flags().BoolVar(&cleanupForce, "force", false, "Skip confirmation prompt")
+	cleanupCmd.Flags().BoolVar(&cleanupRemoveGo, "remove-go", false, "Also remove Go installation")
+	cleanupCmd.Flags().BoolVar(&cleanupRemoveDocker, "remove-docker", false, "Also remove Docker")
 }
 
 // Execute runs the root cobra command.

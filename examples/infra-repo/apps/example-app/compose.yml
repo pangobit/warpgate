@@ -1,0 +1,14 @@
+services:
+  example-app:
+    image: ghcr.io/org/example-app
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      LOG_LEVEL: info
+      DATABASE_URL: ${DATABASE_URL}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

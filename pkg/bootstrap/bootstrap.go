@@ -4,36 +4,32 @@ package bootstrap
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/pangobit/warpgate/pkg/config"
-	"github.com/sirupsen/logrus"
+	"github.com/pangobit/warpgate/pkg/ssh"
+	"github.com/pangobit/warpgate/pkg/tui"
 )
 
 // Bootstrapper handles node bootstrap operations.
 type Bootstrapper struct {
 	// Config is the cluster configuration.
 	Config *config.ClusterConfig
-	// SSHKey is the path to the SSH private key.
+	// SSHKey is the path to the SSH private key (empty when using Tailscale SSH).
 	SSHKey string
+	// TailscaleSSH uses the ssh binary with Tailscale auth instead of key-based auth.
+	TailscaleSSH bool
 	// DryRun prints the install script without executing it.
 	DryRun bool
-	// Verbose enables verbose logging.
-	Verbose bool
-
-	log *logrus.Logger
+	// SecretsServer enables SecretSauce server setup on this node.
+	SecretsServer bool
 }
 
 // NewBootstrapper creates a new bootstrapper instance.
 func NewBootstrapper(cfg *config.ClusterConfig, sshKey string) *Bootstrapper {
-	log := logrus.New()
-	log.SetFormatter(&logrus.TextFormatter{
-		ForceColors: true,
-	})
-
 	return &Bootstrapper{
 		Config: cfg,
 		SSHKey: sshKey,
-		log:    log,
 	}
 }
 
@@ -58,23 +54,6 @@ func (b *Bootstrapper) BootstrapHost(host, user string) error {
 }
 
 func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error {
-	b.log.Infof("Bootstrapping node: %s (%s)", node.ID, node.Host)
-
-	if b.DryRun {
-		osInfo := &OSInfo{
-			Distro:  Ubuntu,
-			Version: "22.04",
-			Arch:    "amd64",
-		}
-		script := osInfo.InstallScript(b.Config.GoProxy)
-		b.log.Info("DRY RUN - Sample script that would be generated after OS detection:")
-		fmt.Println("=====================================")
-		fmt.Println(script)
-		fmt.Println("=====================================")
-		b.log.Info("Dry run complete - actual OS would be detected on the remote node")
-		return nil
-	}
-
 	if user == "" {
 		user = os.Getenv("USER")
 	}
@@ -82,44 +61,58 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 		user = "root"
 	}
 
-	client, err := NewSSHClient(node.Host, user, b.SSHKey)
-	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
+	stepCfg := &StepConfig{
+		GoProxy:        b.Config.GoProxy,
+		Networking:     &b.Config.Networking,
+		SecretsServer:  b.SecretsServer,
+		MasterPassword: os.Getenv("SS_MASTER_PASSWORD"),
 	}
 
-	b.log.Info("Connecting to node...")
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
+	if b.DryRun {
+		fmt.Printf("DRY RUN — would bootstrap %s (%s):\n\n", node.ID, node.Host)
+		for i, step := range BuildSteps(nil, stepCfg) {
+			fmt.Printf("  %d. %s\n", i+1, step.Name)
+		}
+		return nil
+	}
+
+	var client *ssh.Client
+	if b.TailscaleSSH {
+		client = ssh.NewTailscaleClient(node.Host, user)
+	} else {
+		var err error
+		client, err = ssh.NewClient(node.Host, user, b.SSHKey)
+		if err != nil {
+			return fmt.Errorf("failed to create SSH client: %w", err)
+		}
 	}
 	defer client.Close()
-	b.log.Info("Connected successfully")
 
-	b.log.Info("Detecting operating system...")
-	osInfo, err := client.DetectOS()
-	if err != nil {
-		return fmt.Errorf("failed to detect OS: %w", err)
+	fmt.Printf("Connecting to %s...\n", node.Host)
+	if err := client.Connect(); err != nil {
+		return err
 	}
 
-	b.log.Infof("Detected OS: %s %s (%s)", osInfo.Distro, osInfo.Version, osInfo.Arch)
+	title := fmt.Sprintf("Bootstrapping %s (%s)", node.ID, node.Host)
+	steps := BuildSteps(client, stepCfg)
 
-	if !osInfo.IsSupported() {
-		b.log.Warn(osInfo.GetUnsupportedMessage())
+	if err := tui.Run(title, steps); err != nil {
+		return err
 	}
 
-	script := osInfo.InstallScript(b.Config.GoProxy)
-
-	b.log.Info("Running installation script...")
-	b.log.Info("This may take a few minutes depending on network speed")
-
-	if err := client.RunScript(script); err != nil {
-		return fmt.Errorf("installation failed: %w", err)
+	if b.SecretsServer && stepCfg.generatedPassword != "" {
+		host := node.Host
+		if node.TailscaleIP != "" {
+			host = node.TailscaleIP
+		}
+		fmt.Println()
+		fmt.Println("  ┌──────────────────────────────────────────────────────────────┐")
+		fmt.Println("  │ SecretSauce master password (save this — shown only once):   │")
+		fmt.Printf("  │   %s%s│\n", stepCfg.generatedPassword, strings.Repeat(" ", 59-len(stepCfg.generatedPassword)))
+		fmt.Println("  │                                                              │")
+		fmt.Printf("  │ Web UI: http://%s:8090%s│\n", host, strings.Repeat(" ", 44-len(host)))
+		fmt.Println("  └──────────────────────────────────────────────────────────────┘")
 	}
-
-	b.log.Infof("Node %s bootstrapped successfully!", node.ID)
-	b.log.Info("Next steps:")
-	b.log.Info("1. Copy the SSH public key to your authorized_keys on other nodes")
-	b.log.Info("2. Test: warpgate status")
-	b.log.Info("3. Deploy: warpgate deploy <app>")
 
 	return nil
 }

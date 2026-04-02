@@ -8,220 +8,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestGenerateMultipleApps(t *testing.T) {
-	apps := []*config.AppConfig{
-		{
-			Name:    "auth",
-			Image:   "ghcr.io/org/auth",
-			Version: "v1.0.0",
-			Ports:   []config.PortConfig{{Container: 8085}},
-		},
-		{
-			Name:    "api",
-			Image:   "ghcr.io/org/api",
-			Version: "v2.0.0",
-			Ports:   []config.PortConfig{{Container: 3000}},
-		},
+func TestGenerateOverrideWithDomains(t *testing.T) {
+	app := &config.AppConfig{
+		Name:    "api",
+		Image:   "ghcr.io/org/api",
+		Version: "v2.0.0",
+		Domains: []string{"api.example.com"},
+		Port:    3000,
 	}
 
-	node := &config.NodeConfig{ID: "node-1", Host: "10.0.0.1"}
-	project := NewProject("test", apps, node, config.NetworkingConfig{})
-
-	output, err := project.Generate()
-	if err != nil {
-		t.Fatalf("Generate() error: %v", err)
-	}
-
-	var compose ComposeFile
-	if err := yaml.Unmarshal([]byte(output), &compose); err != nil {
-		t.Fatalf("failed to parse generated YAML: %v", err)
-	}
-
-	if len(compose.Services) != 2 {
-		t.Errorf("expected 2 services, got %d", len(compose.Services))
-	}
-
-	authSvc, ok := compose.Services["auth"]
-	if !ok {
-		t.Fatal("auth service not found")
-	}
-	if authSvc.Image != "ghcr.io/org/auth:v1.0.0" {
-		t.Errorf("unexpected auth image: %s", authSvc.Image)
-	}
-
-	apiSvc, ok := compose.Services["api"]
-	if !ok {
-		t.Fatal("api service not found")
-	}
-	if apiSvc.Image != "ghcr.io/org/api:v2.0.0" {
-		t.Errorf("unexpected api image: %s", apiSvc.Image)
-	}
-}
-
-func TestGenerateSidecarDependsOn(t *testing.T) {
-	apps := []*config.AppConfig{
-		{
-			Name:  "auth",
-			Image: "ghcr.io/org/auth",
-			Sidecars: []config.SidecarConfig{
-				{
-					Name:    "litestream",
-					Image:   "litestream/litestream:0.5.6",
-					Volumes: []string{"auth-data:/data"},
-					Env:     map[string]string{"URL": "s3://bucket/db"},
-				},
-			},
-		},
-	}
-
-	node := &config.NodeConfig{ID: "node-1", Host: "10.0.0.1"}
-	project := NewProject("test", apps, node, config.NetworkingConfig{})
-
-	output, err := project.Generate()
-	if err != nil {
-		t.Fatalf("Generate() error: %v", err)
-	}
-
-	var compose ComposeFile
-	if err := yaml.Unmarshal([]byte(output), &compose); err != nil {
-		t.Fatalf("failed to parse generated YAML: %v", err)
-	}
-
-	sidecar, ok := compose.Services["auth-litestream"]
-	if !ok {
-		t.Fatal("auth-litestream service not found")
-	}
-
-	if sidecar.Restart != "unless-stopped" {
-		t.Errorf("expected sidecar restart unless-stopped, got %s", sidecar.Restart)
-	}
-
-	dep, ok := sidecar.DependsOn["auth"]
-	if !ok {
-		t.Fatal("sidecar should depend on auth")
-	}
-	if dep.Condition != "service_started" {
-		t.Errorf("expected condition service_started, got %s", dep.Condition)
-	}
-
-	if sidecar.Environment["URL"] != "s3://bucket/db" {
-		t.Errorf("unexpected sidecar env: %v", sidecar.Environment)
-	}
-}
-
-func TestGenerateInitContainerDependsOn(t *testing.T) {
-	apps := []*config.AppConfig{
-		{
-			Name:  "auth",
-			Image: "ghcr.io/org/auth",
-			Init: []config.InitContainerConfig{
-				{
-					Name:    "restore",
-					Image:   "litestream/litestream:0.5.6",
-					Command: "litestream restore /data/auth.db",
-					Volumes: []string{"auth-data:/data"},
-				},
-			},
-		},
-	}
-
-	node := &config.NodeConfig{ID: "node-1", Host: "10.0.0.1"}
-	project := NewProject("test", apps, node, config.NetworkingConfig{})
-
-	output, err := project.Generate()
-	if err != nil {
-		t.Fatalf("Generate() error: %v", err)
-	}
-
-	var compose ComposeFile
-	if err := yaml.Unmarshal([]byte(output), &compose); err != nil {
-		t.Fatalf("failed to parse generated YAML: %v", err)
-	}
-
-	// Init container should exist with restart: no
-	initSvc, ok := compose.Services["auth-restore"]
-	if !ok {
-		t.Fatal("auth-restore init service not found")
-	}
-	if initSvc.Restart != "no" {
-		t.Errorf("expected init restart 'no', got %s", initSvc.Restart)
-	}
-	if initSvc.Command != "litestream restore /data/auth.db" {
-		t.Errorf("unexpected init command: %s", initSvc.Command)
-	}
-
-	// Main app should depend on init container
-	mainSvc, ok := compose.Services["auth"]
-	if !ok {
-		t.Fatal("auth service not found")
-	}
-	dep, ok := mainSvc.DependsOn["auth-restore"]
-	if !ok {
-		t.Fatal("auth should depend on auth-restore")
-	}
-	if dep.Condition != "service_completed_successfully" {
-		t.Errorf("expected condition service_completed_successfully, got %s", dep.Condition)
-	}
-}
-
-func TestGenerateVolumeDeduplication(t *testing.T) {
-	apps := []*config.AppConfig{
-		{
-			Name:  "auth",
-			Image: "ghcr.io/org/auth",
-			Volumes: []config.VolumeConfig{
-				{Name: "auth-data", Path: "/data"},
-			},
-			Sidecars: []config.SidecarConfig{
-				{
-					Name:    "litestream",
-					Image:   "litestream:latest",
-					Volumes: []string{"auth-data:/data"},
-				},
-			},
-			Init: []config.InitContainerConfig{
-				{
-					Name:    "restore",
-					Image:   "litestream:latest",
-					Volumes: []string{"auth-data:/data"},
-				},
-			},
-		},
-	}
-
-	node := &config.NodeConfig{ID: "node-1", Host: "10.0.0.1"}
-	project := NewProject("test", apps, node, config.NetworkingConfig{})
-
-	output, err := project.Generate()
-	if err != nil {
-		t.Fatalf("Generate() error: %v", err)
-	}
-
-	var compose ComposeFile
-	if err := yaml.Unmarshal([]byte(output), &compose); err != nil {
-		t.Fatalf("failed to parse generated YAML: %v", err)
-	}
-
-	if len(compose.Volumes) != 1 {
-		t.Errorf("expected 1 deduplicated volume, got %d", len(compose.Volumes))
-	}
-	if _, ok := compose.Volumes["auth-data"]; !ok {
-		t.Error("auth-data volume not found")
-	}
-}
-
-func TestGenerateTraefikLabels(t *testing.T) {
-	apps := []*config.AppConfig{
-		{
-			Name:    "api",
-			Image:   "ghcr.io/org/api",
-			Domains: []string{"api.example.com"},
-			Ports:   []config.PortConfig{{Container: 3000}},
-		},
-	}
-
-	node := &config.NodeConfig{ID: "node-1", Host: "10.0.0.1"}
-	networking := config.NetworkingConfig{
+	networking := &config.NetworkingConfig{
 		Traefik: config.TraefikConfig{
 			EntryPoints: []string{"web", "websecure"},
 			ACME: config.ACMEConfig{
@@ -231,156 +27,256 @@ func TestGenerateTraefikLabels(t *testing.T) {
 		},
 	}
 
-	project := NewProject("test", apps, node, networking)
-	output, err := project.Generate()
+	output, err := GenerateOverride(app, networking, nil)
 	if err != nil {
-		t.Fatalf("Generate() error: %v", err)
+		t.Fatalf("GenerateOverride() error: %v", err)
 	}
 
-	var compose ComposeFile
-	if err := yaml.Unmarshal([]byte(output), &compose); err != nil {
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
 		t.Fatalf("failed to parse generated YAML: %v", err)
 	}
 
-	svc := compose.Services["api"]
+	svc, ok := override.Services["api"]
+	if !ok {
+		t.Fatal("api service not found in override")
+	}
+
+	if svc.Image != "ghcr.io/org/api:v2.0.0" {
+		t.Errorf("expected image ghcr.io/org/api:v2.0.0, got %s", svc.Image)
+	}
+
 	if svc.Labels["traefik.enable"] != "true" {
 		t.Error("traefik.enable should be true")
 	}
 
-	routerRule := svc.Labels["traefik.http.routers.api-node-1.rule"]
+	routerRule := svc.Labels["traefik.http.routers.api.rule"]
 	if !strings.Contains(routerRule, "api.example.com") {
 		t.Errorf("expected router rule with domain, got %s", routerRule)
 	}
 
-	tlsLabel := svc.Labels["traefik.http.routers.api-node-1.tls"]
-	if tlsLabel != "true" {
+	if svc.Labels["traefik.http.routers.api.tls"] != "true" {
 		t.Error("TLS should be enabled when ACME is enabled")
 	}
+
+	if svc.Labels["traefik.http.routers.api.tls.certresolver"] != "letsencrypt" {
+		t.Error("certresolver should be letsencrypt")
+	}
+
+	portLabel := svc.Labels["traefik.http.services.api.loadbalancer.server.port"]
+	if portLabel != "3000" {
+		t.Errorf("expected port 3000, got %s", portLabel)
+	}
+
+	if len(svc.Networks) != 1 || svc.Networks[0] != "warpgate" {
+		t.Errorf("expected warpgate network, got %v", svc.Networks)
+	}
+
+	net, ok := override.Networks["warpgate"]
+	if !ok {
+		t.Error("warpgate network not found")
+	}
+	if !net.External {
+		t.Error("warpgate network should be external")
+	}
 }
 
-func TestGenerateNoDomainsNoTraefikLabels(t *testing.T) {
-	apps := []*config.AppConfig{
-		{
-			Name:  "worker",
-			Image: "ghcr.io/org/worker",
-		},
+func TestGenerateOverrideNoDomains(t *testing.T) {
+	app := &config.AppConfig{
+		Name:    "worker",
+		Image:   "ghcr.io/org/worker",
+		Version: "v1.0.0",
 	}
 
-	node := &config.NodeConfig{ID: "node-1", Host: "10.0.0.1"}
-	project := NewProject("test", apps, node, config.NetworkingConfig{})
+	networking := &config.NetworkingConfig{}
 
-	output, err := project.Generate()
+	output, err := GenerateOverride(app, networking, nil)
 	if err != nil {
-		t.Fatalf("Generate() error: %v", err)
+		t.Fatalf("GenerateOverride() error: %v", err)
 	}
 
-	var compose ComposeFile
-	if err := yaml.Unmarshal([]byte(output), &compose); err != nil {
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
 		t.Fatalf("failed to parse generated YAML: %v", err)
 	}
 
-	svc := compose.Services["worker"]
+	svc := override.Services["worker"]
 	if len(svc.Labels) != 0 {
-		t.Errorf("expected no labels for service without domains, got %v", svc.Labels)
+		t.Errorf("expected no labels for app without domains, got %v", svc.Labels)
+	}
+
+	if svc.Image != "ghcr.io/org/worker:v1.0.0" {
+		t.Errorf("expected image ghcr.io/org/worker:v1.0.0, got %s", svc.Image)
 	}
 }
 
-func TestGenerateDefaultVersion(t *testing.T) {
-	apps := []*config.AppConfig{
-		{Name: "app", Image: "ghcr.io/org/app"},
+func TestGenerateOverrideDefaultVersion(t *testing.T) {
+	app := &config.AppConfig{
+		Name:  "app",
+		Image: "ghcr.io/org/app",
 	}
 
-	node := &config.NodeConfig{ID: "node-1", Host: "10.0.0.1"}
-	project := NewProject("test", apps, node, config.NetworkingConfig{})
-
-	output, err := project.Generate()
+	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil)
 	if err != nil {
-		t.Fatalf("Generate() error: %v", err)
+		t.Fatalf("GenerateOverride() error: %v", err)
 	}
 
-	var compose ComposeFile
-	if err := yaml.Unmarshal([]byte(output), &compose); err != nil {
-		t.Fatalf("failed to parse generated YAML: %v", err)
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
+		t.Fatalf("failed to parse: %v", err)
 	}
 
-	if compose.Services["app"].Image != "ghcr.io/org/app:latest" {
-		t.Errorf("expected default tag latest, got %s", compose.Services["app"].Image)
+	if override.Services["app"].Image != "ghcr.io/org/app:latest" {
+		t.Errorf("expected default tag latest, got %s", override.Services["app"].Image)
 	}
 }
 
-func TestGenerateEmptyApps(t *testing.T) {
-	node := &config.NodeConfig{ID: "node-1", Host: "10.0.0.1"}
-	project := NewProject("test", []*config.AppConfig{}, node, config.NetworkingConfig{})
+func TestGenerateOverrideMultipleDomains(t *testing.T) {
+	app := &config.AppConfig{
+		Name:    "site",
+		Image:   "ghcr.io/org/site",
+		Version: "v1.0.0",
+		Domains: []string{"example.com", "www.example.com"},
+		Port:    80,
+	}
 
-	output, err := project.Generate()
+	networking := &config.NetworkingConfig{
+		Traefik: config.TraefikConfig{
+			EntryPoints: []string{"web", "websecure"},
+			ACME: config.ACMEConfig{
+				Enabled:  true,
+				Provider: "letsencrypt",
+			},
+		},
+	}
+
+	output, err := GenerateOverride(app, networking, nil)
 	if err != nil {
-		t.Fatalf("Generate() error: %v", err)
+		t.Fatalf("GenerateOverride() error: %v", err)
 	}
 
-	var compose ComposeFile
-	if err := yaml.Unmarshal([]byte(output), &compose); err != nil {
-		t.Fatalf("failed to parse generated YAML: %v", err)
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
+		t.Fatalf("failed to parse: %v", err)
 	}
 
-	if len(compose.Services) != 0 {
-		t.Errorf("expected 0 services for empty apps, got %d", len(compose.Services))
+	svc := override.Services["site"]
+
+	// First domain uses app name as router name
+	if !strings.Contains(svc.Labels["traefik.http.routers.site.rule"], "example.com") {
+		t.Error("first domain router rule missing")
 	}
 
-	if _, ok := compose.Networks["warpgate"]; !ok {
-		t.Error("warpgate network should always be present")
+	// Second domain uses suffix
+	if !strings.Contains(svc.Labels["traefik.http.routers.site-1.rule"], "www.example.com") {
+		t.Error("second domain router rule missing")
 	}
 }
 
-func TestGeneratePortFormats(t *testing.T) {
-	tests := []struct {
-		name     string
-		port     config.PortConfig
-		expected string
-	}{
-		{
-			name:     "container only",
-			port:     config.PortConfig{Container: 8080},
-			expected: "8080",
-		},
-		{
-			name:     "host and container",
-			port:     config.PortConfig{Container: 8080, Host: 9090},
-			expected: "9090:8080",
-		},
-		{
-			name:     "udp protocol",
-			port:     config.PortConfig{Container: 53, Protocol: "udp"},
-			expected: "53/udp",
-		},
-		{
-			name:     "tcp protocol omitted",
-			port:     config.PortConfig{Container: 80, Protocol: "tcp"},
-			expected: "80",
+func TestGenerateOverrideInternalLabels(t *testing.T) {
+	app := &config.AppConfig{
+		Name:     "auth",
+		Image:    "ghcr.io/org/auth",
+		Version:  "v1.0.0",
+		Internal: "auth.internal",
+		Port:     8085,
+	}
+
+	networking := &config.NetworkingConfig{}
+	internalHosts := []string{"auth.internal", "api.internal"}
+
+	output, err := GenerateOverride(app, networking, internalHosts)
+	if err != nil {
+		t.Fatalf("GenerateOverride() error: %v", err)
+	}
+
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	svc := override.Services["auth"]
+
+	routerRule := svc.Labels["traefik.http.routers.auth-internal.rule"]
+	if routerRule != "Host(`auth.internal`)" {
+		t.Errorf("expected internal router rule, got %q", routerRule)
+	}
+
+	ep := svc.Labels["traefik.http.routers.auth-internal.entrypoints"]
+	if ep != "internal" {
+		t.Errorf("expected internal entrypoint, got %q", ep)
+	}
+
+	if len(svc.ExtraHosts) != 2 {
+		t.Fatalf("expected 2 extra_hosts, got %d", len(svc.ExtraHosts))
+	}
+	if svc.ExtraHosts[0] != "auth.internal:host-gateway" {
+		t.Errorf("expected auth.internal:host-gateway, got %q", svc.ExtraHosts[0])
+	}
+	if svc.ExtraHosts[1] != "api.internal:host-gateway" {
+		t.Errorf("expected api.internal:host-gateway, got %q", svc.ExtraHosts[1])
+	}
+}
+
+func TestGenerateOverrideNoInternalNoExtraHosts(t *testing.T) {
+	app := &config.AppConfig{
+		Name:    "worker",
+		Image:   "ghcr.io/org/worker",
+		Version: "v1.0.0",
+	}
+
+	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil)
+	if err != nil {
+		t.Fatalf("GenerateOverride() error: %v", err)
+	}
+
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	if len(override.Services["worker"].ExtraHosts) != 0 {
+		t.Errorf("expected no extra_hosts, got %v", override.Services["worker"].ExtraHosts)
+	}
+}
+
+func TestGenerateTraefikCompose(t *testing.T) {
+	networking := &config.NetworkingConfig{
+		Traefik: config.TraefikConfig{
+			EntryPoints: []string{"web", "websecure"},
+			ACME: config.ACMEConfig{
+				Enabled:  true,
+				Email:    "admin@example.com",
+				Provider: "letsencrypt",
+				Staging:  true,
+			},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			apps := []*config.AppConfig{
-				{Name: "app", Image: "img", Ports: []config.PortConfig{tt.port}},
-			}
-			node := &config.NodeConfig{ID: "n", Host: "h"}
-			project := NewProject("test", apps, node, config.NetworkingConfig{})
+	output, err := GenerateTraefikCompose(networking)
+	if err != nil {
+		t.Fatalf("GenerateTraefikCompose() error: %v", err)
+	}
 
-			output, err := project.Generate()
-			if err != nil {
-				t.Fatalf("Generate() error: %v", err)
-			}
-
-			var compose ComposeFile
-			if err := yaml.Unmarshal([]byte(output), &compose); err != nil {
-				t.Fatalf("failed to parse: %v", err)
-			}
-
-			svc := compose.Services["app"]
-			if len(svc.Ports) != 1 || svc.Ports[0] != tt.expected {
-				t.Errorf("expected port %q, got %v", tt.expected, svc.Ports)
-			}
-		})
+	if !strings.Contains(output, "traefik:v3.4") {
+		t.Error("expected traefik:v3.4 image")
+	}
+	if !strings.Contains(output, "acme-staging") {
+		t.Error("expected staging ACME server")
+	}
+	if !strings.Contains(output, "80:80") {
+		t.Error("expected port 80 mapping")
+	}
+	if !strings.Contains(output, "443:443") {
+		t.Error("expected port 443 mapping")
+	}
+	if !strings.Contains(output, "8080:8080") {
+		t.Error("expected internal entrypoint port 8080")
+	}
+	if !strings.Contains(output, "providers.file.directory") {
+		t.Error("expected file provider config")
+	}
+	if !strings.Contains(output, "/opt/warpgate/traefik/dynamic") {
+		t.Error("expected dynamic config volume mount")
 	}
 }
