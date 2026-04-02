@@ -207,7 +207,9 @@ func installSecretSauce(client *ssh.Client, goProxy string) (string, error) {
 
 // setupSSHKeys creates SSH keys for the warpgate user.
 func setupSSHKeys(client *ssh.Client) (string, error) {
-	run(client, "sudo -u warpgate mkdir -p /home/warpgate/.ssh && sudo chmod 700 /home/warpgate/.ssh")
+	if err := run(client, "sudo -u warpgate mkdir -p /home/warpgate/.ssh && sudo chmod 700 /home/warpgate/.ssh"); err != nil {
+		return "", fmt.Errorf("failed to create .ssh directory: %w", err)
+	}
 
 	stdout, _, _ := client.RunCommand("test -f /home/warpgate/.ssh/authorized_keys && echo exists")
 	if !strings.Contains(stdout, "exists") {

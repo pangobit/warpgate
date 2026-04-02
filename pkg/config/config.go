@@ -128,7 +128,7 @@ func LoadClusterConfig(path string) (*ClusterConfig, error) {
 	}
 
 	if cfg.Version == "" {
-		cfg.Version = "2"
+		cfg.Version = "1"
 	}
 
 	return &cfg, nil
