@@ -165,12 +165,13 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 	ports = append(ports, "8080:8080")
 
 	type traefikService struct {
-		Image    string   `yaml:"image"`
-		Restart  string   `yaml:"restart"`
-		Command  []string `yaml:"command"`
-		Ports    []string `yaml:"ports"`
-		Volumes  []string `yaml:"volumes"`
-		Networks []string `yaml:"networks"`
+		Image       string            `yaml:"image"`
+		Restart     string            `yaml:"restart"`
+		Command     []string          `yaml:"command"`
+		Ports       []string          `yaml:"ports"`
+		Volumes     []string          `yaml:"volumes"`
+		Networks    []string          `yaml:"networks"`
+		Environment map[string]string `yaml:"environment,omitempty"`
 	}
 
 	type traefikCompose struct {
@@ -192,6 +193,9 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 					"/opt/warpgate/traefik/dynamic:/etc/traefik/dynamic:ro",
 				},
 				Networks: []string{"warpgate"},
+				Environment: map[string]string{
+					"DOCKER_API_VERSION": "1.45",
+				},
 			},
 		},
 		Networks: map[string]Network{
