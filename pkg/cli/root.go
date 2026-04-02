@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/pangobit/warpgate/pkg/bootstrap"
+	"github.com/pangobit/warpgate/pkg/cleanup"
 	"github.com/pangobit/warpgate/pkg/config"
 	"github.com/pangobit/warpgate/pkg/deploy"
 	"github.com/spf13/cobra"
@@ -57,6 +58,7 @@ func init() {
 	rootCmd.AddCommand(rollbackCmd)
 	rootCmd.AddCommand(execCmd)
 	rootCmd.AddCommand(bootstrapCmd)
+	rootCmd.AddCommand(cleanupCmd)
 }
 
 var initCmd = &cobra.Command{
@@ -95,6 +97,9 @@ networking:
 
 registry:
   server: ghcr.io
+
+secrets:
+  server: http://100.x.x.x:8090    # SecretSauce server URL on tailnet
 `, projectName)
 
 		if err := os.WriteFile("cluster.yml", []byte(clusterConfig), 0644); err != nil {
@@ -256,29 +261,37 @@ var execCmd = &cobra.Command{
 
 // Bootstrap flags
 var (
-	bootstrapHost         string
-	bootstrapUser         string
-	bootstrapSSHKey       string
-	bootstrapDryRun       bool
-	bootstrapTailscaleSSH bool
+	bootstrapHost          string
+	bootstrapUser          string
+	bootstrapSSHKey        string
+	bootstrapDryRun        bool
+	bootstrapTailscaleSSH  bool
+	bootstrapSecretsServer bool
 )
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap [node-id]",
 	Short: "Bootstrap a node with Warpgate dependencies",
 	Long: `Bootstrap a node by installing required dependencies:
-- Go
 - Docker and Docker Compose plugin
-- SecretSauce (if go_proxy configured)
+- Go and SecretSauce (if go_proxy configured)
 - Traefik reverse proxy
 - warpgate user with proper permissions
+- SecretSauce server as systemd service (with --secrets-server)
 
 The node must have Tailscale and SSH already configured.
 
+When --secrets-server is used, the vault is automatically initialized:
+- If SS_MASTER_PASSWORD is set, that password is used
+- Otherwise, a strong password is auto-generated and displayed once
+- The master key file is created and the service is started
+- Manage secrets via the SecretSauce web UI at http://<node-ip>:8090
+
 Examples:
   warpgate bootstrap test-node --tailscale-ssh
+  warpgate bootstrap node-1 --secrets-server --tailscale-ssh
+  SS_MASTER_PASSWORD=secret warpgate bootstrap node-1 --secrets-server --tailscale-ssh
   warpgate bootstrap --host 100.95.115.81 --tailscale-ssh
-  warpgate bootstrap node-1 --ssh-key ~/.ssh/id_rsa
   warpgate bootstrap node-1 --dry-run`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if !bootstrapTailscaleSSH {
@@ -318,6 +331,7 @@ Examples:
 		}
 		bs.DryRun = bootstrapDryRun
 		bs.TailscaleSSH = bootstrapTailscaleSSH
+		bs.SecretsServer = bootstrapSecretsServer
 
 		if len(args) > 0 {
 			if repo == nil {
@@ -342,6 +356,113 @@ func init() {
 	bootstrapCmd.Flags().StringVar(&bootstrapSSHKey, "ssh-key", "", "Path to SSH private key")
 	bootstrapCmd.Flags().BoolVar(&bootstrapDryRun, "dry-run", false, "Show installation script without executing")
 	bootstrapCmd.Flags().BoolVar(&bootstrapTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH (no key needed)")
+	bootstrapCmd.Flags().BoolVar(&bootstrapSecretsServer, "secrets-server", false, "Set up SecretSauce server on this node")
+}
+
+var (
+	cleanupHost         string
+	cleanupUser         string
+	cleanupSSHKey       string
+	cleanupTailscaleSSH bool
+	cleanupForce        bool
+	cleanupRemoveGo     bool
+	cleanupRemoveDocker bool
+)
+
+var cleanupCmd = &cobra.Command{
+	Use:   "cleanup [node-id]",
+	Short: "Remove Warpgate dependencies from a node",
+	Long: `Remove all Warpgate-installed dependencies from a node:
+- Stop and remove app and Traefik compose stacks
+- Remove /opt/warpgate/ directory
+- Remove warpgate Docker network and user
+
+Optional:
+  --remove-go      Also remove Go installation
+  --remove-docker  Also remove Docker (use with caution)
+
+Examples:
+  warpgate cleanup test-node --tailscale-ssh
+  warpgate cleanup --host 100.95.115.81 --tailscale-ssh --force
+  warpgate cleanup test-node --tailscale-ssh --remove-go --remove-docker`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if !cleanupTailscaleSSH {
+			if cleanupSSHKey == "" {
+				homeDir, err := os.UserHomeDir()
+				if err != nil {
+					return fmt.Errorf("failed to determine home directory: %w", err)
+				}
+				for _, key := range []string{
+					filepath.Join(homeDir, ".ssh", "id_ed25519"),
+					filepath.Join(homeDir, ".ssh", "id_rsa"),
+				} {
+					if _, err := os.Stat(key); err == nil {
+						cleanupSSHKey = key
+						break
+					}
+				}
+			}
+
+			if cleanupSSHKey == "" {
+				return fmt.Errorf("no SSH key found — use --ssh-key or --tailscale-ssh")
+			}
+		}
+
+		if !cleanupForce {
+			fmt.Println("This will remove Warpgate dependencies from the target node.")
+			if cleanupRemoveGo {
+				fmt.Println("  - Go installation will be removed")
+			}
+			if cleanupRemoveDocker {
+				fmt.Println("  - Docker will be removed (other services may depend on it)")
+			}
+			fmt.Print("\nContinue? [y/N] ")
+			var answer string
+			fmt.Scanln(&answer)
+			if answer != "y" && answer != "Y" {
+				fmt.Println("Aborted.")
+				return nil
+			}
+		}
+
+		var cl *cleanup.Cleaner
+		if repo != nil {
+			cl = cleanup.NewCleaner(repo.Cluster, cleanupSSHKey)
+		} else {
+			minimalCfg := &config.ClusterConfig{
+				Nodes: []config.NodeConfig{},
+			}
+			cl = cleanup.NewCleaner(minimalCfg, cleanupSSHKey)
+		}
+		cl.TailscaleSSH = cleanupTailscaleSSH
+		cl.RemoveGo = cleanupRemoveGo
+		cl.RemoveDocker = cleanupRemoveDocker
+
+		if len(args) > 0 {
+			if repo == nil {
+				return fmt.Errorf("config file required to cleanup by node ID — provide with -c flag")
+			}
+			node := repo.Cluster.GetNode(args[0])
+			if node == nil {
+				return fmt.Errorf("node '%s' not found in config", args[0])
+			}
+			return cl.CleanupHost(node.Host, cleanupUser)
+		} else if cleanupHost != "" {
+			return cl.CleanupHost(cleanupHost, cleanupUser)
+		}
+
+		return fmt.Errorf("specify node-id from config, or use --host for ad-hoc cleanup")
+	},
+}
+
+func init() {
+	cleanupCmd.Flags().StringVar(&cleanupHost, "host", "", "Target host IP or hostname (ad-hoc mode)")
+	cleanupCmd.Flags().StringVar(&cleanupUser, "user", "", "SSH user (defaults to current user)")
+	cleanupCmd.Flags().StringVar(&cleanupSSHKey, "ssh-key", "", "Path to SSH private key")
+	cleanupCmd.Flags().BoolVar(&cleanupTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH (no key needed)")
+	cleanupCmd.Flags().BoolVar(&cleanupForce, "force", false, "Skip confirmation prompt")
+	cleanupCmd.Flags().BoolVar(&cleanupRemoveGo, "remove-go", false, "Also remove Go installation")
+	cleanupCmd.Flags().BoolVar(&cleanupRemoveDocker, "remove-docker", false, "Also remove Docker")
 }
 
 // Execute runs the root cobra command.

@@ -21,6 +21,8 @@ type ClusterConfig struct {
 	Networking NetworkingConfig `yaml:"networking"`
 	// Registry holds Docker registry credentials.
 	Registry RegistryConfig `yaml:"registry"`
+	// Secrets holds secrets management settings.
+	Secrets SecretsConfig `yaml:"secrets,omitempty"`
 	// GoProxy is a private Go module proxy URL for installing private packages.
 	GoProxy string `yaml:"go_proxy,omitempty"`
 }
@@ -75,6 +77,12 @@ type ACMEConfig struct {
 	Staging bool `yaml:"staging,omitempty"`
 }
 
+// SecretsConfig holds secrets management settings.
+type SecretsConfig struct {
+	// Server is the SecretSauce server URL on the tailnet.
+	Server string `yaml:"server,omitempty"`
+}
+
 // RegistryConfig holds Docker registry credentials.
 type RegistryConfig struct {
 	// Server is the registry hostname (e.g. "ghcr.io").
@@ -97,6 +105,8 @@ type AppConfig struct {
 	Targets []string `yaml:"targets,omitempty"`
 	// Domains is the list of domain names for Traefik routing.
 	Domains []string `yaml:"domains,omitempty"`
+	// Internal is the hostname used for service-to-service routing via Traefik.
+	Internal string `yaml:"internal,omitempty"`
 	// SecretsPrefix is the secretsauce prefix for secret injection.
 	SecretsPrefix string `yaml:"secrets_prefix,omitempty"`
 	// Port is the container port Traefik routes to.

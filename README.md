@@ -6,18 +6,55 @@ Warpgate is a lightweight app deployment tool written in Go. It replaces our k3s
 
 - **Runtime**: Docker Compose (user-written, not generated)
 - **Reverse Proxy**: Traefik with automatic HTTPS via Let's Encrypt
-- **Networking**: Tailscale mesh (node-to-node, admin-to-node, CI-to-node)
-- **Secrets**: [SecretSauce](https://github.com/pangobit/secretsauce) — injects secrets as env vars at runtime
+- **Networking**: Tailscale mesh (direct WireGuard peering between nodes)
+- **Secrets**: [SecretSauce](https://github.com/pangobit/secretsauce) — secrets server on the tailnet, fetched at deploy time
 - **DNS**: Cloudflare
 - **Storage**: Named Docker volumes; SQLite apps replicate via Litestream
+- **TUI**: [Charmbracelet](https://charm.sh/) v2 (bubbletea, bubbles, lipgloss)
+
+## Getting Started
+
+**Prerequisites**: A Linode (or any Linux VM) with [Tailscale](https://tailscale.com/) installed and SSH enabled.
+
+```bash
+# 1. Install warpgate
+go install github.com/pangobit/warpgate/cmd/warpgate@latest
+
+# 2. Scaffold a new project
+mkdir my-infra && cd my-infra
+warpgate init my-project
+
+# 3. Edit cluster.yml with your node's Tailscale IP
+#    Edit apps/example-app/app.yml with your image
+#    Edit apps/example-app/compose.yml with your service config
+
+# 4. Bootstrap the node (installs Docker, Traefik, etc.)
+warpgate bootstrap node-1 --tailscale-ssh
+
+# 5. Bootstrap the secrets server (auto-generates master password)
+warpgate bootstrap node-1 --secrets-server --tailscale-ssh
+#    → Save the displayed password, manage secrets at http://<node-ip>:8090
+
+# 6. Deploy your app
+warpgate deploy example-app
+
+# 7. Deploy a new version
+warpgate deploy example-app v2.0.0
+
+# 8. Something wrong? Roll back
+warpgate rollback example-app
+```
+
+That's it. Warpgate handles zero-downtime blue/green swaps, health check gating, and Traefik routing automatically.
 
 ## How It Works
 
 Warpgate is an orchestrator, not a config generator. You write standard Docker Compose files for your apps. Warpgate handles:
 
-1. **Bootstrap** — SSH to a node, install Docker, Traefik, SecretSauce
-2. **Deploy** — Upload your compose file, inject Traefik labels via a thin override, pull and start containers with secrets
+1. **Bootstrap** — SSH to a node, install Docker, Traefik, optionally SecretSauce server (with TUI progress)
+2. **Deploy** — Zero-downtime blue/green deploy with health check gating, secrets fetched from SecretSauce API
 3. **Rollback** — Re-deploy the previous version
+4. **Cleanup** — Remove all Warpgate dependencies from a node
 
 ### Infra Repo Layout
 
@@ -46,6 +83,9 @@ nodes:
   - id: node-1
     host: 10.0.0.1
     tailscale_ip: 100.x.x.x
+  - id: node-2
+    host: 10.0.0.2
+    tailscale_ip: 100.x.x.y
 
 networking:
   tailnet: my-tailnet.ts.net
@@ -64,6 +104,9 @@ registry:
   username: ${REGISTRY_USERNAME}
   password: ${REGISTRY_TOKEN}
 
+secrets:
+  server: http://100.x.x.x:8090  # SecretSauce server URL on tailnet
+
 go_proxy: http://100.x.x.x:3000  # Private Go proxy for SecretSauce install
 ```
 
@@ -72,13 +115,14 @@ go_proxy: http://100.x.x.x:3000  # Private Go proxy for SecretSauce install
 ```yaml
 image: ghcr.io/org/auth
 version: v3.1.0
-targets: [node-1]           # Which nodes to deploy to (omit for all)
-domains: [auth.example.com] # Traefik routing (omit if no ingress needed)
-secrets_prefix: auth/prod   # SecretSauce prefix (omit if no secrets)
-port: 8085                  # Container port for Traefik load balancer
+targets: [node-1, node-2]     # Which nodes to deploy to (omit for all)
+domains: [auth.example.com]   # External Traefik routing (omit if no ingress)
+internal: auth.internal        # Internal service-to-service hostname (omit if not needed)
+secrets_prefix: auth/prod      # SecretSauce key prefix (omit if no secrets)
+port: 8085                     # Container port for Traefik
 ```
 
-**`apps/<name>/compose.yml`** is a standard Docker Compose file you write and maintain. Warpgate doesn't generate or modify it — it uploads it as-is. Secrets referenced as `${VAR}` are injected by SecretSauce at runtime:
+**`apps/<name>/compose.yml`** is a standard Docker Compose file you write and maintain. Warpgate uploads it as-is. Secrets referenced as `${VAR}` are fetched from the SecretSauce server at deploy time and injected via a `.env` file:
 
 ```yaml
 services:
@@ -88,7 +132,7 @@ services:
     ports: ["8085:8085"]
     environment:
       DB_PATH: "/data/auth.db"
-      SESSION_AUTH_KEY: ${SESSION_AUTH_KEY}  # Injected by SecretSauce
+      SESSION_AUTH_KEY: ${SESSION_AUTH_KEY}  # Fetched from SecretSauce server
     volumes: [auth-data:/data]
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8085"]
@@ -111,11 +155,13 @@ volumes:
 ```bash
 # Setup
 warpgate init my-project                    # Scaffold cluster.yml + apps/ structure
-warpgate bootstrap node-1 --tailscale-ssh   # Install Docker, Traefik, SecretSauce on a node
+warpgate bootstrap node-1 --tailscale-ssh   # Install Docker, Traefik (TUI)
+warpgate bootstrap node-1 --secrets-server --tailscale-ssh  # Also set up SecretSauce server
 warpgate bootstrap --host 100.x.x.x --tailscale-ssh  # Ad-hoc bootstrap by IP
+warpgate bootstrap node-1 --dry-run         # Preview bootstrap script
 
 # Deploy
-warpgate deploy auth                        # Deploy app at version from app.yml
+warpgate deploy auth                        # Deploy at version from app.yml
 warpgate deploy auth v3.2.0                 # Deploy specific version
 warpgate deploy auth --dry-run              # Preview what would happen
 warpgate rollback auth                      # Re-deploy previous version
@@ -124,46 +170,95 @@ warpgate rollback auth                      # Re-deploy previous version
 warpgate status                             # Show cluster, nodes, and all apps
 warpgate logs auth                          # Stream app logs (WIP)
 warpgate exec auth -- sh                    # Exec into container (WIP)
+
+# Teardown
+warpgate cleanup node-1 --tailscale-ssh     # Remove Warpgate from a node
+warpgate cleanup node-1 --force             # Skip confirmation
+warpgate cleanup node-1 --remove-go --remove-docker  # Also remove Go and Docker
 ```
 
-### Deploy Flow
+## Zero-Downtime Deploys
 
-`warpgate deploy auth v3.2.0` does the following on each target node:
+Warpgate uses blue/green deploys via Docker Compose project naming. Each deploy:
 
-1. Uploads `apps/auth/compose.yml` to `/opt/warpgate/apps/auth/compose.yml`
-2. Generates a thin `docker-compose.override.yml` with Traefik labels and the image tag
-3. Runs `docker compose pull`
-4. Runs `secretsauce run auth/prod -- docker compose -f compose.yml -f docker-compose.override.yml up -d`
-5. Saves deploy state (`state.json`) for rollback
+1. Uploads compose + override to the node; if the app has a `secrets_prefix`, fetches secrets from the SecretSauce API and uploads a `.env` file
+2. Starts the new version as a separate compose project (e.g., `auth-green`)
+3. Both old and new containers run simultaneously with the same Traefik labels — Traefik load-balances between them
+4. Polls `docker inspect` for the new container's health check status
+5. Once healthy, stops the old compose project (e.g., `auth-blue`), removes `.env` file
+6. Saves deploy state for rollback
 
-The generated override is the **only** thing Warpgate creates — it looks like:
+**Multi-node rolling deploys**: nodes are updated sequentially. Node-1 must pass health checks before node-2 starts. If any node fails, the rollout stops — already-deployed nodes stay on the new version, remaining nodes stay on the old version.
+
+**Health check gating**: if the compose file defines a `healthcheck`, warpgate waits up to 2 minutes for the container to report healthy. If unhealthy, the new version is torn down and the old version keeps running. Apps without a healthcheck deploy immediately.
+
+## Internal Service Routing
+
+When apps need to communicate across nodes (e.g., `brighter-platform` on node-1 talks to `auth` on node-2), Warpgate provides internal load-balanced routing via Traefik and Tailscale.
+
+Add `internal` to an app's `app.yml`:
 
 ```yaml
-services:
-  auth:
-    image: ghcr.io/org/auth:v3.2.0
-    labels:
-      traefik.enable: "true"
-      traefik.http.routers.auth.rule: "Host(`auth.example.com`)"
-      traefik.http.routers.auth.entrypoints: "web,websecure"
-      traefik.http.routers.auth.tls.certresolver: "letsencrypt"
-      traefik.http.services.auth.loadbalancer.server.port: "8085"
-    networks: [warpgate]
-networks:
-  warpgate:
-    external: true
+# apps/auth/app.yml
+internal: auth.internal
+```
+
+Other apps reference it by the internal hostname:
+
+```yaml
+# apps/brighter-platform/compose.yml
+environment:
+  AUTH_SERVICE_HOST: "auth.internal:8080"
+```
+
+**How it works**:
+
+- Traefik runs an `internal` entrypoint on port 8080 alongside the public `web`/`websecure` entrypoints
+- The compose override adds `extra_hosts` entries so containers can resolve internal hostnames to the Docker host (where Traefik listens)
+- At deploy time, warpgate writes a Traefik dynamic config file to every node listing all Tailscale IPs running the service as backends
+- Traefik's file provider auto-reloads — cross-node traffic flows over direct WireGuard tunnels (sub-millisecond latency in the same data center)
+
+```
+brighter-platform (node-1)
+  → auth.internal:8080
+  → local Traefik (internal entrypoint)
+  → load-balances to:
+      auth on node-1 (100.x.x.1:8085, local)
+      auth on node-2 (100.x.x.2:8085, via Tailscale)
 ```
 
 ## Bootstrap
 
-Bootstrap installs dependencies on target nodes via Tailscale SSH:
+Bootstrap installs dependencies on target nodes via Tailscale SSH, with a step-by-step TUI showing progress:
 
+```
+  Connecting to 100.95.115.81...
+
+  Bootstrapping test-node (100.95.115.81)
+
+  ✓ Detecting OS (Ubuntu 22.04, amd64)
+  ✓ Creating warpgate user
+  ✓ Installing Go
+  ⠋ Installing Docker
+    Configuring docker group
+    Installing SecretSauce
+    Setting up SSH keys
+    Setting up Warpgate + Traefik
+```
+
+**What gets installed**:
 - Docker and Docker Compose plugin
-- Go (for SecretSauce installation)
-- [SecretSauce](https://github.com/pangobit/secretsauce) via private Go proxy on tailnet
-- Traefik reverse proxy (as a Docker Compose service on the `warpgate` network)
+- Go (for SecretSauce, if `go_proxy` configured)
+- [SecretSauce](https://github.com/pangobit/secretsauce) binary (if `go_proxy` configured)
+- Traefik reverse proxy with external (80/443) and internal (8080) entrypoints
 - `warpgate` system user with docker group access
 - SSH keys for node-to-node access
+
+**With `--secrets-server`** (for the node that runs the SecretSauce server):
+- SecretSauce configured as a systemd service with auto-unseal via master key file
+- Vault automatically initialized with master password (`SS_MASTER_PASSWORD` env or auto-generated)
+- Listens on port 8090 (HTTP) and 8091 (gRPC) with web UI enabled
+- If password is auto-generated, it is displayed once after bootstrap — save it
 
 **Prerequisites**: Tailscale installed with SSH enabled, passwordless sudo.
 
@@ -176,21 +271,59 @@ After bootstrap and deploys, each node has:
 ```
 /opt/warpgate/
 ├── traefik/
-│   └── compose.yml              # Traefik service (started at bootstrap)
+│   ├── compose.yml              # Traefik service (started at bootstrap)
+│   └── dynamic/                 # Auto-reloaded by Traefik file provider
+│       ├── auth.yml             # Internal route: auth.internal → [node IPs]
+│       └── api.yml              # Internal route: api.internal → [node IPs]
+├── secretsauce/                 # Only on --secrets-server nodes
+│   ├── vault.db                 # Encrypted secrets database
+│   └── master.key               # Master key for auto-unseal (0600)
 ├── apps/
 │   ├── auth/
 │   │   ├── compose.yml              # Uploaded from infra repo
-│   │   ├── docker-compose.override.yml  # Generated by warpgate
-│   │   └── state.json               # Deploy state (version, previous version)
+│   │   ├── docker-compose.override.yml  # Generated (Traefik labels + image tag)
+│   │   └── state.json               # Deploy state (version, slot, previous version)
 │   └── ...
 ```
 
+## Secrets Management
+
+Warpgate uses [SecretSauce](https://github.com/pangobit/secretsauce) as a secrets server running on the tailnet. Secrets are managed centrally and fetched at deploy time — no secrets database or encryption keys on target nodes.
+
+### How it works
+
+1. **SecretSauce server** runs on one node, auto-unsealed via a master key file
+2. Secrets are managed via the SecretSauce web UI, CLI, or API
+3. At deploy time, Warpgate fetches secrets matching the app's `secrets_prefix` from the API
+4. Secrets are uploaded as a `.env` file to the node (0600 permissions)
+5. `docker compose --env-file .env up -d` resolves `${VAR}` references in compose.yml
+6. The `.env` file is deleted after the health check passes
+
+### Setup
+
+1. Add the server URL to `cluster.yml`:
+   ```yaml
+   secrets:
+     server: http://100.x.x.x:8090
+   ```
+
+2. Bootstrap the secrets server node (vault is initialized automatically):
+   ```bash
+   warpgate bootstrap secrets-node --secrets-server --tailscale-ssh
+   ```
+   If `SS_MASTER_PASSWORD` is set, that password is used. Otherwise a strong password is auto-generated and displayed once — save it.
+
+3. Open the SecretSauce web UI at `http://<node-ip>:8090`, log in, and add secrets.
+
+4. Deploy as usual — Warpgate fetches secrets from the API and injects them automatically.
+
 ## Networking Model
 
-- **Same-node**: Services resolve each other by service name via Docker DNS (e.g. `auth:8085`)
-- **Cross-node**: Services communicate via Traefik domains (e.g. `https://auth.example.com`)
-- **Traefik** runs per-node, discovers containers via Docker labels on the shared `warpgate` network
-- All nodes and some services are on the Tailscale tailnet
+- **External traffic**: Traefik routes public domains (`auth.example.com`) to local containers via Docker labels
+- **Internal traffic**: Traefik routes internal hostnames (`auth.internal`) to containers across all nodes via Tailscale IPs
+- **Same-node**: Routed via Docker network (no Tailscale overhead)
+- **Cross-node**: Routed via Tailscale WireGuard tunnels (direct peer-to-peer, no relay)
+- **Load balancing**: Traefik health-checks backends and distributes traffic across healthy instances
 
 ## Project Structure
 
@@ -202,10 +335,13 @@ warpgate/
 ├── pkg/
 │   ├── cli/            # Cobra commands
 │   ├── config/         # Config types, loading, app discovery
-│   ├── compose/        # Compose override generator (Traefik labels)
-│   ├── deploy/         # Deploy orchestration, state management
+│   ├── compose/        # Compose override generator (Traefik labels, internal routing)
+│   ├── deploy/         # Blue/green deploy, health checks, internal route configs
+│   ├── secrets/        # SecretSauce API client, .env file generation
 │   ├── ssh/            # SSH client (key-based and Tailscale)
-│   ├── bootstrap/      # Node provisioning (OS detection, install scripts)
+│   ├── bootstrap/      # Node provisioning (OS detection, install scripts, steps)
+│   ├── cleanup/        # Node cleanup (reverse bootstrap)
+│   ├── tui/            # Charmbracelet v2 step-runner TUI
 │   └── daemon/         # Daemon (future)
 └── examples/
     └── infra-repo/     # Example infrastructure repo layout
@@ -223,10 +359,14 @@ go vet ./...               # Vet
 
 Core deployment flow is implemented. Remaining work:
 
-- [ ] Rolling update strategy (blue/green via Traefik)
+- [x] Zero-downtime blue/green deploys
+- [x] Health check gating
+- [x] Rolling multi-node deploys
+- [x] Internal service-to-service routing
+- [x] TUI for bootstrap and cleanup
 - [ ] Image watcher / CI push trigger
 - [ ] Log streaming and exec commands
-- [ ] TUI/Web dashboard
+- [ ] Web dashboard
 - [ ] Backup/restore for volumes
 
 ## Credits

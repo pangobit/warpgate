@@ -116,6 +116,17 @@ func (r *RepoConfig) GetAppsForNode(nodeID string) []*AppConfig {
 	return result
 }
 
+// InternalHosts returns all internal hostnames configured across all apps.
+func (r *RepoConfig) InternalHosts() []string {
+	var hosts []string
+	for _, app := range r.Apps {
+		if app.Internal != "" {
+			hosts = append(hosts, app.Internal)
+		}
+	}
+	return hosts
+}
+
 // AppDir returns the absolute path to an app's directory in the repo.
 func (r *RepoConfig) AppDir(appName string) string {
 	return filepath.Join(r.Root, "apps", appName)

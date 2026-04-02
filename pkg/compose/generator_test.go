@@ -27,7 +27,7 @@ func TestGenerateOverrideWithDomains(t *testing.T) {
 		},
 	}
 
-	output, err := GenerateOverride(app, networking)
+	output, err := GenerateOverride(app, networking, nil)
 	if err != nil {
 		t.Fatalf("GenerateOverride() error: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestGenerateOverrideNoDomains(t *testing.T) {
 
 	networking := &config.NetworkingConfig{}
 
-	output, err := GenerateOverride(app, networking)
+	output, err := GenerateOverride(app, networking, nil)
 	if err != nil {
 		t.Fatalf("GenerateOverride() error: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestGenerateOverrideDefaultVersion(t *testing.T) {
 		Image: "ghcr.io/org/app",
 	}
 
-	output, err := GenerateOverride(app, &config.NetworkingConfig{})
+	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil)
 	if err != nil {
 		t.Fatalf("GenerateOverride() error: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestGenerateOverrideMultipleDomains(t *testing.T) {
 		},
 	}
 
-	output, err := GenerateOverride(app, networking)
+	output, err := GenerateOverride(app, networking, nil)
 	if err != nil {
 		t.Fatalf("GenerateOverride() error: %v", err)
 	}
@@ -170,6 +170,73 @@ func TestGenerateOverrideMultipleDomains(t *testing.T) {
 	// Second domain uses suffix
 	if !strings.Contains(svc.Labels["traefik.http.routers.site-1.rule"], "www.example.com") {
 		t.Error("second domain router rule missing")
+	}
+}
+
+func TestGenerateOverrideInternalLabels(t *testing.T) {
+	app := &config.AppConfig{
+		Name:     "auth",
+		Image:    "ghcr.io/org/auth",
+		Version:  "v1.0.0",
+		Internal: "auth.internal",
+		Port:     8085,
+	}
+
+	networking := &config.NetworkingConfig{}
+	internalHosts := []string{"auth.internal", "api.internal"}
+
+	output, err := GenerateOverride(app, networking, internalHosts)
+	if err != nil {
+		t.Fatalf("GenerateOverride() error: %v", err)
+	}
+
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	svc := override.Services["auth"]
+
+	routerRule := svc.Labels["traefik.http.routers.auth-internal.rule"]
+	if routerRule != "Host(`auth.internal`)" {
+		t.Errorf("expected internal router rule, got %q", routerRule)
+	}
+
+	ep := svc.Labels["traefik.http.routers.auth-internal.entrypoints"]
+	if ep != "internal" {
+		t.Errorf("expected internal entrypoint, got %q", ep)
+	}
+
+	if len(svc.ExtraHosts) != 2 {
+		t.Fatalf("expected 2 extra_hosts, got %d", len(svc.ExtraHosts))
+	}
+	if svc.ExtraHosts[0] != "auth.internal:host-gateway" {
+		t.Errorf("expected auth.internal:host-gateway, got %q", svc.ExtraHosts[0])
+	}
+	if svc.ExtraHosts[1] != "api.internal:host-gateway" {
+		t.Errorf("expected api.internal:host-gateway, got %q", svc.ExtraHosts[1])
+	}
+}
+
+func TestGenerateOverrideNoInternalNoExtraHosts(t *testing.T) {
+	app := &config.AppConfig{
+		Name:    "worker",
+		Image:   "ghcr.io/org/worker",
+		Version: "v1.0.0",
+	}
+
+	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil)
+	if err != nil {
+		t.Fatalf("GenerateOverride() error: %v", err)
+	}
+
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	if len(override.Services["worker"].ExtraHosts) != 0 {
+		t.Errorf("expected no extra_hosts, got %v", override.Services["worker"].ExtraHosts)
 	}
 }
 
@@ -202,5 +269,14 @@ func TestGenerateTraefikCompose(t *testing.T) {
 	}
 	if !strings.Contains(output, "443:443") {
 		t.Error("expected port 443 mapping")
+	}
+	if !strings.Contains(output, "8080:8080") {
+		t.Error("expected internal entrypoint port 8080")
+	}
+	if !strings.Contains(output, "providers.file.directory") {
+		t.Error("expected file provider config")
+	}
+	if !strings.Contains(output, "/opt/warpgate/traefik/dynamic") {
+		t.Error("expected dynamic config volume mount")
 	}
 }

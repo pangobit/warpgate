@@ -9,6 +9,7 @@ import (
 
 	"github.com/pangobit/warpgate/pkg/compose"
 	"github.com/pangobit/warpgate/pkg/config"
+	"github.com/pangobit/warpgate/pkg/secrets"
 	"github.com/pangobit/warpgate/pkg/ssh"
 	"github.com/sirupsen/logrus"
 )
@@ -43,7 +44,7 @@ func NewDeployer(repo *config.RepoConfig, sshKey string) *Deployer {
 	}
 }
 
-// Deploy deploys an app to its target nodes.
+// Deploy deploys an app to its target nodes with zero-downtime blue/green swaps.
 func (d *Deployer) Deploy(appName, version string) error {
 	app := d.Repo.GetApp(appName)
 	if app == nil {
@@ -59,7 +60,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 		return fmt.Errorf("compose.yml not found for app '%s' at %s", appName, composePath)
 	}
 
-	override, err := compose.GenerateOverride(app, &d.Repo.Cluster.Networking)
+	override, err := compose.GenerateOverride(app, &d.Repo.Cluster.Networking, d.Repo.InternalHosts())
 	if err != nil {
 		return fmt.Errorf("failed to generate override: %w", err)
 	}
@@ -68,45 +69,61 @@ func (d *Deployer) Deploy(appName, version string) error {
 	d.log.Infof("Deploying %s:%s to nodes: %v", app.Image, app.Version, targetNodes)
 
 	if d.DryRun {
-		d.log.Info("DRY RUN — actions that would be taken:")
-		fmt.Printf("Upload: %s -> %s/%s/compose.yml\n", composePath, remoteAppsDir, appName)
-		fmt.Printf("Write override: %s/%s/docker-compose.override.yml\n", remoteAppsDir, appName)
-		fmt.Println("--- override content ---")
+		d.log.Info("DRY RUN — zero-downtime deploy via blue/green swap")
+		fmt.Println()
+		fmt.Println("Override that will be applied:")
 		fmt.Println(override)
-		fmt.Println("---")
-		cmd := d.composeUpCommand(app)
-		fmt.Printf("Run: %s\n", cmd)
+		fmt.Printf("Targets: %v\n", targetNodes)
+		if app.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
+			fmt.Printf("Secrets: fetch from %s (prefix: %s) → .env file\n", d.Repo.Cluster.Secrets.Server, app.SecretsPrefix)
+		}
+		fmt.Printf("Each node: pull -> start new -> health check -> stop old\n")
 		return nil
 	}
 
-	for _, nodeID := range targetNodes {
+	var deployed []string
+	for i, nodeID := range targetNodes {
 		node := d.Repo.Cluster.GetNode(nodeID)
 		if node == nil {
 			d.log.Warnf("Node '%s' not found in config, skipping", nodeID)
 			continue
 		}
 
+		d.log.Infof("[%d/%d] Deploying to node %s...", i+1, len(targetNodes), nodeID)
+
 		if err := d.deployToNode(app, node, composePath, override); err != nil {
-			return fmt.Errorf("deploy to node %s failed: %w", nodeID, err)
+			d.log.Warnf("Deploy to node %s failed: %v", nodeID, err)
+			if len(deployed) > 0 {
+				d.log.Warnf("Nodes already updated: %v", deployed)
+			}
+			return fmt.Errorf("rolling deploy stopped at node %s (%d/%d): %w", nodeID, i+1, len(targetNodes), err)
+		}
+
+		deployed = append(deployed, nodeID)
+	}
+
+	if app.Internal != "" {
+		if err := d.updateInternalRoutes(app); err != nil {
+			d.log.Warnf("Failed to update internal routes: %v", err)
 		}
 	}
 
-	d.log.Infof("Deploy complete: %s:%s", app.Name, app.Version)
+	d.log.Infof("Deploy complete: %s:%s across %d node(s)", app.Name, app.Version, len(deployed))
 	return nil
 }
 
 func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, composePath, override string) error {
-	d.log.Infof("Deploying to node %s (%s)...", node.ID, node.Host)
-
 	client, err := d.connect(node)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	remoteDir := fmt.Sprintf("%s/%s", remoteAppsDir, app.Name)
+	remoteDir := remoteAppsDir + "/" + app.Name
 
-	previousVersion := d.readCurrentVersion(client, remoteDir)
+	currentState := d.readState(client, remoteDir)
+	nextSlot := currentState.InactiveSlot()
+	prevSlot := currentState.ActiveSlot
 
 	if err := client.UploadFile(composePath, remoteDir+"/compose.yml"); err != nil {
 		return fmt.Errorf("failed to upload compose.yml: %w", err)
@@ -114,6 +131,22 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 
 	if err := client.WriteFile(remoteDir+"/docker-compose.override.yml", override); err != nil {
 		return fmt.Errorf("failed to write override: %w", err)
+	}
+
+	hasEnvFile := false
+	if app.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
+		envContent, fetchErr := d.fetchSecrets(app)
+		if fetchErr != nil {
+			return fmt.Errorf("failed to fetch secrets: %w", fetchErr)
+		}
+		envPath := remoteDir + "/.env"
+		if err := client.WriteFile(envPath, envContent); err != nil {
+			return fmt.Errorf("failed to write .env: %w", err)
+		}
+		if _, _, err := client.RunCommand("chmod 600 " + envPath); err != nil {
+			d.log.Warnf("Failed to set .env permissions: %v", err)
+		}
+		hasEnvFile = true
 	}
 
 	if d.Repo.Cluster.Registry.Username != "" {
@@ -126,33 +159,61 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 		}
 	}
 
-	pullCmd := fmt.Sprintf("cd %s && docker compose -f compose.yml -f docker-compose.override.yml pull", remoteDir)
+	composeFiles := "-f compose.yml -f docker-compose.override.yml"
+	projectFlag := fmt.Sprintf("-p %s-%s", app.Name, nextSlot)
+
+	pullCmd := fmt.Sprintf("cd %s && docker compose %s %s pull", remoteDir, projectFlag, composeFiles)
 	d.log.Info("Pulling images...")
 	if _, stderr, err := client.RunCommand(pullCmd); err != nil {
 		return fmt.Errorf("pull failed: %w\n%s", err, stderr)
 	}
 
-	upCmd := d.composeUpCommand(app)
+	upCmd := d.composeUpCommand(app, projectFlag, composeFiles, hasEnvFile)
 	fullCmd := fmt.Sprintf("cd %s && %s", remoteDir, upCmd)
-	d.log.Info("Starting containers...")
+	d.log.Infof("Starting %s slot...", nextSlot)
 	if _, stderr, err := client.RunCommand(fullCmd); err != nil {
 		return fmt.Errorf("deploy failed: %w\n%s", err, stderr)
 	}
 
-	state := &DeployState{
+	if err := WaitForHealthy(client, remoteDir, app.Name, projectFlag, composeFiles, d.log); err != nil {
+		d.log.Warnf("Health check failed, stopping %s slot...", nextSlot)
+		stopCmd := fmt.Sprintf("cd %s && docker compose %s %s down", remoteDir, projectFlag, composeFiles)
+		if _, _, stopErr := client.RunCommand(stopCmd); stopErr != nil {
+			d.log.Warnf("Failed to stop failed slot: %v", stopErr)
+		}
+		return fmt.Errorf("health check failed: %w", err)
+	}
+
+	if hasEnvFile {
+		if _, _, err := client.RunCommand("rm -f " + remoteDir + "/.env"); err != nil {
+			d.log.Warnf("Failed to remove .env file: %v", err)
+		}
+	}
+
+	if prevSlot != "" {
+		prevProjectFlag := fmt.Sprintf("-p %s-%s", app.Name, prevSlot)
+		d.log.Infof("Stopping %s slot...", prevSlot)
+		stopCmd := fmt.Sprintf("cd %s && docker compose %s %s down", remoteDir, prevProjectFlag, composeFiles)
+		if _, _, err := client.RunCommand(stopCmd); err != nil {
+			d.log.Warnf("Failed to stop old slot: %v", err)
+		}
+	}
+
+	newState := &DeployState{
 		App:             app.Name,
 		CurrentVersion:  app.Version,
-		PreviousVersion: previousVersion,
+		PreviousVersion: currentState.CurrentVersion,
+		ActiveSlot:      nextSlot,
 		DeployedAt:      time.Now(),
 	}
-	stateJSON, err := state.Marshal()
+	stateJSON, err := newState.Marshal()
 	if err != nil {
 		d.log.Warnf("Failed to marshal deploy state: %v", err)
 	} else if err := client.WriteFile(remoteDir+"/state.json", stateJSON); err != nil {
 		d.log.Warnf("Failed to save deploy state: %v", err)
 	}
 
-	d.log.Infof("Node %s: deployed %s:%s", node.ID, app.Name, app.Version)
+	d.log.Infof("Node %s: %s slot active, %s:%s deployed", node.ID, nextSlot, app.Name, app.Version)
 	return nil
 }
 
@@ -164,43 +225,29 @@ func (d *Deployer) Rollback(appName string) error {
 	}
 
 	targetNodes := app.GetTargetNodes(d.Repo.Cluster.Nodes)
-
-	for _, nodeID := range targetNodes {
-		node := d.Repo.Cluster.GetNode(nodeID)
-		if node == nil {
-			continue
-		}
-
-		client, err := d.connect(node)
-		if err != nil {
-			return err
-		}
-
-		remoteDir := fmt.Sprintf("%s/%s", remoteAppsDir, appName)
-		previousVersion := d.readPreviousVersion(client, remoteDir)
-		client.Close()
-
-		if previousVersion == "" {
-			return fmt.Errorf("no previous version found for %s on node %s", appName, nodeID)
-		}
-
-		d.log.Infof("Rolling back %s to %s on node %s", appName, previousVersion, nodeID)
+	if len(targetNodes) == 0 {
+		return fmt.Errorf("no target nodes for %s", appName)
 	}
 
 	node := d.Repo.Cluster.GetNode(targetNodes[0])
+	if node == nil {
+		return fmt.Errorf("node %s not found", targetNodes[0])
+	}
+
 	client, err := d.connect(node)
 	if err != nil {
 		return err
 	}
-	remoteDir := fmt.Sprintf("%s/%s", remoteAppsDir, appName)
-	previousVersion := d.readPreviousVersion(client, remoteDir)
+	remoteDir := remoteAppsDir + "/" + appName
+	state := d.readState(client, remoteDir)
 	client.Close()
 
-	if previousVersion == "" {
+	if state.PreviousVersion == "" {
 		return fmt.Errorf("no previous version found for %s", appName)
 	}
 
-	return d.Deploy(appName, previousVersion)
+	d.log.Infof("Rolling back %s from %s to %s", appName, state.CurrentVersion, state.PreviousVersion)
+	return d.Deploy(appName, state.PreviousVersion)
 }
 
 // Status queries the deployment status of an app across its target nodes.
@@ -225,22 +272,32 @@ func (d *Deployer) Status(appName string) ([]NodeStatus, error) {
 			continue
 		}
 
-		remoteDir := fmt.Sprintf("%s/%s", remoteAppsDir, appName)
-		psCmd := fmt.Sprintf("cd %s && docker compose -f compose.yml -f docker-compose.override.yml ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'", remoteDir)
-		stdout, _, err := client.RunCommand(psCmd)
-		client.Close()
+		remoteDir := remoteAppsDir + "/" + appName
+		state := d.readState(client, remoteDir)
 
-		status := NodeStatus{NodeID: nodeID}
-		if err != nil || strings.TrimSpace(stdout) == "NOT_DEPLOYED" {
-			status.State = "not deployed"
-		} else {
-			status.State = "running"
-			status.Containers = strings.TrimSpace(stdout)
+		status := NodeStatus{
+			NodeID:  nodeID,
+			Version: state.CurrentVersion,
+			Slot:    state.ActiveSlot,
 		}
 
-		version := d.readCurrentVersion(client, remoteDir)
-		status.Version = version
+		if state.ActiveSlot != "" {
+			projectFlag := fmt.Sprintf("-p %s-%s", appName, state.ActiveSlot)
+			composeFiles := "-f compose.yml -f docker-compose.override.yml"
+			psCmd := fmt.Sprintf("cd %s && docker compose %s %s ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
+				remoteDir, projectFlag, composeFiles)
+			stdout, _, err := client.RunCommand(psCmd)
+			if err != nil || strings.TrimSpace(stdout) == "NOT_DEPLOYED" {
+				status.State = "not deployed"
+			} else {
+				status.State = "running"
+				status.Containers = strings.TrimSpace(stdout)
+			}
+		} else {
+			status.State = "not deployed"
+		}
 
+		client.Close()
 		statuses = append(statuses, status)
 	}
 
@@ -255,10 +312,40 @@ type NodeStatus struct {
 	State string
 	// Version is the currently deployed version.
 	Version string
+	// Slot is the active blue/green slot.
+	Slot string
 	// Containers is the docker compose ps output.
 	Containers string
 	// Error is set if the node could not be reached.
 	Error string
+}
+
+func (d *Deployer) updateInternalRoutes(app *config.AppConfig) error {
+	routeYAML, err := GenerateInternalRoute(app, d.Repo.Cluster)
+	if err != nil {
+		return err
+	}
+	if routeYAML == "" {
+		return nil
+	}
+
+	remotePath := "/opt/warpgate/traefik/dynamic/" + app.Name + ".yml"
+	d.log.Infof("Updating internal route for %s across all nodes...", app.Internal)
+
+	for _, node := range d.Repo.Cluster.Nodes {
+		client, err := d.connect(&node)
+		if err != nil {
+			d.log.Warnf("Failed to connect to %s for internal route update: %v", node.ID, err)
+			continue
+		}
+
+		if err := client.WriteFile(remotePath, routeYAML); err != nil {
+			d.log.Warnf("Failed to write internal route to %s: %v", node.ID, err)
+		}
+		client.Close()
+	}
+
+	return nil
 }
 
 func (d *Deployer) connect(node *config.NodeConfig) (*ssh.Client, error) {
@@ -285,34 +372,34 @@ func (d *Deployer) connect(node *config.NodeConfig) (*ssh.Client, error) {
 	return client, nil
 }
 
-func (d *Deployer) composeUpCommand(app *config.AppConfig) string {
-	base := "docker compose -f compose.yml -f docker-compose.override.yml up -d"
-	if app.SecretsPrefix != "" {
-		return fmt.Sprintf("secretsauce run %s -- %s", app.SecretsPrefix, base)
+func (d *Deployer) composeUpCommand(app *config.AppConfig, projectFlag, composeFiles string, hasEnvFile bool) string {
+	base := "docker compose " + projectFlag + " " + composeFiles
+	if hasEnvFile {
+		base += " --env-file .env"
 	}
+	base += " up -d"
 	return base
 }
 
-func (d *Deployer) readCurrentVersion(client *ssh.Client, remoteDir string) string {
-	stdout, _, err := client.RunCommand(fmt.Sprintf("cat %s/state.json 2>/dev/null || echo '{}'", remoteDir))
+func (d *Deployer) fetchSecrets(app *config.AppConfig) (string, error) {
+	client := secrets.NewClient(d.Repo.Cluster.Secrets.Server)
+	d.log.Infof("Fetching secrets for prefix %s...", app.SecretsPrefix)
+	env, err := client.FetchEnv(app.SecretsPrefix)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	state, err := UnmarshalState(strings.TrimSpace(stdout))
-	if err != nil {
-		return ""
-	}
-	return state.CurrentVersion
+	d.log.Infof("Fetched %d secret(s)", len(env))
+	return secrets.FormatDotEnv(env), nil
 }
 
-func (d *Deployer) readPreviousVersion(client *ssh.Client, remoteDir string) string {
+func (d *Deployer) readState(client *ssh.Client, remoteDir string) *DeployState {
 	stdout, _, err := client.RunCommand(fmt.Sprintf("cat %s/state.json 2>/dev/null || echo '{}'", remoteDir))
 	if err != nil {
-		return ""
+		return &DeployState{}
 	}
 	state, err := UnmarshalState(strings.TrimSpace(stdout))
 	if err != nil {
-		return ""
+		return &DeployState{}
 	}
-	return state.PreviousVersion
+	return state
 }

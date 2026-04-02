@@ -52,9 +52,18 @@ func NewTailscaleClient(host, user string) *Client {
 }
 
 // Connect establishes an SSH connection to the remote host.
-// For Tailscale SSH mode, this is a no-op since we shell out per command.
+// For Tailscale SSH mode, this runs an interactive test command so the user
+// can respond to any auth prompts (Tailscale approval, password, etc.).
 func (c *Client) Connect() error {
 	if c.TailscaleSSH {
+		target := fmt.Sprintf("%s@%s", c.User, c.Host)
+		cmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", target, "echo ok")
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("SSH connection failed: %w", err)
+		}
 		return nil
 	}
 
@@ -164,7 +173,7 @@ func (c *Client) RunCommand(cmd string) (string, string, error) {
 
 func (c *Client) runCommandViaBinary(cmd string) (string, string, error) {
 	target := fmt.Sprintf("%s@%s", c.User, c.Host)
-	sshCmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", target, cmd)
+	sshCmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", target, cmd)
 	var stdoutBuf, stderrBuf strings.Builder
 	sshCmd.Stdout = &stdoutBuf
 	sshCmd.Stderr = &stderrBuf
@@ -206,7 +215,7 @@ func (c *Client) RunScript(script string) error {
 }
 
 func (c *Client) runScriptViaBinary(script string) error {
-	sshCmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", fmt.Sprintf("%s@%s", c.User, c.Host), "bash -s")
+	sshCmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", fmt.Sprintf("%s@%s", c.User, c.Host), "bash -s")
 	sshCmd.Stdin = strings.NewReader(script)
 	sshCmd.Stdout = os.Stdout
 	sshCmd.Stderr = os.Stderr
@@ -216,12 +225,46 @@ func (c *Client) runScriptViaBinary(script string) error {
 	return nil
 }
 
+// RunScriptSilent pipes a script to bash on the remote host and returns the combined output.
+func (c *Client) RunScriptSilent(script string) (string, error) {
+	if c.TailscaleSSH {
+		sshCmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", fmt.Sprintf("%s@%s", c.User, c.Host), "bash -s")
+		sshCmd.Stdin = strings.NewReader(script)
+		var buf strings.Builder
+		sshCmd.Stdout = &buf
+		sshCmd.Stderr = &buf
+		if err := sshCmd.Run(); err != nil {
+			return buf.String(), fmt.Errorf("script failed: %w", err)
+		}
+		return buf.String(), nil
+	}
+
+	if c.client == nil {
+		return "", fmt.Errorf("not connected")
+	}
+
+	session, err := c.client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
+
+	session.Stdin = strings.NewReader(script)
+
+	output, err := session.CombinedOutput("bash -s")
+	if err != nil {
+		return string(output), fmt.Errorf("script failed: %w", err)
+	}
+
+	return string(output), nil
+}
+
 // WriteFile writes content to a file on the remote host via stdin piping.
 func (c *Client) WriteFile(remotePath, content string) error {
 	cmd := fmt.Sprintf("mkdir -p %s && cat > %s", filepath.Dir(remotePath), remotePath)
 
 	if c.TailscaleSSH {
-		sshCmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", fmt.Sprintf("%s@%s", c.User, c.Host), cmd)
+		sshCmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", fmt.Sprintf("%s@%s", c.User, c.Host), cmd)
 		sshCmd.Stdin = strings.NewReader(content)
 		if output, err := sshCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("write failed: %w\n%s", err, string(output))
