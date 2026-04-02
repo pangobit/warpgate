@@ -2,10 +2,6 @@ version: "2"
 project: myapp
 
 nodes:
-  - id: localhost-0
-    host: 100.95.115.81
-    tailscale_ip: 100.95.115.81
-
   - id: node-1
     host: 10.0.0.1
     tailscale_ip: 100.x.x.x
