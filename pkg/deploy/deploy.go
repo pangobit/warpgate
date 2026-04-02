@@ -127,10 +127,10 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 		return fmt.Errorf("failed to create app directory: %w", err)
 	}
 
-	if err := acquireLock(client, remoteDir); err != nil {
+	if err := acquireLock(client, remoteDir, d.log); err != nil {
 		return fmt.Errorf("node %s: %w", node.ID, err)
 	}
-	defer releaseLock(client, remoteDir)
+	defer releaseLock(client, remoteDir, d.log)
 
 	currentState := d.readState(client, remoteDir)
 	nextSlot := currentState.InactiveSlot()
@@ -266,7 +266,6 @@ func (d *Deployer) Remove(appName string, nodeIDs []string) error {
 	if len(nodeIDs) == 0 {
 		app := d.Repo.GetApp(appName)
 		if app == nil {
-			// App config may already be deleted — fall back to all nodes.
 			for _, node := range d.Repo.Cluster.Nodes {
 				nodeIDs = append(nodeIDs, node.ID)
 			}
@@ -296,7 +295,7 @@ func (d *Deployer) Remove(appName string, nodeIDs []string) error {
 
 		remoteDir := remoteAppsDir + "/" + appName
 
-		if err := acquireLock(client, remoteDir); err != nil {
+		if err := acquireLock(client, remoteDir, d.log); err != nil {
 			client.Close()
 			d.log.Warnf("Node %s: %v", nodeID, err)
 			continue
@@ -318,7 +317,7 @@ func (d *Deployer) Remove(appName string, nodeIDs []string) error {
 			d.log.Warnf("Failed to remove internal route on %s: %v", nodeID, err)
 		}
 
-		releaseLock(client, remoteDir)
+		releaseLock(client, remoteDir, d.log)
 
 		if _, _, err := client.RunCommand("rm -rf " + remoteDir); err != nil {
 			d.log.Warnf("Failed to remove app directory on %s: %v", nodeID, err)
@@ -367,7 +366,7 @@ func (d *Deployer) BreakLock(appName string) error {
 		}
 
 		remoteDir := remoteAppsDir + "/" + appName
-		info, err := breakLock(client, remoteDir)
+		info, err := breakLock(client, remoteDir, d.log)
 		client.Close()
 
 		if err != nil {

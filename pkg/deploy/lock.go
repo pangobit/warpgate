@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pangobit/warpgate/pkg/ssh"
+	"github.com/sirupsen/logrus"
 )
 
 const lockTimeout = 30 * time.Minute
@@ -22,7 +23,7 @@ type LockInfo struct {
 	AcquiredAt time.Time `json:"acquired_at"`
 }
 
-func acquireLock(client *ssh.Client, appDir string) error {
+func acquireLock(client *ssh.Client, appDir string, log *logrus.Logger) error {
 	lockDir := appDir + "/.lock"
 
 	_, stderr, err := client.RunCommand("mkdir " + lockDir + " 2>&1")
@@ -48,7 +49,7 @@ func acquireLock(client *ssh.Client, appDir string) error {
 
 	if data, err := json.Marshal(info); err == nil {
 		if writeErr := client.WriteFile(lockDir+"/info", string(data)); writeErr != nil {
-			releaseLock(client, appDir)
+			releaseLock(client, appDir, log)
 			return fmt.Errorf("failed to write lock info: %w", writeErr)
 		}
 	}
@@ -56,15 +57,20 @@ func acquireLock(client *ssh.Client, appDir string) error {
 	return nil
 }
 
-func releaseLock(client *ssh.Client, appDir string) {
+func releaseLock(client *ssh.Client, appDir string, log *logrus.Logger) {
 	lockDir := appDir + "/.lock"
-	_, _, _ = client.RunCommand("rm -rf " + lockDir)
+	if _, _, err := client.RunCommand("rm -rf " + lockDir); err != nil {
+		log.Warnf("Failed to release deploy lock at %s: %v", lockDir, err)
+	}
 }
 
-func breakLock(client *ssh.Client, appDir string) (*LockInfo, error) {
+func breakLock(client *ssh.Client, appDir string, log *logrus.Logger) (*LockInfo, error) {
 	lockDir := appDir + "/.lock"
-	info, _ := readLockInfo(client, lockDir)
-	_, _, err := client.RunCommand("rm -rf " + lockDir)
+	info, err := readLockInfo(client, lockDir)
+	if err != nil {
+		log.Warnf("Could not read lock info at %s: %v", lockDir, err)
+	}
+	_, _, err = client.RunCommand("rm -rf " + lockDir)
 	if err != nil {
 		return info, fmt.Errorf("failed to break lock: %w", err)
 	}
