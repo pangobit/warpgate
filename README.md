@@ -55,8 +55,9 @@ Warpgate is an orchestrator, not a config generator. You write standard Docker C
 2. **Deploy** — Zero-downtime blue/green deploy with health check gating, secrets fetched from SecretSauce API
 3. **Rollback** — Re-deploy the previous version
 4. **Status** — Query live deployment state from target nodes
-5. **Remove** — Stop and clean up a single app from target nodes
-6. **Cleanup** — Remove all Warpgate dependencies from a node
+5. **Logs** — Fetch recent container logs from a node, with optional app filter and grep
+6. **Remove** — Stop and clean up a single app from target nodes
+7. **Cleanup** — Remove all Warpgate dependencies from a node
 
 ### Infra Repo Layout
 
@@ -172,7 +173,9 @@ warpgate rollback auth                      # Re-deploy previous version
 # Inspect
 warpgate status                             # Show cluster, nodes, and all apps
 warpgate status auth --tailscale-ssh        # Live status from target nodes
-warpgate logs auth                          # Stream app logs (WIP)
+warpgate logs --node node-1 --tailscale-ssh # All container logs on a node
+warpgate logs --node node-1 --app auth      # Filter to one app's containers
+warpgate logs --node node-1 --grep "error"  # Server-side grep filter
 warpgate exec auth -- sh                    # Exec into container (WIP)
 
 # App removal
@@ -381,7 +384,8 @@ Core deployment flow is implemented. Remaining work:
 - [x] Live status queries
 - [x] Rollback to previous version
 - [ ] Image watcher / CI push trigger
-- [ ] Log streaming and exec commands
+- [x] Node-centric log inspection
+- [ ] Exec into containers
 - [ ] Web dashboard
 - [ ] Backup/restore for volumes
 
