@@ -54,7 +54,9 @@ Warpgate is an orchestrator, not a config generator. You write standard Docker C
 1. **Bootstrap** — SSH to a node, install Docker, Traefik, optionally SecretSauce server (with TUI progress)
 2. **Deploy** — Zero-downtime blue/green deploy with health check gating, secrets fetched from SecretSauce API
 3. **Rollback** — Re-deploy the previous version
-4. **Cleanup** — Remove all Warpgate dependencies from a node
+4. **Status** — Query live deployment state from target nodes
+5. **Remove** — Stop and clean up a single app from target nodes
+6. **Cleanup** — Remove all Warpgate dependencies from a node
 
 ### Infra Repo Layout
 
@@ -164,12 +166,22 @@ warpgate bootstrap node-1 --dry-run         # Preview bootstrap script
 warpgate deploy auth                        # Deploy at version from app.yml
 warpgate deploy auth v3.2.0                 # Deploy specific version
 warpgate deploy auth --dry-run              # Preview what would happen
+warpgate deploy auth --user root            # Specify SSH user
 warpgate rollback auth                      # Re-deploy previous version
 
 # Inspect
 warpgate status                             # Show cluster, nodes, and all apps
+warpgate status auth --tailscale-ssh        # Live status from target nodes
 warpgate logs auth                          # Stream app logs (WIP)
 warpgate exec auth -- sh                    # Exec into container (WIP)
+
+# App removal
+warpgate remove auth --tailscale-ssh        # Stop and remove app from nodes
+warpgate remove auth --force                # Skip confirmation
+warpgate remove auth --nodes node-1,node-2  # Target specific nodes
+
+# Deploy locks
+warpgate lock break auth --tailscale-ssh    # Remove a stale deploy lock
 
 # Teardown
 warpgate cleanup node-1 --tailscale-ssh     # Remove Warpgate from a node
@@ -364,6 +376,10 @@ Core deployment flow is implemented. Remaining work:
 - [x] Rolling multi-node deploys
 - [x] Internal service-to-service routing
 - [x] TUI for bootstrap and cleanup
+- [x] Deploy locking (prevents concurrent deploys)
+- [x] Per-app removal
+- [x] Live status queries
+- [x] Rollback to previous version
 - [ ] Image watcher / CI push trigger
 - [ ] Log streaming and exec commands
 - [ ] Web dashboard
