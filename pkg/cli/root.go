@@ -49,6 +49,44 @@ using Docker Compose, Traefik, Tailscale, and your own infrastructure.`,
 	},
 }
 
+// Deploy flags
+var (
+	deployDryRun       bool
+	deployTailscaleSSH bool
+	deploySSHKey       string
+	deployUser         string
+)
+
+// Remove flags
+var (
+	removeForce        bool
+	removeTailscaleSSH bool
+	removeSSHKey       string
+	removeUser         string
+	removeNodes        []string
+)
+
+// Bootstrap flags
+var (
+	bootstrapHost          string
+	bootstrapUser          string
+	bootstrapSSHKey        string
+	bootstrapDryRun        bool
+	bootstrapTailscaleSSH  bool
+	bootstrapSecretsServer bool
+)
+
+// Cleanup flags
+var (
+	cleanupHost         string
+	cleanupUser         string
+	cleanupSSHKey       string
+	cleanupTailscaleSSH bool
+	cleanupForce        bool
+	cleanupRemoveGo     bool
+	cleanupRemoveDocker bool
+)
+
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "Path to cluster.yml config file")
 
@@ -58,8 +96,55 @@ func init() {
 	rootCmd.AddCommand(logsCmd)
 	rootCmd.AddCommand(rollbackCmd)
 	rootCmd.AddCommand(execCmd)
+	rootCmd.AddCommand(removeCmd)
+	rootCmd.AddCommand(lockCmd)
 	rootCmd.AddCommand(bootstrapCmd)
 	rootCmd.AddCommand(cleanupCmd)
+
+	// deploy flags
+	deployCmd.Flags().BoolVar(&deployDryRun, "dry-run", false, "Show actions without executing")
+	deployCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	deployCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
+	deployCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
+
+	// status flags
+	statusCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	statusCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
+	statusCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
+
+	// rollback flags
+	rollbackCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	rollbackCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
+	rollbackCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
+
+	// remove flags
+	removeCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
+	removeCmd.Flags().BoolVar(&removeTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	removeCmd.Flags().StringVar(&removeSSHKey, "ssh-key", "", "Path to SSH private key")
+	removeCmd.Flags().StringVar(&removeUser, "user", "", "SSH user (defaults to current user)")
+	removeCmd.Flags().StringSliceVar(&removeNodes, "nodes", nil, "Override target nodes (comma-separated)")
+
+	// lock flags
+	lockBreakCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	lockBreakCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
+	lockCmd.AddCommand(lockBreakCmd)
+
+	// bootstrap flags
+	bootstrapCmd.Flags().StringVar(&bootstrapHost, "host", "", "Target host IP or hostname (ad-hoc mode)")
+	bootstrapCmd.Flags().StringVar(&bootstrapUser, "user", "", "SSH user (defaults to current user)")
+	bootstrapCmd.Flags().StringVar(&bootstrapSSHKey, "ssh-key", "", "Path to SSH private key")
+	bootstrapCmd.Flags().BoolVar(&bootstrapDryRun, "dry-run", false, "Show installation script without executing")
+	bootstrapCmd.Flags().BoolVar(&bootstrapTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH (no key needed)")
+	bootstrapCmd.Flags().BoolVar(&bootstrapSecretsServer, "secrets-server", false, "Set up SecretSauce server on this node")
+
+	// cleanup flags
+	cleanupCmd.Flags().StringVar(&cleanupHost, "host", "", "Target host IP or hostname (ad-hoc mode)")
+	cleanupCmd.Flags().StringVar(&cleanupUser, "user", "", "SSH user (defaults to current user)")
+	cleanupCmd.Flags().StringVar(&cleanupSSHKey, "ssh-key", "", "Path to SSH private key")
+	cleanupCmd.Flags().BoolVar(&cleanupTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH (no key needed)")
+	cleanupCmd.Flags().BoolVar(&cleanupForce, "force", false, "Skip confirmation prompt")
+	cleanupCmd.Flags().BoolVar(&cleanupRemoveGo, "remove-go", false, "Also remove Go installation")
+	cleanupCmd.Flags().BoolVar(&cleanupRemoveDocker, "remove-docker", false, "Also remove Docker")
 }
 
 var initCmd = &cobra.Command{
@@ -156,14 +241,6 @@ port: 8080
 	},
 }
 
-// Deploy flags
-var (
-	deployDryRun       bool
-	deployTailscaleSSH bool
-	deploySSHKey       string
-	deployUser         string
-)
-
 var deployCmd = &cobra.Command{
 	Use:   "deploy <app-name> [version]",
 	Short: "Deploy an application to its target nodes",
@@ -182,13 +259,6 @@ var deployCmd = &cobra.Command{
 
 		return d.Deploy(appName, version)
 	},
-}
-
-func init() {
-	deployCmd.Flags().BoolVar(&deployDryRun, "dry-run", false, "Show actions without executing")
-	deployCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
-	deployCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
-	deployCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
 }
 
 var statusCmd = &cobra.Command{
@@ -272,18 +342,6 @@ func showClusterStatus() error {
 	return nil
 }
 
-func init() {
-	statusCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
-	statusCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
-	statusCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
-}
-
-func init() {
-	rollbackCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
-	rollbackCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
-	rollbackCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
-}
-
 var logsCmd = &cobra.Command{
 	Use:   "logs <app-name>",
 	Short: "Stream logs from an application",
@@ -321,15 +379,6 @@ var execCmd = &cobra.Command{
 	},
 }
 
-// Remove flags
-var (
-	removeForce        bool
-	removeTailscaleSSH bool
-	removeSSHKey       string
-	removeUser         string
-	removeNodes        []string
-)
-
 var removeCmd = &cobra.Command{
 	Use:   "remove <app-name>",
 	Short: "Stop and remove an application from target nodes",
@@ -361,15 +410,6 @@ Examples:
 	},
 }
 
-func init() {
-	removeCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
-	removeCmd.Flags().BoolVar(&removeTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
-	removeCmd.Flags().StringVar(&removeSSHKey, "ssh-key", "", "Path to SSH private key")
-	removeCmd.Flags().StringVar(&removeUser, "user", "", "SSH user (defaults to current user)")
-	removeCmd.Flags().StringSliceVar(&removeNodes, "nodes", nil, "Override target nodes (comma-separated)")
-	rootCmd.AddCommand(removeCmd)
-}
-
 var lockCmd = &cobra.Command{
 	Use:   "lock",
 	Short: "Manage deploy locks",
@@ -386,23 +426,6 @@ var lockBreakCmd = &cobra.Command{
 		return d.BreakLock(args[0])
 	},
 }
-
-func init() {
-	lockBreakCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
-	lockBreakCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
-	lockCmd.AddCommand(lockBreakCmd)
-	rootCmd.AddCommand(lockCmd)
-}
-
-// Bootstrap flags
-var (
-	bootstrapHost          string
-	bootstrapUser          string
-	bootstrapSSHKey        string
-	bootstrapDryRun        bool
-	bootstrapTailscaleSSH  bool
-	bootstrapSecretsServer bool
-)
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap [node-id]",
@@ -484,25 +507,6 @@ Examples:
 		return fmt.Errorf("specify node-id from config, or use --host for ad-hoc bootstrapping")
 	},
 }
-
-func init() {
-	bootstrapCmd.Flags().StringVar(&bootstrapHost, "host", "", "Target host IP or hostname (ad-hoc mode)")
-	bootstrapCmd.Flags().StringVar(&bootstrapUser, "user", "", "SSH user (defaults to current user)")
-	bootstrapCmd.Flags().StringVar(&bootstrapSSHKey, "ssh-key", "", "Path to SSH private key")
-	bootstrapCmd.Flags().BoolVar(&bootstrapDryRun, "dry-run", false, "Show installation script without executing")
-	bootstrapCmd.Flags().BoolVar(&bootstrapTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH (no key needed)")
-	bootstrapCmd.Flags().BoolVar(&bootstrapSecretsServer, "secrets-server", false, "Set up SecretSauce server on this node")
-}
-
-var (
-	cleanupHost         string
-	cleanupUser         string
-	cleanupSSHKey       string
-	cleanupTailscaleSSH bool
-	cleanupForce        bool
-	cleanupRemoveGo     bool
-	cleanupRemoveDocker bool
-)
 
 var cleanupCmd = &cobra.Command{
 	Use:   "cleanup [node-id]",
@@ -588,16 +592,6 @@ Examples:
 
 		return fmt.Errorf("specify node-id from config, or use --host for ad-hoc cleanup")
 	},
-}
-
-func init() {
-	cleanupCmd.Flags().StringVar(&cleanupHost, "host", "", "Target host IP or hostname (ad-hoc mode)")
-	cleanupCmd.Flags().StringVar(&cleanupUser, "user", "", "SSH user (defaults to current user)")
-	cleanupCmd.Flags().StringVar(&cleanupSSHKey, "ssh-key", "", "Path to SSH private key")
-	cleanupCmd.Flags().BoolVar(&cleanupTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH (no key needed)")
-	cleanupCmd.Flags().BoolVar(&cleanupForce, "force", false, "Skip confirmation prompt")
-	cleanupCmd.Flags().BoolVar(&cleanupRemoveGo, "remove-go", false, "Also remove Go installation")
-	cleanupCmd.Flags().BoolVar(&cleanupRemoveDocker, "remove-docker", false, "Also remove Docker")
 }
 
 // Execute runs the root cobra command.
