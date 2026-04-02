@@ -176,7 +176,6 @@ warpgate status auth --tailscale-ssh        # Live status from target nodes
 warpgate logs --node node-1 --tailscale-ssh # All container logs on a node
 warpgate logs --node node-1 --app auth      # Filter to one app's containers
 warpgate logs --node node-1 --grep "error"  # Server-side grep filter
-warpgate exec auth -- sh                    # Exec into container (WIP)
 
 # App removal
 warpgate remove auth --tailscale-ssh        # Stop and remove app from nodes
@@ -385,7 +384,6 @@ Core deployment flow is implemented. Remaining work:
 - [x] Rollback to previous version
 - [ ] Image watcher / CI push trigger
 - [x] Node-centric log inspection
-- [ ] Exec into containers
 - [ ] Web dashboard
 - [ ] Backup/restore for volumes
 

@@ -106,7 +106,6 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(logsCmd)
 	rootCmd.AddCommand(rollbackCmd)
-	rootCmd.AddCommand(execCmd)
 	rootCmd.AddCommand(removeCmd)
 	rootCmd.AddCommand(lockCmd)
 	rootCmd.AddCommand(bootstrapCmd)
@@ -396,19 +395,6 @@ var rollbackCmd = &cobra.Command{
 		d.TailscaleSSH = deployTailscaleSSH
 		d.User = deployUser
 		return d.Rollback(args[0])
-	},
-}
-
-var execCmd = &cobra.Command{
-	Use:   "exec <app-name> <command>",
-	Short: "Execute a command in an application container",
-	Args:  cobra.MinimumNArgs(2),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		appName := args[0]
-		command := args[1:]
-		fmt.Printf("Executing %v in %s...\n", command, appName)
-		// TODO: SSH to target node and run docker compose exec
-		return nil
 	},
 }
 
