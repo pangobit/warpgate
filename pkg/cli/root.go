@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pangobit/warpgate/pkg/bootstrap"
 	"github.com/pangobit/warpgate/pkg/cleanup"
@@ -160,6 +161,7 @@ var (
 	deployDryRun       bool
 	deployTailscaleSSH bool
 	deploySSHKey       string
+	deployUser         string
 )
 
 var deployCmd = &cobra.Command{
@@ -176,6 +178,7 @@ var deployCmd = &cobra.Command{
 		d := deploy.NewDeployer(repo, deploySSHKey)
 		d.TailscaleSSH = deployTailscaleSSH
 		d.DryRun = deployDryRun
+		d.User = deployUser
 
 		return d.Deploy(appName, version)
 	},
@@ -185,42 +188,100 @@ func init() {
 	deployCmd.Flags().BoolVar(&deployDryRun, "dry-run", false, "Show actions without executing")
 	deployCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
 	deployCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
+	deployCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
 }
 
 var statusCmd = &cobra.Command{
 	Use:   "status [app-name]",
 	Short: "Show cluster and application status",
-	Args:  cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Printf("Project: %s\n", repo.Cluster.Project)
-		fmt.Printf("Nodes: %d\n\n", len(repo.Cluster.Nodes))
+	Long: `Show cluster overview or live deployment status for a specific app.
 
-		for _, node := range repo.Cluster.Nodes {
-			fmt.Printf("  %s (%s)", node.ID, node.Host)
-			if node.TailscaleIP != "" {
-				fmt.Printf(" [ts: %s]", node.TailscaleIP)
-			}
-			fmt.Println()
+Without an app name, shows static cluster configuration.
+With an app name, SSHes to target nodes and queries live container state.
+
+Examples:
+  warpgate status
+  warpgate status myapp --tailscale-ssh`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return showClusterStatus()
 		}
 
-		fmt.Printf("\nApps: %d\n\n", len(repo.Apps))
-		for _, app := range repo.Apps {
-			version := app.Version
+		d := deploy.NewDeployer(repo, deploySSHKey)
+		d.TailscaleSSH = deployTailscaleSSH
+		d.User = deployUser
+
+		statuses, err := d.Status(args[0])
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("App: %s\n\n", args[0])
+		for _, s := range statuses {
+			if s.Error != "" {
+				fmt.Printf("  %s: error — %s\n", s.NodeID, s.Error)
+				continue
+			}
+			version := s.Version
 			if version == "" {
-				version = "latest"
+				version = "none"
 			}
-			fmt.Printf("  %s (%s:%s)\n", app.Name, app.Image, version)
-			fmt.Printf("    Targets: %v\n", app.GetTargetNodes(repo.Cluster.Nodes))
-			if len(app.Domains) > 0 {
-				fmt.Printf("    Domains: %v\n", app.Domains)
-			}
-			if app.SecretsPrefix != "" {
-				fmt.Printf("    Secrets: %s\n", app.SecretsPrefix)
+			fmt.Printf("  %s: %s (version: %s, slot: %s)\n", s.NodeID, s.State, version, s.Slot)
+			if s.Containers != "" {
+				for _, line := range strings.Split(s.Containers, "\n") {
+					if line != "" {
+						fmt.Printf("    %s\n", line)
+					}
+				}
 			}
 		}
 
 		return nil
 	},
+}
+
+func showClusterStatus() error {
+	fmt.Printf("Project: %s\n", repo.Cluster.Project)
+	fmt.Printf("Nodes: %d\n\n", len(repo.Cluster.Nodes))
+
+	for _, node := range repo.Cluster.Nodes {
+		fmt.Printf("  %s (%s)", node.ID, node.Host)
+		if node.TailscaleIP != "" {
+			fmt.Printf(" [ts: %s]", node.TailscaleIP)
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("\nApps: %d\n\n", len(repo.Apps))
+	for _, app := range repo.Apps {
+		version := app.Version
+		if version == "" {
+			version = "latest"
+		}
+		fmt.Printf("  %s (%s:%s)\n", app.Name, app.Image, version)
+		fmt.Printf("    Targets: %v\n", app.GetTargetNodes(repo.Cluster.Nodes))
+		if len(app.Domains) > 0 {
+			fmt.Printf("    Domains: %v\n", app.Domains)
+		}
+		if app.SecretsPrefix != "" {
+			fmt.Printf("    Secrets: %s\n", app.SecretsPrefix)
+		}
+	}
+
+	return nil
+}
+
+func init() {
+	statusCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	statusCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
+	statusCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
+}
+
+func init() {
+	rollbackCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	rollbackCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
+	rollbackCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
 }
 
 var logsCmd = &cobra.Command{
@@ -242,6 +303,7 @@ var rollbackCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		d := deploy.NewDeployer(repo, deploySSHKey)
 		d.TailscaleSSH = deployTailscaleSSH
+		d.User = deployUser
 		return d.Rollback(args[0])
 	},
 }
@@ -257,6 +319,79 @@ var execCmd = &cobra.Command{
 		// TODO: SSH to target node and run docker compose exec
 		return nil
 	},
+}
+
+// Remove flags
+var (
+	removeForce        bool
+	removeTailscaleSSH bool
+	removeSSHKey       string
+	removeUser         string
+	removeNodes        []string
+)
+
+var removeCmd = &cobra.Command{
+	Use:   "remove <app-name>",
+	Short: "Stop and remove an application from target nodes",
+	Long: `Remove an application by stopping its containers and cleaning up
+its files from all target nodes. If the app config has already been deleted
+from apps/, all cluster nodes are scanned.
+
+Examples:
+  warpgate remove myapp --tailscale-ssh
+  warpgate remove myapp --tailscale-ssh --force
+  warpgate remove myapp --tailscale-ssh --nodes node-1,node-2`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if !removeForce {
+			fmt.Printf("This will stop and remove '%s' from target nodes.\n", args[0])
+			fmt.Print("Continue? [y/N] ")
+			var answer string
+			fmt.Scanln(&answer)
+			if answer != "y" && answer != "Y" {
+				fmt.Println("Aborted.")
+				return nil
+			}
+		}
+
+		d := deploy.NewDeployer(repo, removeSSHKey)
+		d.TailscaleSSH = removeTailscaleSSH
+		d.User = removeUser
+		return d.Remove(args[0], removeNodes)
+	},
+}
+
+func init() {
+	removeCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
+	removeCmd.Flags().BoolVar(&removeTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	removeCmd.Flags().StringVar(&removeSSHKey, "ssh-key", "", "Path to SSH private key")
+	removeCmd.Flags().StringVar(&removeUser, "user", "", "SSH user (defaults to current user)")
+	removeCmd.Flags().StringSliceVar(&removeNodes, "nodes", nil, "Override target nodes (comma-separated)")
+	rootCmd.AddCommand(removeCmd)
+}
+
+var lockCmd = &cobra.Command{
+	Use:   "lock",
+	Short: "Manage deploy locks",
+}
+
+var lockBreakCmd = &cobra.Command{
+	Use:   "break <app-name>",
+	Short: "Forcibly remove a stale deploy lock",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		d := deploy.NewDeployer(repo, deploySSHKey)
+		d.TailscaleSSH = deployTailscaleSSH
+		d.User = deployUser
+		return d.BreakLock(args[0])
+	},
+}
+
+func init() {
+	lockBreakCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	lockBreakCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
+	lockCmd.AddCommand(lockBreakCmd)
+	rootCmd.AddCommand(lockCmd)
 }
 
 // Bootstrap flags

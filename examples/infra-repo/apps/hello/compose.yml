@@ -1,0 +1,10 @@
+services:
+  hello:
+    image: traefik/whoami
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/whoami", "--help"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 2s

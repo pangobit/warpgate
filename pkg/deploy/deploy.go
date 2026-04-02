@@ -26,6 +26,8 @@ type Deployer struct {
 	TailscaleSSH bool
 	// DryRun prints actions without executing them.
 	DryRun bool
+	// User is the SSH username. Defaults to the current OS user.
+	User string
 
 	log *logrus.Logger
 }
@@ -120,6 +122,15 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 	defer client.Close()
 
 	remoteDir := remoteAppsDir + "/" + app.Name
+
+	if _, _, err := client.RunCommand("mkdir -p " + remoteDir); err != nil {
+		return fmt.Errorf("failed to create app directory: %w", err)
+	}
+
+	if err := acquireLock(client, remoteDir); err != nil {
+		return fmt.Errorf("node %s: %w", node.ID, err)
+	}
+	defer releaseLock(client, remoteDir)
 
 	currentState := d.readState(client, remoteDir)
 	nextSlot := currentState.InactiveSlot()
@@ -250,6 +261,127 @@ func (d *Deployer) Rollback(appName string) error {
 	return d.Deploy(appName, state.PreviousVersion)
 }
 
+// Remove stops and removes an app from all target nodes.
+func (d *Deployer) Remove(appName string, nodeIDs []string) error {
+	if len(nodeIDs) == 0 {
+		app := d.Repo.GetApp(appName)
+		if app == nil {
+			// App config may already be deleted — fall back to all nodes.
+			for _, node := range d.Repo.Cluster.Nodes {
+				nodeIDs = append(nodeIDs, node.ID)
+			}
+			d.log.Warnf("App '%s' not found in config, scanning all nodes", appName)
+		} else {
+			nodeIDs = app.GetTargetNodes(d.Repo.Cluster.Nodes)
+		}
+	}
+
+	if len(nodeIDs) == 0 {
+		return fmt.Errorf("no nodes to remove %s from", appName)
+	}
+
+	var removed []string
+	for _, nodeID := range nodeIDs {
+		node := d.Repo.Cluster.GetNode(nodeID)
+		if node == nil {
+			d.log.Warnf("Node '%s' not found in config, skipping", nodeID)
+			continue
+		}
+
+		client, err := d.connect(node)
+		if err != nil {
+			d.log.Warnf("Failed to connect to %s: %v", nodeID, err)
+			continue
+		}
+
+		remoteDir := remoteAppsDir + "/" + appName
+
+		if err := acquireLock(client, remoteDir); err != nil {
+			client.Close()
+			d.log.Warnf("Node %s: %v", nodeID, err)
+			continue
+		}
+
+		state := d.readState(client, remoteDir)
+		composeFiles := "-f compose.yml -f docker-compose.override.yml"
+
+		for _, slot := range []string{"blue", "green"} {
+			projectFlag := fmt.Sprintf("-p %s-%s", appName, slot)
+			stopCmd := fmt.Sprintf("cd %s && docker compose %s %s down 2>/dev/null || true", remoteDir, projectFlag, composeFiles)
+			if _, _, err := client.RunCommand(stopCmd); err != nil {
+				d.log.Warnf("Failed to stop %s slot on %s: %v", slot, nodeID, err)
+			}
+		}
+
+		routePath := "/opt/warpgate/traefik/dynamic/" + appName + ".yml"
+		if _, _, err := client.RunCommand("rm -f " + routePath); err != nil {
+			d.log.Warnf("Failed to remove internal route on %s: %v", nodeID, err)
+		}
+
+		releaseLock(client, remoteDir)
+
+		if _, _, err := client.RunCommand("rm -rf " + remoteDir); err != nil {
+			d.log.Warnf("Failed to remove app directory on %s: %v", nodeID, err)
+		}
+
+		client.Close()
+
+		version := state.CurrentVersion
+		if version == "" {
+			version = "none"
+		}
+		d.log.Infof("Removed %s from %s (was %s on %s slot)", appName, nodeID, version, state.ActiveSlot)
+		removed = append(removed, nodeID)
+	}
+
+	if len(removed) == 0 {
+		return fmt.Errorf("failed to remove %s from any node", appName)
+	}
+
+	d.log.Infof("Removed %s from %d node(s): %v", appName, len(removed), removed)
+	return nil
+}
+
+// BreakLock forcibly removes a deploy lock for an app across its target nodes.
+func (d *Deployer) BreakLock(appName string) error {
+	app := d.Repo.GetApp(appName)
+	var nodeIDs []string
+	if app == nil {
+		for _, node := range d.Repo.Cluster.Nodes {
+			nodeIDs = append(nodeIDs, node.ID)
+		}
+	} else {
+		nodeIDs = app.GetTargetNodes(d.Repo.Cluster.Nodes)
+	}
+
+	for _, nodeID := range nodeIDs {
+		node := d.Repo.Cluster.GetNode(nodeID)
+		if node == nil {
+			continue
+		}
+
+		client, err := d.connect(node)
+		if err != nil {
+			d.log.Warnf("Failed to connect to %s: %v", nodeID, err)
+			continue
+		}
+
+		remoteDir := remoteAppsDir + "/" + appName
+		info, err := breakLock(client, remoteDir)
+		client.Close()
+
+		if err != nil {
+			d.log.Warnf("Failed to break lock on %s: %v", nodeID, err)
+		} else if info != nil {
+			d.log.Infof("Broke lock on %s (held by %s@%s since %s)", nodeID, info.User, info.Host, info.AcquiredAt.Format(time.RFC3339))
+		} else {
+			d.log.Infof("No lock found on %s", nodeID)
+		}
+	}
+
+	return nil
+}
+
 // Status queries the deployment status of an app across its target nodes.
 func (d *Deployer) Status(appName string) ([]NodeStatus, error) {
 	app := d.Repo.GetApp(appName)
@@ -349,7 +481,10 @@ func (d *Deployer) updateInternalRoutes(app *config.AppConfig) error {
 }
 
 func (d *Deployer) connect(node *config.NodeConfig) (*ssh.Client, error) {
-	user := os.Getenv("USER")
+	user := d.User
+	if user == "" {
+		user = os.Getenv("USER")
+	}
 	if user == "" {
 		user = "root"
 	}
