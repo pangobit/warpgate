@@ -76,6 +76,17 @@ var (
 	bootstrapSecretsServer bool
 )
 
+// Logs flags
+var (
+	logsNode         string
+	logsApp          string
+	logsTail         int
+	logsGrep         string
+	logsTailscaleSSH bool
+	logsSSHKey       string
+	logsUser         string
+)
+
 // Cleanup flags
 var (
 	cleanupHost         string
@@ -116,6 +127,16 @@ func init() {
 	rollbackCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
 	rollbackCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
 	rollbackCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
+
+	// logs flags
+	logsCmd.Flags().StringVar(&logsNode, "node", "", "Target node ID (required)")
+	logsCmd.Flags().StringVar(&logsApp, "app", "", "Filter to containers matching this app name")
+	logsCmd.Flags().IntVarP(&logsTail, "tail", "n", 100, "Number of recent lines per container")
+	logsCmd.Flags().StringVar(&logsGrep, "grep", "", "Server-side grep filter")
+	logsCmd.Flags().BoolVar(&logsTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	logsCmd.Flags().StringVar(&logsSSHKey, "ssh-key", "", "Path to SSH private key")
+	logsCmd.Flags().StringVar(&logsUser, "user", "", "SSH user (defaults to current user)")
+	logsCmd.MarkFlagRequired("node")
 
 	// remove flags
 	removeCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
@@ -343,14 +364,26 @@ func showClusterStatus() error {
 }
 
 var logsCmd = &cobra.Command{
-	Use:   "logs <app-name>",
-	Short: "Stream logs from an application",
-	Args:  cobra.ExactArgs(1),
+	Use:   "logs",
+	Short: "Show recent container logs from a node",
+	Long: `Fetch recent Docker container logs from a specific node.
+Shows logs from all running containers, or filter to a specific app.
+
+Examples:
+  warpgate logs --node node-1 --tailscale-ssh
+  warpgate logs --node node-1 --app myapp --tailscale-ssh
+  warpgate logs --node node-1 --tail 50 --grep "error" --tailscale-ssh`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		appName := args[0]
-		fmt.Printf("Streaming logs for %s...\n", appName)
-		// TODO: SSH to target nodes and run docker compose logs
-		return nil
+		d := deploy.NewDeployer(repo, logsSSHKey)
+		d.TailscaleSSH = logsTailscaleSSH
+		d.User = logsUser
+		return d.Logs(deploy.LogsOptions{
+			NodeID: logsNode,
+			App:    logsApp,
+			Tail:   logsTail,
+			Grep:   logsGrep,
+		})
 	},
 }
 
