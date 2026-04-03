@@ -19,6 +19,8 @@ type StepConfig struct {
 	PrivateIP string
 	// MasterPassword is the SecretSauce master password for vault initialization.
 	MasterPassword string
+	// Registry holds Docker registry credentials to store in SecretSauce.
+	Registry *config.RegistryConfig
 
 	// generatedPassword is set by setupSecretsServer when it auto-generates a password.
 	generatedPassword string
@@ -100,6 +102,12 @@ func BuildSteps(client *ssh.Client, cfg *StepConfig) []tui.StepDef {
 					return "initialized and started", nil
 				}
 				return detail, nil
+			},
+		},
+		{
+			Name: "Storing registry credentials",
+			Run: func() (string, error) {
+				return storeRegistryCredentials(client, cfg.Registry)
 			},
 		},
 	}

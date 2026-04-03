@@ -59,6 +59,7 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 		Networking:     &b.Config.Networking,
 		PrivateIP:      node.PrivateIP,
 		MasterPassword: os.Getenv("SS_MASTER_PASSWORD"),
+		Registry:       &b.Config.Registry,
 	}
 
 	if b.DryRun {

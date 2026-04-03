@@ -20,5 +20,7 @@ networking:
 
 registry:
   server: ghcr.io
-  username: ${REGISTRY_USERNAME}
-  password: ${REGISTRY_TOKEN}
+  # username and password are optional here — if provided during bootstrap,
+  # they are stored in SecretSauce and used automatically by deploy.
+  # username: ${REGISTRY_USERNAME}
+  # password: ${REGISTRY_TOKEN}
