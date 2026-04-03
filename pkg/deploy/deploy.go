@@ -610,7 +610,7 @@ func (d *Deployer) updateInternalProxy(app *config.AppConfig) error {
 		entrypoints := compose.CollectInternalEntrypoints(apps)
 
 		proxyCfg := &compose.InternalProxyConfig{
-			PrivateIP: node.PrivateIP,
+			PrivateIP:   node.PrivateIP,
 			Entrypoints: entrypoints,
 		}
 

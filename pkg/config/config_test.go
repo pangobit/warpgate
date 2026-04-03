@@ -122,6 +122,63 @@ func TestValidateApp(t *testing.T) {
 			app:     AppConfig{Name: "app", Image: "ghcr.io/org/app"},
 			wantErr: false,
 		},
+		{
+			name: "expose.public with no domains",
+			app: AppConfig{
+				Name: "app", Image: "img", Port: 8080,
+				Expose: &ExposeConfig{Public: &PublicExpose{Domains: nil}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "expose.public without port",
+			app: AppConfig{
+				Name: "app", Image: "img",
+				Expose: &ExposeConfig{Public: &PublicExpose{Domains: []string{"a.com"}}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "expose.private with zero port",
+			app: AppConfig{
+				Name: "app", Image: "img",
+				Expose: &ExposeConfig{Private: &PrivateExpose{Port: 0}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "expose.internal with empty hostname",
+			app: AppConfig{
+				Name: "app", Image: "img", Port: 8080,
+				Expose: &ExposeConfig{Internal: &InternalExpose{Hostname: ""}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "expose.internal without port",
+			app: AppConfig{
+				Name: "app", Image: "img",
+				Expose: &ExposeConfig{Internal: &InternalExpose{Hostname: "a.internal"}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid full expose config",
+			app: AppConfig{
+				Name: "app", Image: "img", Port: 8080,
+				Expose: &ExposeConfig{
+					Public:   &PublicExpose{Domains: []string{"a.com"}},
+					Private:  &PrivateExpose{Port: 8080},
+					Internal: &InternalExpose{Hostname: "a.internal"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:    "no expose is valid",
+			app:     AppConfig{Name: "app", Image: "img", Port: 8080},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
