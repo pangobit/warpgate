@@ -7,7 +7,7 @@ Warpgate is a lightweight app deployment tool written in Go. It replaces our k3s
 - **Runtime**: Docker Compose (user-written, not generated)
 - **Reverse Proxy**: Traefik with automatic HTTPS via Let's Encrypt
 - **Networking**: Tailscale mesh (direct WireGuard peering between nodes)
-- **Secrets**: [SecretSauce](https://github.com/pangobit/secretsauce) — secrets server on the tailnet, fetched at deploy time
+- **Secrets**: [SecretSauce](https://github.com/pangobit/secretsauce) — secrets server on the private network, fetched at deploy time
 - **DNS**: Cloudflare
 - **Storage**: Named Docker volumes; SQLite apps replicate via Litestream
 - **TUI**: [Charmbracelet](https://charm.sh/) v2 (bubbletea, bubbles, lipgloss)
@@ -24,8 +24,8 @@ go install github.com/pangobit/warpgate/cmd/warpgate@latest
 mkdir my-infra && cd my-infra
 warpgate init my-project
 
-# 3. Edit cluster.yml with your node's Tailscale IP
-#    Edit apps/example-app/app.yml with your image
+# 3. Edit cluster.yml with your node's private IP
+#    Edit apps/example-app/app.yml with your image and expose config
 #    Edit apps/example-app/compose.yml with your service config
 
 # 4. Bootstrap the node (installs Docker, Traefik, etc.)
@@ -68,7 +68,7 @@ infrastructure/
 ├── cluster.yml                  # Nodes, networking, registry
 ├── apps/
 │   ├── auth/
-│   │   ├── app.yml              # Deploy metadata (image, version, targets, domains)
+│   │   ├── app.yml              # Deploy metadata (image, version, targets, expose)
 │   │   └── compose.yml          # Standard Docker Compose file
 │   ├── api/
 │   │   ├── app.yml
@@ -85,13 +85,13 @@ project: myapp
 nodes:
   - id: node-1
     host: 10.0.0.1
-    tailscale_ip: 100.x.x.x
+    private_ip: 100.x.x.x
   - id: node-2
     host: 10.0.0.2
-    tailscale_ip: 100.x.x.y
+    private_ip: 100.x.x.y
 
 networking:
-  tailnet: my-tailnet.ts.net
+  private_network: my-network.ts.net
   dns:
     provider: cloudflare
     zone: example.com
@@ -108,25 +108,46 @@ registry:
   password: ${REGISTRY_TOKEN}
 
 secrets:
-  server: http://100.x.x.x:8090  # SecretSauce server URL on tailnet
+  server: http://100.x.x.x:8090  # SecretSauce server URL on private network
 
 go_proxy: http://100.x.x.x:3000  # Private Go proxy for SecretSauce install
 ```
 
-**`apps/<name>/app.yml`** is a small deployment descriptor — the app doesn't need to know about your cluster:
+**`apps/<name>/app.yml`** is a small deployment descriptor. The `expose` section explicitly declares how the service is reachable at each visibility tier:
 
 ```yaml
 image: ghcr.io/org/auth
 version: v3.1.0
 targets: [node-1, node-2]     # Which nodes to deploy to (omit for all)
-domains: [auth.example.com]   # External Traefik routing (omit if no ingress)
-internal: auth.internal        # Internal service-to-service hostname (omit if not needed)
 secrets_prefix: auth/prod      # SecretSauce key prefix (omit if no secrets)
-port: 8085                     # Container port for Traefik
-sidecars:                      # Sidecar services that need tailnet routing (omit if none)
+port: 8085                     # Container port for Traefik routing
+
+expose:
+  public:                      # Internet-facing via Traefik (omit if no ingress)
+    domains: [auth.example.com]
+  private:                     # Accessible on private network IP (omit if not needed)
+    port: 8085
+  internal:                    # Cross-node service-to-service hostname (omit if not needed)
+    hostname: auth.internal
+
+sidecars:
   admin:
-    port: 8087                 # Accessible at tailscale_ip:8087 via internal proxy
+    port: 8087
+    expose:
+      private:                 # Private network only — never public
+        port: 8087
 ```
+
+**Visibility tiers**:
+
+| Tier | Config | What it does |
+|------|--------|-------------|
+| **Public** | `expose.public` | Internet → public Traefik (80/443) → container |
+| **Private** | `expose.private` | Private network IP:port → internal Traefik → container |
+| **Internal** | `expose.internal` | Cross-node hostname routing via internal Traefik file provider |
+| **Local** | *(always on)* | Docker `warpgate` network — same-node service-to-service via aliases |
+
+No `expose` section means the service is only reachable via Docker network (e.g., a postfix relay that other containers reference by name).
 
 **`apps/<name>/compose.yml`** is a standard Docker Compose file you write and maintain. Warpgate uploads it as-is. Secrets referenced as `${VAR}` are fetched from the SecretSauce server at deploy time and injected via a `.env` file:
 
@@ -135,7 +156,6 @@ services:
   auth:
     image: ghcr.io/org/auth
     restart: unless-stopped
-    ports: ["8085:8085"]
     environment:
       DB_PATH: "/data/auth.db"
       SESSION_AUTH_KEY: ${SESSION_AUTH_KEY}  # Fetched from SecretSauce server
@@ -155,6 +175,8 @@ services:
 volumes:
   auth-data:
 ```
+
+Note: compose files should **not** declare `ports` — all routing goes through Traefik. This is what enables zero-downtime blue/green deploys (both slots can run simultaneously without port conflicts).
 
 ## Commands
 
@@ -198,7 +220,7 @@ warpgate cleanup node-1 --remove-go --remove-docker  # Also remove Go and Docker
 
 ## Zero-Downtime Deploys
 
-Warpgate uses blue/green deploys via Docker Compose project naming. The override strips all host port bindings and adds services to the shared `warpgate` Docker network with stable aliases, so both old and new compose projects can run simultaneously without port conflicts. Each deploy:
+Warpgate uses blue/green deploys via Docker Compose project naming. The override adds services to the shared `warpgate` Docker network with stable aliases, so both old and new compose projects can run simultaneously without port conflicts. Compose files should not declare host port bindings — all routing goes through Traefik. Each deploy:
 
 1. Uploads compose + override to the node; if the app has a `secrets_prefix`, fetches secrets from the SecretSauce API and uploads a `.env` file
 2. Starts the new version as a separate compose project (e.g., `auth-green`)
@@ -212,15 +234,32 @@ Warpgate uses blue/green deploys via Docker Compose project naming. The override
 
 **Health check gating**: if the compose file defines a `healthcheck`, warpgate waits up to 2 minutes for the container to report healthy. If unhealthy, the new version is torn down and the old version keeps running. Apps without a healthcheck deploy immediately.
 
-## Internal Service Routing
+## Networking Model
 
-When apps need to communicate across nodes (e.g., `brighter-platform` on node-1 talks to `auth` on node-2), Warpgate provides internal load-balanced routing via Traefik and Tailscale.
+Warpgate runs two Traefik instances per node:
 
-Add `internal` to an app's `app.yml`:
+- **Public Traefik**: Binds to `0.0.0.0:80/443`. Routes public domains (configured via `expose.public`) to containers via Docker labels. Handles ACME/TLS.
+- **Internal Traefik**: Binds only to the node's private IP. Routes private and internal traffic. Not accessible from the public internet — secure by design. One entrypoint per service/sidecar that has `expose.private` configured.
+
+Both watch the shared `warpgate` Docker network via Docker provider. They naturally ignore each other's routes because their entrypoints don't overlap.
+
+- **Public traffic**: Public Traefik routes domains to containers via Docker labels (entrypoints: `web`, `websecure`)
+- **Private traffic**: Internal Traefik routes dedicated ports to containers on the private network IP (e.g., `100.x.x.x:8087` for an admin panel)
+- **Internal traffic**: Internal Traefik routes internal hostnames to containers across nodes via private IPs (entrypoint: `internal`)
+- **Local traffic**: All services join the `warpgate` Docker network with stable aliases, so containers in different compose projects can reach each other by service name
+- **Cross-node**: Routed via Tailscale WireGuard tunnels (direct peer-to-peer, no relay)
+
+### Internal Service Routing
+
+When apps need to communicate across nodes (e.g., `brighter-platform` on node-1 talks to `auth` on node-2), Warpgate provides internal load-balanced routing via Traefik and the private network.
+
+Add `expose.internal` to an app's `app.yml`:
 
 ```yaml
 # apps/auth/app.yml
-internal: auth.internal
+expose:
+  internal:
+    hostname: auth.internal
 ```
 
 Other apps reference it by the internal hostname:
@@ -233,9 +272,9 @@ environment:
 
 **How it works**:
 
-- Traefik runs an `internal` entrypoint on port 8080 alongside the public `web`/`websecure` entrypoints
+- The internal Traefik runs an `internal` entrypoint on port 8080
 - The compose override adds `extra_hosts` entries so containers can resolve internal hostnames to the Docker host (where Traefik listens)
-- At deploy time, warpgate writes a Traefik dynamic config file to every node listing all Tailscale IPs running the service as backends
+- At deploy time, warpgate writes a Traefik dynamic config file to every node listing all private IPs running the service as backends
 - Traefik's file provider auto-reloads — cross-node traffic flows over direct WireGuard tunnels (sub-millisecond latency in the same data center)
 
 ```
@@ -244,7 +283,7 @@ brighter-platform (node-1)
   → local Traefik (internal entrypoint)
   → load-balances to:
       auth on node-1 (100.x.x.1:8085, local)
-      auth on node-2 (100.x.x.2:8085, via Tailscale)
+      auth on node-2 (100.x.x.2:8085, via private network)
 ```
 
 ## Bootstrap
@@ -270,7 +309,7 @@ Bootstrap installs dependencies on target nodes via Tailscale SSH, with a step-b
 - Docker and Docker Compose plugin
 - Go (for SecretSauce, if `go_proxy` configured)
 - [SecretSauce](https://github.com/pangobit/secretsauce) binary (if `go_proxy` configured)
-- Traefik reverse proxy with external (80/443) and internal (8080) entrypoints
+- Traefik reverse proxy with public (80/443) and internal (private IP only) entrypoints
 - `warpgate` system user with docker group access
 - SSH keys for node-to-node access
 
@@ -296,21 +335,21 @@ After bootstrap and deploys, each node has:
 │       ├── auth.yml             # Internal route: auth.internal → [node IPs]
 │       └── api.yml              # Internal route: api.internal → [node IPs]
 ├── internal-proxy/
-│   └── compose.yml              # Internal Traefik (tailscale IP only)
+│   └── compose.yml              # Internal Traefik (private IP only)
 ├── secretsauce/
 │   ├── vault.db                 # Encrypted secrets database
 │   └── master.key               # Master key for auto-unseal (0600)
 ├── apps/
 │   ├── auth/
 │   │   ├── compose.yml              # Uploaded from infra repo
-│   │   ├── docker-compose.override.yml  # Generated (Traefik labels, network aliases, ports stripped)
+│   │   ├── docker-compose.override.yml  # Generated (Traefik labels, network aliases)
 │   │   └── state.json               # Deploy state (version, slot, previous version)
 │   └── ...
 ```
 
 ## Secrets Management
 
-Warpgate uses [SecretSauce](https://github.com/pangobit/secretsauce) as a secrets server running on the tailnet. Secrets are managed centrally and fetched at deploy time — no secrets database or encryption keys on target nodes.
+Warpgate uses [SecretSauce](https://github.com/pangobit/secretsauce) as a secrets server running on the private network. Secrets are managed centrally and fetched at deploy time — no secrets database or encryption keys on target nodes.
 
 ### How it works
 
@@ -338,22 +377,6 @@ Warpgate uses [SecretSauce](https://github.com/pangobit/secretsauce) as a secret
 3. Open the SecretSauce web UI at `http://<node-ip>:8090`, log in, and add secrets.
 
 4. Deploy as usual — Warpgate fetches secrets from the API and injects them automatically.
-
-## Networking Model
-
-Warpgate runs two Traefik instances per node:
-
-- **Public Traefik**: Binds to `0.0.0.0:80/443`. Routes public domains (`auth.example.com`) to containers via Docker labels. Handles ACME/TLS.
-- **Internal Traefik**: Binds only to the node's Tailscale IP. Routes internal/sidecar traffic. Not accessible from the public internet — secure by design. One entrypoint per sidecar that needs tailnet access (e.g., `100.x.x.x:8087` for an admin panel).
-
-Both watch the shared `warpgate` Docker network via Docker provider. They naturally ignore each other's routes because their entrypoints don't overlap.
-
-- **External traffic**: Public Traefik routes domains to containers via Docker labels (entrypoints: `web`, `websecure`)
-- **Internal traffic**: Internal Traefik routes internal hostnames to containers across nodes via Tailscale IPs (entrypoint: `internal`)
-- **Sidecar access**: Internal Traefik routes dedicated ports to sidecar containers (e.g., admin panel at `tailscale_ip:8087`)
-- **Cross-project discovery**: All services join the `warpgate` network with stable aliases, so containers in different compose projects can reach each other by service name
-- **Cross-node**: Routed via Tailscale WireGuard tunnels (direct peer-to-peer, no relay)
-- **Port stripping**: The override removes all host port bindings from compose files, enabling zero-downtime blue/green deploys
 
 ## Project Structure
 
@@ -394,7 +417,8 @@ Core deployment flow is implemented. Remaining work:
 - [x] Rolling multi-node deploys
 - [x] Internal service-to-service routing
 - [x] Sidecar support (network aliases, internal proxy routing)
-- [x] Dual Traefik (public + internal proxy on tailscale IP only)
+- [x] Dual Traefik (public + internal proxy on private IP only)
+- [x] Declarative networking model (expose: public / private / internal)
 - [x] TUI for bootstrap and cleanup
 - [x] Deploy locking (prevents concurrent deploys)
 - [x] Per-app removal
