@@ -4,11 +4,13 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"net/url"
 	"path/filepath"
 	"strings"
 
 	"github.com/pangobit/warpgate/pkg/compose"
 	"github.com/pangobit/warpgate/pkg/config"
+	"github.com/pangobit/warpgate/pkg/secrets"
 	"github.com/pangobit/warpgate/pkg/ssh"
 )
 
@@ -417,7 +419,7 @@ func setupInternalProxy(client *ssh.Client, privateIP string) (string, error) {
 	}
 
 	cfg := &compose.InternalProxyConfig{
-		PrivateIP: privateIP,
+		PrivateIP:   privateIP,
 		Entrypoints: map[string]int{"internal": 8080},
 	}
 
@@ -593,6 +595,36 @@ WantedBy=multi-user.target`
 		return "password:" + masterPassword, nil
 	}
 	return "initialized and started; log: " + bootstrapLogDir + "/" + logPath, nil
+}
+
+// storeRegistryCredentials stores Docker registry credentials in SecretSauce
+// via the HTTP API on the remote node. Returns a skip message when no
+// credentials are configured.
+func storeRegistryCredentials(client *ssh.Client, reg *config.RegistryConfig) (string, error) {
+	if reg == nil || reg.Username == "" || reg.Password == "" {
+		return "skipped — no credentials provided", nil
+	}
+
+	entries := [][2]string{
+		{secrets.RegistryPrefix + "server", reg.Server},
+		{secrets.RegistryPrefix + "username", reg.Username},
+		{secrets.RegistryPrefix + "password", reg.Password},
+	}
+	for _, entry := range entries {
+		cmd := fmt.Sprintf(
+			"curl -sf -X POST -d %s http://localhost:8090/api/secrets/%s",
+			shellQuote("value="+entry[1]), url.PathEscape(entry[0]))
+		if _, stderr, err := client.RunCommand(cmd); err != nil {
+			return "", fmt.Errorf("failed to store %s: %w\n%s", entry[0], err, stderr)
+		}
+	}
+
+	return fmt.Sprintf("stored %d credential(s)", len(entries)), nil
+}
+
+// shellQuote wraps a value in single quotes, escaping embedded single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func (o *OSInfo) goArch() string {

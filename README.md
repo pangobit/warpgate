@@ -29,19 +29,17 @@ warpgate init my-project
 #    Edit apps/example-app/compose.yml with your service config
 
 # 4. Bootstrap the node (installs Docker, Traefik, etc.)
-warpgate bootstrap node-1 --tailscale-ssh
+#    Pass registry credentials to store them in SecretSauce for future deploys
+REGISTRY_USERNAME=myuser REGISTRY_TOKEN=ghp_xxx warpgate bootstrap node-1 --tailscale-ssh
+#    → Save the displayed master password, manage secrets at http://<node-ip>:8090
 
-# 5. Bootstrap the secrets server (auto-generates master password)
-warpgate bootstrap node-1 --tailscale-ssh
-#    → Save the displayed password, manage secrets at http://<node-ip>:8090
-
-# 6. Deploy your app
+# 5. Deploy your app (registry credentials fetched from SecretSauce automatically)
 warpgate deploy example-app
 
-# 7. Deploy a new version
+# 6. Deploy a new version
 warpgate deploy example-app v2.0.0
 
-# 8. Something wrong? Roll back
+# 7. Something wrong? Roll back
 warpgate rollback example-app
 ```
 
@@ -104,8 +102,8 @@ networking:
 
 registry:
   server: ghcr.io
-  username: ${REGISTRY_USERNAME}
-  password: ${REGISTRY_TOKEN}
+  # Credentials stored in SecretSauce during bootstrap.
+  # Set REGISTRY_USERNAME and REGISTRY_TOKEN env vars when running bootstrap.
 
 secrets:
   server: http://100.x.x.x:8090  # SecretSauce server URL on private network
@@ -318,6 +316,7 @@ Bootstrap installs dependencies on target nodes via Tailscale SSH, with a step-b
 - Vault automatically initialized with master password (`SS_MASTER_PASSWORD` env or auto-generated)
 - Listens on port 8090 (HTTP) and 8091 (gRPC) with web UI enabled
 - If password is auto-generated, it is displayed once after bootstrap — save it
+- If `REGISTRY_USERNAME` and `REGISTRY_TOKEN` env vars are set during bootstrap, registry credentials are stored in SecretSauce and used automatically by subsequent deploys
 
 **Prerequisites**: Tailscale installed with SSH enabled, passwordless sudo.
 
@@ -359,6 +358,8 @@ Warpgate uses [SecretSauce](https://github.com/pangobit/secretsauce) as a secret
 4. Secrets are uploaded as a `.env` file to the node (0600 permissions)
 5. `docker compose --env-file .env up -d` resolves `${VAR}` references in compose.yml
 6. The `.env` file is deleted after the health check passes
+
+**Registry credentials** can also be stored in SecretSauce. Pass `REGISTRY_USERNAME` and `REGISTRY_TOKEN` env vars during bootstrap — they are saved under `warpgate/registry/` and fetched automatically at deploy time for `docker login`. Credentials provided via `cluster.yml` env vars take precedence.
 
 ### Setup
 

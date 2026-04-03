@@ -194,11 +194,20 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 		hasEnvFile = true
 	}
 
-	if d.Repo.Cluster.Registry.Username != "" {
+	reg := d.Repo.Cluster.Registry
+	if reg.Username == "" && d.Repo.Cluster.Secrets.Server != "" {
+		fetched, fetchErr := d.fetchRegistryCredentials()
+		if fetchErr != nil {
+			d.log.Warnf("Failed to fetch registry credentials from SecretSauce: %v", fetchErr)
+		} else if fetched != nil {
+			reg = *fetched
+		}
+	}
+	if reg.Username != "" {
 		loginCmd := fmt.Sprintf("echo '%s' | docker login %s -u %s --password-stdin",
-			d.Repo.Cluster.Registry.Password,
-			d.Repo.Cluster.Registry.Server,
-			d.Repo.Cluster.Registry.Username)
+			reg.Password,
+			reg.Server,
+			reg.Username)
 		if _, _, err := client.RunCommand(loginCmd); err != nil {
 			d.log.Warnf("Docker login failed: %v", err)
 		}
@@ -768,6 +777,26 @@ func (d *Deployer) fetchSecrets(app *config.AppConfig) (string, error) {
 	}
 	d.log.Infof("Fetched %d secret(s)", len(env))
 	return secrets.FormatDotEnv(env), nil
+}
+
+// fetchRegistryCredentials retrieves Docker registry credentials from SecretSauce.
+func (d *Deployer) fetchRegistryCredentials() (*config.RegistryConfig, error) {
+	client := secrets.NewClient(d.Repo.Cluster.Secrets.Server)
+	d.log.Info("Fetching registry credentials from SecretSauce...")
+	env, err := client.FetchEnv(secrets.RegistryPrefix)
+	if err != nil {
+		return nil, err
+	}
+	if len(env) == 0 {
+		return nil, nil
+	}
+	reg := &config.RegistryConfig{
+		Server:   env["SERVER"],
+		Username: env["USERNAME"],
+		Password: env["PASSWORD"],
+	}
+	d.log.Info("Using registry credentials from SecretSauce")
+	return reg, nil
 }
 
 func (d *Deployer) readState(client *ssh.Client, remoteDir string) *DeployState {

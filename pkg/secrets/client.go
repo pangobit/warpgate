@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// RegistryPrefix is the SecretSauce key prefix for Docker registry credentials.
+const RegistryPrefix = "warpgate/registry/"
+
 // Client fetches decrypted secrets from a SecretSauce server.
 type Client struct {
 	// BaseURL is the SecretSauce server URL.
@@ -27,6 +30,27 @@ func NewClient(baseURL string) *Client {
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// SetSecret stores a secret at the given key via the SecretSauce REST API.
+func (c *Client) SetSecret(key, value string) error {
+	u := c.BaseURL + "/api/secrets/" + url.PathEscape(key)
+
+	form := url.Values{"value": {value}}
+	resp, err := c.HTTPClient.Post(u, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return fmt.Errorf("vault is sealed")
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("unexpected status %d for key %s", resp.StatusCode, key)
+	}
+
+	return nil
 }
 
 type listEntry struct {

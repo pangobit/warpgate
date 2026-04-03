@@ -217,6 +217,8 @@ networking:
 
 registry:
   server: ghcr.io
+  # Credentials are stored in SecretSauce during bootstrap.
+  # Set REGISTRY_USERNAME and REGISTRY_TOKEN env vars when running bootstrap.
 
 secrets:
   server: http://100.x.x.x:8090    # SecretSauce server URL on private network

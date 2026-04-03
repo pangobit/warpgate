@@ -86,9 +86,9 @@ func TestFormatDotEnvQuoting(t *testing.T) {
 
 func TestFetchEnv(t *testing.T) {
 	secrets := map[string]string{
-		"myapp/prod/db_url":     "postgres://localhost/db",
-		"myapp/prod/api_key":    "secret123",
-		"myapp/prod/disabled":   "nope",
+		"myapp/prod/db_url":   "postgres://localhost/db",
+		"myapp/prod/api_key":  "secret123",
+		"myapp/prod/disabled": "nope",
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +160,49 @@ func TestFetchEnvEmptyPrefix(t *testing.T) {
 	}
 	if len(env) != 0 {
 		t.Errorf("expected empty map, got %v", env)
+	}
+}
+
+func TestSetSecret(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		wantErr    bool
+	}{
+		{"success", http.StatusCreated, false},
+		{"sealed", http.StatusServiceUnavailable, true},
+		{"server_error", http.StatusInternalServerError, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotKey, gotValue string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					t.Errorf("expected POST, got %s", r.Method)
+				}
+				r.ParseForm()
+				gotKey = r.URL.Path[len("/api/secrets/"):]
+				gotValue = r.FormValue("value")
+				w.WriteHeader(tt.statusCode)
+			}))
+			defer srv.Close()
+
+			client := NewClient(srv.URL)
+			err := client.SetSecret("warpgate/registry/token", "ghp_abc123")
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("SetSecret() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr {
+				if gotKey != "warpgate/registry/token" {
+					t.Errorf("key = %q, want warpgate/registry/token", gotKey)
+				}
+				if gotValue != "ghp_abc123" {
+					t.Errorf("value = %q, want ghp_abc123", gotValue)
+				}
+			}
+		})
 	}
 }
 
