@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pangobit/warpgate/pkg/bootstrap"
 	"github.com/pangobit/warpgate/pkg/cleanup"
 	"github.com/pangobit/warpgate/pkg/config"
 	"github.com/pangobit/warpgate/pkg/deploy"
+	"github.com/pangobit/warpgate/pkg/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -68,12 +70,11 @@ var (
 
 // Bootstrap flags
 var (
-	bootstrapHost          string
-	bootstrapUser          string
-	bootstrapSSHKey        string
-	bootstrapDryRun        bool
-	bootstrapTailscaleSSH  bool
-	bootstrapSecretsServer bool
+	bootstrapHost         string
+	bootstrapUser         string
+	bootstrapSSHKey       string
+	bootstrapDryRun       bool
+	bootstrapTailscaleSSH bool
 )
 
 // Logs flags
@@ -85,6 +86,14 @@ var (
 	logsTailscaleSSH bool
 	logsSSHKey       string
 	logsUser         string
+)
+
+// Dashboard flags
+var (
+	dashTailscaleSSH bool
+	dashSSHKey       string
+	dashUser         string
+	dashRefresh      int
 )
 
 // Cleanup flags
@@ -104,9 +113,9 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(dashboardCmd)
 	rootCmd.AddCommand(logsCmd)
 	rootCmd.AddCommand(rollbackCmd)
-	rootCmd.AddCommand(execCmd)
 	rootCmd.AddCommand(removeCmd)
 	rootCmd.AddCommand(lockCmd)
 	rootCmd.AddCommand(bootstrapCmd)
@@ -138,6 +147,12 @@ func init() {
 	logsCmd.Flags().StringVar(&logsUser, "user", "", "SSH user (defaults to current user)")
 	logsCmd.MarkFlagRequired("node")
 
+	// dashboard flags
+	dashboardCmd.Flags().BoolVar(&dashTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	dashboardCmd.Flags().StringVar(&dashSSHKey, "ssh-key", "", "Path to SSH private key")
+	dashboardCmd.Flags().StringVar(&dashUser, "user", "", "SSH user (defaults to current user)")
+	dashboardCmd.Flags().IntVar(&dashRefresh, "refresh", 30, "Auto-refresh interval in seconds")
+
 	// remove flags
 	removeCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
 	removeCmd.Flags().BoolVar(&removeTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
@@ -156,8 +171,6 @@ func init() {
 	bootstrapCmd.Flags().StringVar(&bootstrapSSHKey, "ssh-key", "", "Path to SSH private key")
 	bootstrapCmd.Flags().BoolVar(&bootstrapDryRun, "dry-run", false, "Show installation script without executing")
 	bootstrapCmd.Flags().BoolVar(&bootstrapTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH (no key needed)")
-	bootstrapCmd.Flags().BoolVar(&bootstrapSecretsServer, "secrets-server", false, "Set up SecretSauce server on this node")
-
 	// cleanup flags
 	cleanupCmd.Flags().StringVar(&cleanupHost, "host", "", "Target host IP or hostname (ad-hoc mode)")
 	cleanupCmd.Flags().StringVar(&cleanupUser, "user", "", "SSH user (defaults to current user)")
@@ -363,6 +376,33 @@ func showClusterStatus() error {
 	return nil
 }
 
+var dashboardCmd = &cobra.Command{
+	Use:   "dashboard",
+	Short: "Live cluster status dashboard",
+	Long: `Show a live, auto-refreshing dashboard of cluster and app status.
+
+Connects to all nodes via SSH and displays node reachability, app versions,
+blue/green slot state, and container health.
+
+Examples:
+  warpgate dashboard --tailscale-ssh
+  warpgate dashboard --tailscale-ssh --refresh 10`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		d := deploy.NewDeployer(repo, dashSSHKey)
+		d.TailscaleSSH = dashTailscaleSSH
+		d.User = dashUser
+
+		return tui.RunDashboard(tui.DashboardConfig{
+			Project:         repo.Cluster.Project,
+			Nodes:           repo.Cluster.Nodes,
+			Apps:            repo.Apps,
+			Fetch:           d.ClusterStatus,
+			RefreshInterval: time.Duration(dashRefresh) * time.Second,
+		})
+	},
+}
+
 var logsCmd = &cobra.Command{
 	Use:   "logs",
 	Short: "Show recent container logs from a node",
@@ -396,19 +436,6 @@ var rollbackCmd = &cobra.Command{
 		d.TailscaleSSH = deployTailscaleSSH
 		d.User = deployUser
 		return d.Rollback(args[0])
-	},
-}
-
-var execCmd = &cobra.Command{
-	Use:   "exec <app-name> <command>",
-	Short: "Execute a command in an application container",
-	Args:  cobra.MinimumNArgs(2),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		appName := args[0]
-		command := args[1:]
-		fmt.Printf("Executing %v in %s...\n", command, appName)
-		// TODO: SSH to target node and run docker compose exec
-		return nil
 	},
 }
 
@@ -468,20 +495,19 @@ var bootstrapCmd = &cobra.Command{
 - Go and SecretSauce (if go_proxy configured)
 - Traefik reverse proxy
 - warpgate user with proper permissions
-- SecretSauce server as systemd service (with --secrets-server)
+- SecretSauce server as systemd service
 
 The node must have Tailscale and SSH already configured.
 
-When --secrets-server is used, the vault is automatically initialized:
+During bootstrap, the SecretSauce vault is automatically initialized or reused:
 - If SS_MASTER_PASSWORD is set, that password is used
 - Otherwise, a strong password is auto-generated and displayed once
-- The master key file is created and the service is started
+- The master key file is created and the service is started or restarted
 - Manage secrets via the SecretSauce web UI at http://<node-ip>:8090
 
 Examples:
   warpgate bootstrap test-node --tailscale-ssh
-  warpgate bootstrap node-1 --secrets-server --tailscale-ssh
-  SS_MASTER_PASSWORD=secret warpgate bootstrap node-1 --secrets-server --tailscale-ssh
+  SS_MASTER_PASSWORD=secret warpgate bootstrap node-1 --tailscale-ssh
   warpgate bootstrap --host 100.95.115.81 --tailscale-ssh
   warpgate bootstrap node-1 --dry-run`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -522,7 +548,6 @@ Examples:
 		}
 		bs.DryRun = bootstrapDryRun
 		bs.TailscaleSSH = bootstrapTailscaleSSH
-		bs.SecretsServer = bootstrapSecretsServer
 
 		if len(args) > 0 {
 			if repo == nil {
@@ -532,7 +557,7 @@ Examples:
 			if node == nil {
 				return fmt.Errorf("node '%s' not found in config", args[0])
 			}
-			return bs.BootstrapHost(node.Host, bootstrapUser)
+			return bs.BootstrapNode(node, bootstrapUser)
 		} else if bootstrapHost != "" {
 			return bs.BootstrapHost(bootstrapHost, bootstrapUser)
 		}

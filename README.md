@@ -32,7 +32,7 @@ warpgate init my-project
 warpgate bootstrap node-1 --tailscale-ssh
 
 # 5. Bootstrap the secrets server (auto-generates master password)
-warpgate bootstrap node-1 --secrets-server --tailscale-ssh
+warpgate bootstrap node-1 --tailscale-ssh
 #    → Save the displayed password, manage secrets at http://<node-ip>:8090
 
 # 6. Deploy your app
@@ -123,6 +123,9 @@ domains: [auth.example.com]   # External Traefik routing (omit if no ingress)
 internal: auth.internal        # Internal service-to-service hostname (omit if not needed)
 secrets_prefix: auth/prod      # SecretSauce key prefix (omit if no secrets)
 port: 8085                     # Container port for Traefik
+sidecars:                      # Sidecar services that need tailnet routing (omit if none)
+  admin:
+    port: 8087                 # Accessible at tailscale_ip:8087 via internal proxy
 ```
 
 **`apps/<name>/compose.yml`** is a standard Docker Compose file you write and maintain. Warpgate uploads it as-is. Secrets referenced as `${VAR}` are fetched from the SecretSauce server at deploy time and injected via a `.env` file:
@@ -159,7 +162,7 @@ volumes:
 # Setup
 warpgate init my-project                    # Scaffold cluster.yml + apps/ structure
 warpgate bootstrap node-1 --tailscale-ssh   # Install Docker, Traefik (TUI)
-warpgate bootstrap node-1 --secrets-server --tailscale-ssh  # Also set up SecretSauce server
+warpgate bootstrap node-1 --tailscale-ssh
 warpgate bootstrap --host 100.x.x.x --tailscale-ssh  # Ad-hoc bootstrap by IP
 warpgate bootstrap node-1 --dry-run         # Preview bootstrap script
 
@@ -173,10 +176,11 @@ warpgate rollback auth                      # Re-deploy previous version
 # Inspect
 warpgate status                             # Show cluster, nodes, and all apps
 warpgate status auth --tailscale-ssh        # Live status from target nodes
+warpgate dashboard --tailscale-ssh          # Live TUI dashboard (auto-refreshes)
+warpgate dashboard --tailscale-ssh --refresh 10  # Custom refresh interval
 warpgate logs --node node-1 --tailscale-ssh # All container logs on a node
 warpgate logs --node node-1 --app auth      # Filter to one app's containers
 warpgate logs --node node-1 --grep "error"  # Server-side grep filter
-warpgate exec auth -- sh                    # Exec into container (WIP)
 
 # App removal
 warpgate remove auth --tailscale-ssh        # Stop and remove app from nodes
@@ -194,7 +198,7 @@ warpgate cleanup node-1 --remove-go --remove-docker  # Also remove Go and Docker
 
 ## Zero-Downtime Deploys
 
-Warpgate uses blue/green deploys via Docker Compose project naming. Each deploy:
+Warpgate uses blue/green deploys via Docker Compose project naming. The override strips all host port bindings and adds services to the shared `warpgate` Docker network with stable aliases, so both old and new compose projects can run simultaneously without port conflicts. Each deploy:
 
 1. Uploads compose + override to the node; if the app has a `secrets_prefix`, fetches secrets from the SecretSauce API and uploads a `.env` file
 2. Starts the new version as a separate compose project (e.g., `auth-green`)
@@ -202,6 +206,7 @@ Warpgate uses blue/green deploys via Docker Compose project naming. Each deploy:
 4. Polls `docker inspect` for the new container's health check status
 5. Once healthy, stops the old compose project (e.g., `auth-blue`), removes `.env` file
 6. Saves deploy state for rollback
+7. Updates the internal proxy if sidecar entrypoints changed
 
 **Multi-node rolling deploys**: nodes are updated sequentially. Node-1 must pass health checks before node-2 starts. If any node fails, the rollout stops — already-deployed nodes stay on the new version, remaining nodes stay on the old version.
 
@@ -269,7 +274,7 @@ Bootstrap installs dependencies on target nodes via Tailscale SSH, with a step-b
 - `warpgate` system user with docker group access
 - SSH keys for node-to-node access
 
-**With `--secrets-server`** (for the node that runs the SecretSauce server):
+**Bootstrap also sets up the SecretSauce server**:
 - SecretSauce configured as a systemd service with auto-unseal via master key file
 - Vault automatically initialized with master password (`SS_MASTER_PASSWORD` env or auto-generated)
 - Listens on port 8090 (HTTP) and 8091 (gRPC) with web UI enabled
@@ -286,17 +291,19 @@ After bootstrap and deploys, each node has:
 ```
 /opt/warpgate/
 ├── traefik/
-│   ├── compose.yml              # Traefik service (started at bootstrap)
-│   └── dynamic/                 # Auto-reloaded by Traefik file provider
+│   ├── compose.yml              # Public Traefik (80/443, ACME)
+│   └── dynamic/                 # Auto-reloaded by internal Traefik file provider
 │       ├── auth.yml             # Internal route: auth.internal → [node IPs]
 │       └── api.yml              # Internal route: api.internal → [node IPs]
-├── secretsauce/                 # Only on --secrets-server nodes
+├── internal-proxy/
+│   └── compose.yml              # Internal Traefik (tailscale IP only)
+├── secretsauce/
 │   ├── vault.db                 # Encrypted secrets database
 │   └── master.key               # Master key for auto-unseal (0600)
 ├── apps/
 │   ├── auth/
 │   │   ├── compose.yml              # Uploaded from infra repo
-│   │   ├── docker-compose.override.yml  # Generated (Traefik labels + image tag)
+│   │   ├── docker-compose.override.yml  # Generated (Traefik labels, network aliases, ports stripped)
 │   │   └── state.json               # Deploy state (version, slot, previous version)
 │   └── ...
 ```
@@ -324,7 +331,7 @@ Warpgate uses [SecretSauce](https://github.com/pangobit/secretsauce) as a secret
 
 2. Bootstrap the secrets server node (vault is initialized automatically):
    ```bash
-   warpgate bootstrap secrets-node --secrets-server --tailscale-ssh
+   warpgate bootstrap secrets-node --tailscale-ssh
    ```
    If `SS_MASTER_PASSWORD` is set, that password is used. Otherwise a strong password is auto-generated and displayed once — save it.
 
@@ -334,11 +341,19 @@ Warpgate uses [SecretSauce](https://github.com/pangobit/secretsauce) as a secret
 
 ## Networking Model
 
-- **External traffic**: Traefik routes public domains (`auth.example.com`) to local containers via Docker labels
-- **Internal traffic**: Traefik routes internal hostnames (`auth.internal`) to containers across all nodes via Tailscale IPs
-- **Same-node**: Routed via Docker network (no Tailscale overhead)
+Warpgate runs two Traefik instances per node:
+
+- **Public Traefik**: Binds to `0.0.0.0:80/443`. Routes public domains (`auth.example.com`) to containers via Docker labels. Handles ACME/TLS.
+- **Internal Traefik**: Binds only to the node's Tailscale IP. Routes internal/sidecar traffic. Not accessible from the public internet — secure by design. One entrypoint per sidecar that needs tailnet access (e.g., `100.x.x.x:8087` for an admin panel).
+
+Both watch the shared `warpgate` Docker network via Docker provider. They naturally ignore each other's routes because their entrypoints don't overlap.
+
+- **External traffic**: Public Traefik routes domains to containers via Docker labels (entrypoints: `web`, `websecure`)
+- **Internal traffic**: Internal Traefik routes internal hostnames to containers across nodes via Tailscale IPs (entrypoint: `internal`)
+- **Sidecar access**: Internal Traefik routes dedicated ports to sidecar containers (e.g., admin panel at `tailscale_ip:8087`)
+- **Cross-project discovery**: All services join the `warpgate` network with stable aliases, so containers in different compose projects can reach each other by service name
 - **Cross-node**: Routed via Tailscale WireGuard tunnels (direct peer-to-peer, no relay)
-- **Load balancing**: Traefik health-checks backends and distributes traffic across healthy instances
+- **Port stripping**: The override removes all host port bindings from compose files, enabling zero-downtime blue/green deploys
 
 ## Project Structure
 
@@ -378,6 +393,8 @@ Core deployment flow is implemented. Remaining work:
 - [x] Health check gating
 - [x] Rolling multi-node deploys
 - [x] Internal service-to-service routing
+- [x] Sidecar support (network aliases, internal proxy routing)
+- [x] Dual Traefik (public + internal proxy on tailscale IP only)
 - [x] TUI for bootstrap and cleanup
 - [x] Deploy locking (prevents concurrent deploys)
 - [x] Per-app removal
@@ -385,9 +402,8 @@ Core deployment flow is implemented. Remaining work:
 - [x] Rollback to previous version
 - [ ] Image watcher / CI push trigger
 - [x] Node-centric log inspection
-- [ ] Exec into containers
-- [ ] Web dashboard
-- [ ] Backup/restore for volumes
+- [x] TUI dashboard
+- [ ] Web dashboard (warpd)
 
 ## Credits
 

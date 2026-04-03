@@ -49,7 +49,35 @@ func GenerateInternalRoute(app *config.AppConfig, cluster *config.ClusterConfig)
 		return "", nil
 	}
 
-	targetNodes := app.GetTargetNodes(cluster.Nodes)
+	return generateInternalRouteConfig(
+		app.Name+"-internal",
+		app.Internal,
+		"internal",
+		app.Port,
+		app.GetTargetNodes(cluster.Nodes),
+		cluster,
+	)
+}
+
+// GenerateSidecarInternalRoute creates a Traefik dynamic file config for cross-node
+// routing of a sidecar's internal hostname.
+func GenerateSidecarInternalRoute(app *config.AppConfig, sidecarName string, sidecar config.SidecarConfig, cluster *config.ClusterConfig) (string, error) {
+	if sidecar.Internal == "" || sidecar.Port == 0 {
+		return "", nil
+	}
+
+	entrypointName := app.Name + "-" + sidecarName + "-internal"
+	return generateInternalRouteConfig(
+		entrypointName,
+		sidecar.Internal,
+		entrypointName,
+		sidecar.Port,
+		app.GetTargetNodes(cluster.Nodes),
+		cluster,
+	)
+}
+
+func generateInternalRouteConfig(routerName, hostname, entrypoint string, port int, targetNodes []string, cluster *config.ClusterConfig) (string, error) {
 	var servers []internalServer
 	for _, nodeID := range targetNodes {
 		node := cluster.GetNode(nodeID)
@@ -57,7 +85,7 @@ func GenerateInternalRoute(app *config.AppConfig, cluster *config.ClusterConfig)
 			continue
 		}
 		servers = append(servers, internalServer{
-			URL: fmt.Sprintf("http://%s:%d", node.TailscaleIP, app.Port),
+			URL: fmt.Sprintf("http://%s:%d", node.TailscaleIP, port),
 		})
 	}
 
@@ -65,13 +93,12 @@ func GenerateInternalRoute(app *config.AppConfig, cluster *config.ClusterConfig)
 		return "", nil
 	}
 
-	routerName := app.Name + "-internal"
 	cfg := InternalRouteConfig{}
 	cfg.HTTP.Routers = map[string]internalRouter{
 		routerName: {
-			Rule:        fmt.Sprintf("Host(`%s`)", app.Internal),
+			Rule:        "Host(`" + hostname + "`)",
 			Service:     routerName,
-			EntryPoints: []string{"internal"},
+			EntryPoints: []string{entrypoint},
 		},
 	}
 	cfg.HTTP.Services = map[string]internalService{
@@ -79,7 +106,7 @@ func GenerateInternalRoute(app *config.AppConfig, cluster *config.ClusterConfig)
 			LoadBalancer: internalLB{
 				Servers: servers,
 				HealthCheck: &internalHealthCheck{
-					Port:     app.Port,
+					Port:     port,
 					Interval: "5s",
 				},
 			},

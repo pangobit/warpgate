@@ -21,8 +21,6 @@ type Bootstrapper struct {
 	TailscaleSSH bool
 	// DryRun prints the install script without executing it.
 	DryRun bool
-	// SecretsServer enables SecretSauce server setup on this node.
-	SecretsServer bool
 }
 
 // NewBootstrapper creates a new bootstrapper instance.
@@ -33,14 +31,9 @@ func NewBootstrapper(cfg *config.ClusterConfig, sshKey string) *Bootstrapper {
 	}
 }
 
-// BootstrapNode bootstraps a specific node by its config ID.
-func (b *Bootstrapper) BootstrapNode(nodeID string) error {
-	node := b.Config.GetNode(nodeID)
-	if node == nil {
-		return fmt.Errorf("node '%s' not found in configuration", nodeID)
-	}
-
-	return b.bootstrapNode(node, "")
+// BootstrapNode bootstraps a node using its full config (including TailscaleIP).
+func (b *Bootstrapper) BootstrapNode(node *config.NodeConfig, user string) error {
+	return b.bootstrapNode(node, user)
 }
 
 // BootstrapHost bootstraps a node by host address in ad-hoc mode.
@@ -64,7 +57,7 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 	stepCfg := &StepConfig{
 		GoProxy:        b.Config.GoProxy,
 		Networking:     &b.Config.Networking,
-		SecretsServer:  b.SecretsServer,
+		TailscaleIP:    node.TailscaleIP,
 		MasterPassword: os.Getenv("SS_MASTER_PASSWORD"),
 	}
 
@@ -100,7 +93,7 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 		return err
 	}
 
-	if b.SecretsServer && stepCfg.generatedPassword != "" {
+	if stepCfg.generatedPassword != "" {
 		host := node.Host
 		if node.TailscaleIP != "" {
 			host = node.TailscaleIP

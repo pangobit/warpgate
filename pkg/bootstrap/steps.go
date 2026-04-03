@@ -15,8 +15,8 @@ type StepConfig struct {
 	GoProxy string
 	// Networking is the cluster networking configuration.
 	Networking *config.NetworkingConfig
-	// SecretsServer enables SecretSauce server setup on this node.
-	SecretsServer bool
+	// TailscaleIP is the node's Tailscale IP for internal proxy binding.
+	TailscaleIP string
 	// MasterPassword is the SecretSauce master password for vault initialization.
 	MasterPassword string
 
@@ -82,10 +82,13 @@ func BuildSteps(client *ssh.Client, cfg *StepConfig) []tui.StepDef {
 				return setupWarpgate(client, cfg.Networking)
 			},
 		},
-	}
-
-	if cfg.SecretsServer {
-		steps = append(steps, tui.StepDef{
+		{
+			Name: "Setting up Internal Proxy",
+			Run: func() (string, error) {
+				return setupInternalProxy(client, cfg.TailscaleIP)
+			},
+		},
+		{
 			Name: "Setting up SecretSauce server",
 			Run: func() (string, error) {
 				detail, err := setupSecretsServer(client, cfg.MasterPassword)
@@ -98,7 +101,7 @@ func BuildSteps(client *ssh.Client, cfg *StepConfig) []tui.StepDef {
 				}
 				return detail, nil
 			},
-		})
+		},
 	}
 
 	return steps

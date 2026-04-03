@@ -116,12 +116,17 @@ func (r *RepoConfig) GetAppsForNode(nodeID string) []*AppConfig {
 	return result
 }
 
-// InternalHosts returns all internal hostnames configured across all apps.
+// InternalHosts returns all internal hostnames configured across all apps and sidecars.
 func (r *RepoConfig) InternalHosts() []string {
 	var hosts []string
 	for _, app := range r.Apps {
 		if app.Internal != "" {
 			hosts = append(hosts, app.Internal)
+		}
+		for _, sidecar := range app.Sidecars {
+			if sidecar.Internal != "" {
+				hosts = append(hosts, sidecar.Internal)
+			}
 		}
 	}
 	return hosts

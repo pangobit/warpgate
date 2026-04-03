@@ -1,4 +1,5 @@
-// Package tui provides a reusable step-runner TUI built on Charmbracelet v2.
+// Package tui provides TUI components built on Charmbracelet v2, including
+// a step-runner for bootstrap progress and a live cluster dashboard.
 package tui
 
 import "charm.land/lipgloss/v2"

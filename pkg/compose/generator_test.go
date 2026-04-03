@@ -8,6 +8,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const singleServiceCompose = `services:
+  api:
+    image: ghcr.io/org/api
+    ports: ["3000:3000"]
+`
+
 func TestGenerateOverrideWithDomains(t *testing.T) {
 	app := &config.AppConfig{
 		Name:    "api",
@@ -27,7 +33,7 @@ func TestGenerateOverrideWithDomains(t *testing.T) {
 		},
 	}
 
-	output, err := GenerateOverride(app, networking, nil)
+	output, err := GenerateOverride(app, networking, nil, singleServiceCompose)
 	if err != nil {
 		t.Fatalf("GenerateOverride() error: %v", err)
 	}
@@ -68,8 +74,12 @@ func TestGenerateOverrideWithDomains(t *testing.T) {
 		t.Errorf("expected port 3000, got %s", portLabel)
 	}
 
-	if len(svc.Networks) != 1 || svc.Networks[0] != "warpgate" {
-		t.Errorf("expected warpgate network, got %v", svc.Networks)
+	netCfg, ok := svc.Networks["warpgate"]
+	if !ok {
+		t.Fatal("warpgate network not found on service")
+	}
+	if len(netCfg.Aliases) != 1 || netCfg.Aliases[0] != "api" {
+		t.Errorf("expected alias [api], got %v", netCfg.Aliases)
 	}
 
 	net, ok := override.Networks["warpgate"]
@@ -88,9 +98,11 @@ func TestGenerateOverrideNoDomains(t *testing.T) {
 		Version: "v1.0.0",
 	}
 
-	networking := &config.NetworkingConfig{}
-
-	output, err := GenerateOverride(app, networking, nil)
+	compose := `services:
+  worker:
+    image: ghcr.io/org/worker
+`
+	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil, compose)
 	if err != nil {
 		t.Fatalf("GenerateOverride() error: %v", err)
 	}
@@ -116,7 +128,11 @@ func TestGenerateOverrideDefaultVersion(t *testing.T) {
 		Image: "ghcr.io/org/app",
 	}
 
-	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil)
+	compose := `services:
+  app:
+    image: ghcr.io/org/app
+`
+	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil, compose)
 	if err != nil {
 		t.Fatalf("GenerateOverride() error: %v", err)
 	}
@@ -150,7 +166,11 @@ func TestGenerateOverrideMultipleDomains(t *testing.T) {
 		},
 	}
 
-	output, err := GenerateOverride(app, networking, nil)
+	compose := `services:
+  site:
+    image: ghcr.io/org/site
+`
+	output, err := GenerateOverride(app, networking, nil, compose)
 	if err != nil {
 		t.Fatalf("GenerateOverride() error: %v", err)
 	}
@@ -162,12 +182,10 @@ func TestGenerateOverrideMultipleDomains(t *testing.T) {
 
 	svc := override.Services["site"]
 
-	// First domain uses app name as router name
 	if !strings.Contains(svc.Labels["traefik.http.routers.site.rule"], "example.com") {
 		t.Error("first domain router rule missing")
 	}
 
-	// Second domain uses suffix
 	if !strings.Contains(svc.Labels["traefik.http.routers.site-1.rule"], "www.example.com") {
 		t.Error("second domain router rule missing")
 	}
@@ -185,7 +203,11 @@ func TestGenerateOverrideInternalLabels(t *testing.T) {
 	networking := &config.NetworkingConfig{}
 	internalHosts := []string{"auth.internal", "api.internal"}
 
-	output, err := GenerateOverride(app, networking, internalHosts)
+	compose := `services:
+  auth:
+    image: ghcr.io/org/auth
+`
+	output, err := GenerateOverride(app, networking, internalHosts, compose)
 	if err != nil {
 		t.Fatalf("GenerateOverride() error: %v", err)
 	}
@@ -216,6 +238,16 @@ func TestGenerateOverrideInternalLabels(t *testing.T) {
 	if svc.ExtraHosts[1] != "api.internal:host-gateway" {
 		t.Errorf("expected api.internal:host-gateway, got %q", svc.ExtraHosts[1])
 	}
+
+	portEP := svc.Labels["traefik.http.routers.auth-port-internal.entrypoints"]
+	if portEP != "auth-port-internal" {
+		t.Errorf("expected port entrypoint auth-port-internal, got %q", portEP)
+	}
+
+	portRule := svc.Labels["traefik.http.routers.auth-port-internal.rule"]
+	if portRule != "PathPrefix(`/`)" {
+		t.Errorf("expected port router rule PathPrefix(`/`), got %q", portRule)
+	}
 }
 
 func TestGenerateOverrideNoInternalNoExtraHosts(t *testing.T) {
@@ -225,7 +257,11 @@ func TestGenerateOverrideNoInternalNoExtraHosts(t *testing.T) {
 		Version: "v1.0.0",
 	}
 
-	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil)
+	compose := `services:
+  worker:
+    image: ghcr.io/org/worker
+`
+	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil, compose)
 	if err != nil {
 		t.Fatalf("GenerateOverride() error: %v", err)
 	}
@@ -237,6 +273,182 @@ func TestGenerateOverrideNoInternalNoExtraHosts(t *testing.T) {
 
 	if len(override.Services["worker"].ExtraHosts) != 0 {
 		t.Errorf("expected no extra_hosts, got %v", override.Services["worker"].ExtraHosts)
+	}
+}
+
+func TestGenerateOverrideAllServicesGetNetwork(t *testing.T) {
+	app := &config.AppConfig{
+		Name:    "brighter-platform",
+		Image:   "ghcr.io/org/client",
+		Version: "v1.0.0",
+		Domains: []string{"example.com"},
+		Port:    8083,
+		Sidecars: map[string]config.SidecarConfig{
+			"admin": {Port: 8087},
+		},
+	}
+
+	compose := `services:
+  brighter-platform:
+    image: ghcr.io/org/client
+  admin:
+    image: ghcr.io/org/admin
+`
+	output, err := GenerateOverride(app, &config.NetworkingConfig{
+		Traefik: config.TraefikConfig{EntryPoints: []string{"web"}},
+	}, nil, compose)
+	if err != nil {
+		t.Fatalf("GenerateOverride() error: %v", err)
+	}
+
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	for _, svcName := range []string{"brighter-platform", "admin"} {
+		svc, ok := override.Services[svcName]
+		if !ok {
+			t.Fatalf("service %s not found", svcName)
+		}
+		netCfg, ok := svc.Networks["warpgate"]
+		if !ok {
+			t.Fatalf("service %s: warpgate network not found", svcName)
+		}
+		if len(netCfg.Aliases) != 1 || netCfg.Aliases[0] != svcName {
+			t.Errorf("service %s: expected alias [%s], got %v", svcName, svcName, netCfg.Aliases)
+		}
+	}
+}
+
+func TestGenerateOverrideNetworkAliases(t *testing.T) {
+	app := &config.AppConfig{
+		Name:    "auth",
+		Image:   "ghcr.io/org/auth",
+		Version: "v1.0.0",
+	}
+
+	compose := `services:
+  auth:
+    image: ghcr.io/org/auth
+  litestream:
+    image: litestream/litestream
+`
+	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil, compose)
+	if err != nil {
+		t.Fatalf("GenerateOverride() error: %v", err)
+	}
+
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	for _, svcName := range []string{"auth", "litestream"} {
+		svc, ok := override.Services[svcName]
+		if !ok {
+			t.Fatalf("service %s not found", svcName)
+		}
+		netCfg, ok := svc.Networks["warpgate"]
+		if !ok {
+			t.Fatalf("service %s: warpgate network not found", svcName)
+		}
+		if len(netCfg.Aliases) != 1 || netCfg.Aliases[0] != svcName {
+			t.Errorf("service %s: expected alias [%s], got %v", svcName, svcName, netCfg.Aliases)
+		}
+	}
+
+	// litestream should not have image or labels (not the main service, not a declared sidecar)
+	ls := override.Services["litestream"]
+	if ls.Image != "" {
+		t.Errorf("litestream should not have image override, got %s", ls.Image)
+	}
+	if len(ls.Labels) != 0 {
+		t.Errorf("litestream should not have labels, got %v", ls.Labels)
+	}
+}
+
+func TestGenerateOverrideSidecarLabels(t *testing.T) {
+	app := &config.AppConfig{
+		Name:    "brighter-platform",
+		Image:   "ghcr.io/org/client",
+		Version: "v1.0.0",
+		Port:    8083,
+		Sidecars: map[string]config.SidecarConfig{
+			"admin": {Port: 8087},
+		},
+	}
+
+	compose := `services:
+  brighter-platform:
+    image: ghcr.io/org/client
+  admin:
+    image: ghcr.io/org/admin
+`
+	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil, compose)
+	if err != nil {
+		t.Fatalf("GenerateOverride() error: %v", err)
+	}
+
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	admin := override.Services["admin"]
+	if admin.Labels["traefik.enable"] != "true" {
+		t.Error("admin sidecar should have traefik.enable=true")
+	}
+
+	routerName := "brighter-platform-admin-internal"
+	ep := admin.Labels["traefik.http.routers."+routerName+".entrypoints"]
+	if ep != routerName {
+		t.Errorf("expected entrypoint %s, got %s", routerName, ep)
+	}
+
+	portLabel := admin.Labels["traefik.http.services."+routerName+".loadbalancer.server.port"]
+	if portLabel != "8087" {
+		t.Errorf("expected sidecar port 8087, got %s", portLabel)
+	}
+}
+
+func TestGenerateOverrideMainServiceInternalPortLabels(t *testing.T) {
+	app := &config.AppConfig{
+		Name:    "brighter-platform",
+		Image:   "ghcr.io/org/client",
+		Version: "v1.0.0",
+		Port:    8083,
+	}
+
+	compose := `services:
+  brighter-platform:
+    image: ghcr.io/org/client
+`
+	output, err := GenerateOverride(app, &config.NetworkingConfig{}, nil, compose)
+	if err != nil {
+		t.Fatalf("GenerateOverride() error: %v", err)
+	}
+
+	var override OverrideFile
+	if err := yaml.Unmarshal([]byte(output), &override); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	main := override.Services["brighter-platform"]
+	routerName := "brighter-platform-port-internal"
+	ep := main.Labels["traefik.http.routers."+routerName+".entrypoints"]
+	if ep != routerName {
+		t.Errorf("expected entrypoint %s, got %s", routerName, ep)
+	}
+
+	rule := main.Labels["traefik.http.routers."+routerName+".rule"]
+	if rule != "PathPrefix(`/`)" {
+		t.Errorf("expected PathPrefix(`/`) rule, got %s", rule)
+	}
+
+	portLabel := main.Labels["traefik.http.services."+routerName+".loadbalancer.server.port"]
+	if portLabel != "8083" {
+		t.Errorf("expected app port 8083, got %s", portLabel)
 	}
 }
 
@@ -270,13 +482,11 @@ func TestGenerateTraefikCompose(t *testing.T) {
 	if !strings.Contains(output, "443:443") {
 		t.Error("expected port 443 mapping")
 	}
-	if !strings.Contains(output, "8080:8080") {
-		t.Error("expected internal entrypoint port 8080")
+	// Internal entrypoint moved to internal proxy
+	if strings.Contains(output, "8080:8080") {
+		t.Error("public Traefik should not have internal entrypoint 8080")
 	}
-	if !strings.Contains(output, "providers.file.directory") {
-		t.Error("expected file provider config")
-	}
-	if !strings.Contains(output, "/opt/warpgate/traefik/dynamic") {
-		t.Error("expected dynamic config volume mount")
+	if strings.Contains(output, "providers.file.directory") {
+		t.Error("public Traefik should not have file provider (moved to internal proxy)")
 	}
 }

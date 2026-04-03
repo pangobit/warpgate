@@ -14,8 +14,8 @@ func TestBuildStepsCount(t *testing.T) {
 
 	steps := BuildSteps(nil, cfg)
 
-	if len(steps) != 8 {
-		t.Errorf("expected 8 bootstrap steps, got %d", len(steps))
+	if len(steps) != 10 {
+		t.Errorf("expected 10 bootstrap steps, got %d", len(steps))
 	}
 
 	expected := []string{
@@ -27,6 +27,8 @@ func TestBuildStepsCount(t *testing.T) {
 		"Installing SecretSauce",
 		"Setting up SSH keys",
 		"Setting up Warpgate + Traefik",
+		"Setting up Internal Proxy",
+		"Setting up SecretSauce server",
 	}
 
 	for i, name := range expected {
@@ -36,39 +38,36 @@ func TestBuildStepsCount(t *testing.T) {
 	}
 }
 
-func TestBuildStepsWithSecretsServer(t *testing.T) {
+func TestBuildStepsAlwaysIncludeSecretsServer(t *testing.T) {
 	cfg := &StepConfig{
-		GoProxy:       "http://proxy:3000",
-		Networking:    &config.NetworkingConfig{},
-		SecretsServer: true,
+		GoProxy:    "http://proxy:3000",
+		Networking: &config.NetworkingConfig{},
 	}
 
 	steps := BuildSteps(nil, cfg)
 
-	if len(steps) != 9 {
-		t.Errorf("expected 9 steps with --secrets-server, got %d", len(steps))
+	if len(steps) != 10 {
+		t.Errorf("expected 10 bootstrap steps, got %d", len(steps))
 	}
 
-	if steps[8].Name != "Setting up SecretSauce server" {
-		t.Errorf("expected last step to be 'Setting up SecretSauce server', got %q", steps[8].Name)
+	if steps[9].Name != "Setting up SecretSauce server" {
+		t.Errorf("expected last step to be 'Setting up SecretSauce server', got %q", steps[9].Name)
 	}
 }
 
-func TestBuildStepsWithoutSecretsServer(t *testing.T) {
+func TestBuildStepsWithoutGoProxyStillIncludeSecretsServer(t *testing.T) {
 	cfg := &StepConfig{
 		Networking: &config.NetworkingConfig{},
 	}
 
 	steps := BuildSteps(nil, cfg)
 
-	if len(steps) != 8 {
-		t.Errorf("expected 8 steps without --secrets-server, got %d", len(steps))
+	if len(steps) != 10 {
+		t.Errorf("expected 10 bootstrap steps, got %d", len(steps))
 	}
 
-	for _, step := range steps {
-		if step.Name == "Setting up SecretSauce server" {
-			t.Error("should not include SecretSauce server step without flag")
-		}
+	if steps[9].Name != "Setting up SecretSauce server" {
+		t.Errorf("expected last step to be 'Setting up SecretSauce server', got %q", steps[9].Name)
 	}
 }
 
