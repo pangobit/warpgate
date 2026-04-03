@@ -407,9 +407,9 @@ func setupWarpgate(client *ssh.Client, networking *config.NetworkingConfig) (str
 	return "", nil
 }
 
-func setupInternalProxy(client *ssh.Client, tailscaleIP string) (string, error) {
-	if tailscaleIP == "" {
-		return "skipped (no tailscale IP)", nil
+func setupInternalProxy(client *ssh.Client, privateIP string) (string, error) {
+	if privateIP == "" {
+		return "skipped (no private IP)", nil
 	}
 
 	if err := run(client, "sudo mkdir -p /opt/warpgate/internal-proxy && sudo chown -R warpgate:warpgate /opt/warpgate/internal-proxy"); err != nil {
@@ -417,7 +417,7 @@ func setupInternalProxy(client *ssh.Client, tailscaleIP string) (string, error) 
 	}
 
 	cfg := &compose.InternalProxyConfig{
-		TailscaleIP: tailscaleIP,
+		PrivateIP: privateIP,
 		Entrypoints: map[string]int{"internal": 8080},
 	}
 

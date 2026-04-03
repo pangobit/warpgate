@@ -78,7 +78,7 @@ func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig
 			svc.Image = app.Image + ":" + version
 
 			labels := buildTraefikLabels(app, networking)
-			buildInternalPortLabels(app, labels)
+			buildPrivatePortLabels(app, labels)
 			buildInternalLabels(app, labels)
 			if len(labels) > 0 {
 				svc.Labels = labels
@@ -86,7 +86,7 @@ func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig
 		}
 
 		if sidecar, ok := app.Sidecars[svcName]; ok {
-			labels := buildSidecarInternalLabels(app.Name, svcName, sidecar)
+			labels := buildSidecarLabels(app.Name, svcName, sidecar)
 			if len(labels) > 0 {
 				svc.Labels = labels
 			}
@@ -113,13 +113,14 @@ func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig
 func buildTraefikLabels(app *config.AppConfig, networking *config.NetworkingConfig) map[string]string {
 	labels := make(map[string]string)
 
-	if len(app.Domains) == 0 {
+	pub := app.EffectiveExpose().Public
+	if pub == nil || len(pub.Domains) == 0 {
 		return labels
 	}
 
 	labels["traefik.enable"] = "true"
 
-	for i, domain := range app.Domains {
+	for i, domain := range pub.Domains {
 		suffix := ""
 		if i > 0 {
 			suffix = "-" + strconv.Itoa(i)
@@ -143,20 +144,22 @@ func buildTraefikLabels(app *config.AppConfig, networking *config.NetworkingConf
 }
 
 func buildInternalLabels(app *config.AppConfig, labels map[string]string) {
-	if app.Internal == "" || app.Port == 0 {
+	ie := app.EffectiveExpose().Internal
+	if ie == nil || app.Port == 0 {
 		return
 	}
 
 	routerName := app.Name + "-internal"
 	labels["traefik.enable"] = "true"
-	labels["traefik.http.routers."+routerName+".rule"] = "Host(`" + app.Internal + "`)"
+	labels["traefik.http.routers."+routerName+".rule"] = "Host(`" + ie.Hostname + "`)"
 	labels["traefik.http.routers."+routerName+".entrypoints"] = "internal"
 	labels["traefik.http.routers."+routerName+".service"] = routerName
 	labels["traefik.http.services."+routerName+".loadbalancer.server.port"] = strconv.Itoa(app.Port)
 }
 
-func buildInternalPortLabels(app *config.AppConfig, labels map[string]string) {
-	if app.Port == 0 {
+func buildPrivatePortLabels(app *config.AppConfig, labels map[string]string) {
+	pe := app.EffectiveExpose().Private
+	if pe == nil {
 		return
 	}
 
@@ -168,9 +171,11 @@ func buildInternalPortLabels(app *config.AppConfig, labels map[string]string) {
 	labels["traefik.http.services."+routerName+".loadbalancer.server.port"] = strconv.Itoa(app.Port)
 }
 
-func buildSidecarInternalLabels(appName, sidecarName string, sidecar config.SidecarConfig) map[string]string {
+func buildSidecarLabels(appName, sidecarName string, sidecar config.SidecarConfig) map[string]string {
 	labels := make(map[string]string)
-	if sidecar.Port == 0 {
+
+	pe := sidecar.EffectiveExpose().Private
+	if pe == nil {
 		return labels
 	}
 
@@ -221,13 +226,13 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 	}
 
 	type traefikService struct {
-		Image       string            `yaml:"image"`
-		Restart     string            `yaml:"restart"`
-		Command     []string          `yaml:"command"`
-		Ports       []string          `yaml:"ports"`
-		Volumes     []string          `yaml:"volumes"`
-		Networks    []string          `yaml:"networks"`
-		Environment map[string]string `yaml:"environment,omitempty"`
+		Image       string   `yaml:"image"`
+		Restart     string   `yaml:"restart"`
+		Command     []string `yaml:"command"`
+		Ports       []string `yaml:"ports"`
+		Volumes     []string `yaml:"volumes"`
+		Networks    []string `yaml:"networks"`
+		Environment []string `yaml:"environment,omitempty"`
 	}
 
 	type traefikCompose struct {
@@ -239,7 +244,7 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 	compose := traefikCompose{
 		Services: map[string]traefikService{
 			"traefik": {
-				Image:   "traefik:v3.4",
+				Image:   "traefik:v3.6",
 				Restart: "unless-stopped",
 				Command: cmd,
 				Ports:   ports,
@@ -248,8 +253,8 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 					"traefik-acme:/letsencrypt",
 				},
 				Networks: []string{"warpgate"},
-				Environment: map[string]string{
-					"DOCKER_API_VERSION": "1.45",
+				Environment: []string{
+					"DOCKER_API_VERSION=1.45",
 				},
 			},
 		},

@@ -31,7 +31,7 @@ func NewBootstrapper(cfg *config.ClusterConfig, sshKey string) *Bootstrapper {
 	}
 }
 
-// BootstrapNode bootstraps a node using its full config (including TailscaleIP).
+// BootstrapNode bootstraps a node using its full config (including PrivateIP).
 func (b *Bootstrapper) BootstrapNode(node *config.NodeConfig, user string) error {
 	return b.bootstrapNode(node, user)
 }
@@ -57,7 +57,7 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 	stepCfg := &StepConfig{
 		GoProxy:        b.Config.GoProxy,
 		Networking:     &b.Config.Networking,
-		TailscaleIP:    node.TailscaleIP,
+		PrivateIP:      node.PrivateIP,
 		MasterPassword: os.Getenv("SS_MASTER_PASSWORD"),
 	}
 
@@ -95,8 +95,8 @@ func (b *Bootstrapper) bootstrapNode(node *config.NodeConfig, user string) error
 
 	if stepCfg.generatedPassword != "" {
 		host := node.Host
-		if node.TailscaleIP != "" {
-			host = node.TailscaleIP
+		if node.PrivateIP != "" {
+			host = node.PrivateIP
 		}
 		fmt.Println()
 		fmt.Println("  ┌──────────────────────────────────────────────────────────────┐")

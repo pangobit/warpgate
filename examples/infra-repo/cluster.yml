@@ -4,10 +4,10 @@ project: myapp
 nodes:
   - id: node-1
     host: 10.0.0.1
-    tailscale_ip: 100.x.x.x
+    private_ip: 100.x.x.x
 
 networking:
-  tailnet: my-tailnet.ts.net
+  private_network: my-network.ts.net
   dns:
     provider: cloudflare
     zone: example.com

@@ -189,9 +189,15 @@ func TestLoadAppConfig(t *testing.T) {
 	yml := `image: ghcr.io/org/myapp
 version: v1.0.0
 targets: [node-1]
-domains: [myapp.example.com]
 secrets_prefix: myapp/prod
 port: 8080
+expose:
+  public:
+    domains: [myapp.example.com]
+  private:
+    port: 8080
+  internal:
+    hostname: myapp.internal
 `
 	if err := os.WriteFile(filepath.Join(appDir, "app.yml"), []byte(yml), 0644); err != nil {
 		t.Fatal(err)
@@ -211,8 +217,15 @@ port: 8080
 	if len(app.Targets) != 1 || app.Targets[0] != "node-1" {
 		t.Errorf("unexpected targets: %v", app.Targets)
 	}
-	if len(app.Domains) != 1 || app.Domains[0] != "myapp.example.com" {
-		t.Errorf("unexpected domains: %v", app.Domains)
+	expose := app.EffectiveExpose()
+	if expose.Public == nil || len(expose.Public.Domains) != 1 || expose.Public.Domains[0] != "myapp.example.com" {
+		t.Errorf("unexpected public expose: %+v", expose.Public)
+	}
+	if expose.Private == nil || expose.Private.Port != 8080 {
+		t.Errorf("unexpected private expose: %+v", expose.Private)
+	}
+	if expose.Internal == nil || expose.Internal.Hostname != "myapp.internal" {
+		t.Errorf("unexpected internal expose: %+v", expose.Internal)
 	}
 	if app.SecretsPrefix != "myapp/prod" {
 		t.Errorf("expected secrets_prefix myapp/prod, got %s", app.SecretsPrefix)

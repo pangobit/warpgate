@@ -150,7 +150,7 @@ func (m DashboardModel) View() tea.View {
 			host = host[:14] + ".."
 		}
 
-		line := fmt.Sprintf("  %-16s %-16s %-18s %s", node.ID, host, node.TailscaleIP, status)
+		line := fmt.Sprintf("  %-16s %-16s %-18s %s", node.ID, host, node.PrivateIP, status)
 		b.WriteString(line)
 		b.WriteString("\n")
 	}

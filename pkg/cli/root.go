@@ -201,10 +201,10 @@ project: %s
 nodes:
   - id: node-1
     host: 10.0.0.1
-    tailscale_ip: 100.x.x.x
+    private_ip: 100.x.x.x
 
 networking:
-  tailnet: your-tailnet.ts.net
+  private_network: your-network.ts.net
   dns:
     provider: cloudflare
     zone: example.com
@@ -219,7 +219,7 @@ registry:
   server: ghcr.io
 
 secrets:
-  server: http://100.x.x.x:8090    # SecretSauce server URL on tailnet
+  server: http://100.x.x.x:8090    # SecretSauce server URL on private network
 `, projectName)
 
 		if err := os.WriteFile("cluster.yml", []byte(clusterConfig), 0644); err != nil {
@@ -233,10 +233,14 @@ secrets:
 
 		appConfig := `image: ghcr.io/org/example-app
 version: latest
-domains:
-  - example-app.example.com
 secrets_prefix: example-app/prod
 port: 8080
+
+expose:
+  public:
+    domains: [example-app.example.com]
+  private:
+    port: 8080
 `
 		if err := os.WriteFile(filepath.Join(exampleDir, "app.yml"), []byte(appConfig), 0644); err != nil {
 			return fmt.Errorf("failed to create app.yml: %w", err)
@@ -351,8 +355,8 @@ func showClusterStatus() error {
 
 	for _, node := range repo.Cluster.Nodes {
 		fmt.Printf("  %s (%s)", node.ID, node.Host)
-		if node.TailscaleIP != "" {
-			fmt.Printf(" [ts: %s]", node.TailscaleIP)
+		if node.PrivateIP != "" {
+			fmt.Printf(" [private: %s]", node.PrivateIP)
 		}
 		fmt.Println()
 	}
@@ -365,8 +369,9 @@ func showClusterStatus() error {
 		}
 		fmt.Printf("  %s (%s:%s)\n", app.Name, app.Image, version)
 		fmt.Printf("    Targets: %v\n", app.GetTargetNodes(repo.Cluster.Nodes))
-		if len(app.Domains) > 0 {
-			fmt.Printf("    Domains: %v\n", app.Domains)
+		expose := app.EffectiveExpose()
+		if expose.Public != nil && len(expose.Public.Domains) > 0 {
+			fmt.Printf("    Domains: %v\n", expose.Public.Domains)
 		}
 		if app.SecretsPrefix != "" {
 			fmt.Printf("    Secrets: %s\n", app.SecretsPrefix)

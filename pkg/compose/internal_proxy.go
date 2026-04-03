@@ -16,25 +16,26 @@ var reservedInternalProxyPorts = map[int]bool{
 
 // InternalProxyConfig holds parameters for generating the internal Traefik compose.
 type InternalProxyConfig struct {
-	// TailscaleIP is the node's Tailscale IP to bind entrypoints to.
-	TailscaleIP string
+	// PrivateIP is the node's private network IP to bind entrypoints to.
+	PrivateIP string
 	// Entrypoints maps entrypoint names to port numbers.
 	Entrypoints map[string]int
 }
 
 // CollectInternalEntrypoints scans all apps targeting a node and returns the
 // entrypoints needed for the internal proxy. Always includes the base "internal"
-// entrypoint on port 8080 for cross-node routing.
+// entrypoint on port 8080 for cross-node routing. Only creates per-app/sidecar
+// entrypoints when expose.private is explicitly configured.
 func CollectInternalEntrypoints(apps []*config.AppConfig) map[string]int {
 	eps := map[string]int{"internal": 8080}
 	for _, app := range apps {
-		if app.Port > 0 && !reservedInternalProxyPorts[app.Port] {
-			eps[app.Name+"-port-internal"] = app.Port
+		if pe := app.EffectiveExpose().Private; pe != nil && !reservedInternalProxyPorts[pe.Port] {
+			eps[app.Name+"-port-internal"] = pe.Port
 		}
 		for name, sidecar := range app.Sidecars {
-			if sidecar.Port > 0 {
+			if pe := sidecar.EffectiveExpose().Private; pe != nil {
 				epName := app.Name + "-" + name + "-internal"
-				eps[epName] = sidecar.Port
+				eps[epName] = pe.Port
 			}
 		}
 	}
@@ -42,8 +43,8 @@ func CollectInternalEntrypoints(apps []*config.AppConfig) map[string]int {
 }
 
 // GenerateInternalProxyCompose creates the internal Traefik compose YAML.
-// The internal proxy binds only to the node's Tailscale IP, making it
-// accessible from the tailnet but not from the public internet.
+// The internal proxy binds only to the node's private IP, making it
+// accessible from the private network but not from the public internet.
 func GenerateInternalProxyCompose(cfg *InternalProxyConfig) (string, error) {
 	cmd := []string{
 		"--providers.docker=true",
@@ -65,17 +66,17 @@ func GenerateInternalProxyCompose(cfg *InternalProxyConfig) (string, error) {
 	for _, name := range epNames {
 		port := cfg.Entrypoints[name]
 		cmd = append(cmd, fmt.Sprintf("--entrypoints.%s.address=:%d", name, port))
-		ports = append(ports, fmt.Sprintf("%s:%d:%d", cfg.TailscaleIP, port, port))
+		ports = append(ports, fmt.Sprintf("%s:%d:%d", cfg.PrivateIP, port, port))
 	}
 
 	type proxyService struct {
-		Image       string            `yaml:"image"`
-		Restart     string            `yaml:"restart"`
-		Command     []string          `yaml:"command"`
-		Ports       []string          `yaml:"ports"`
-		Volumes     []string          `yaml:"volumes"`
-		Networks    []string          `yaml:"networks"`
-		Environment map[string]string `yaml:"environment,omitempty"`
+		Image       string   `yaml:"image"`
+		Restart     string   `yaml:"restart"`
+		Command     []string `yaml:"command"`
+		Ports       []string `yaml:"ports"`
+		Volumes     []string `yaml:"volumes"`
+		Networks    []string `yaml:"networks"`
+		Environment []string `yaml:"environment,omitempty"`
 	}
 
 	type proxyCompose struct {
@@ -86,7 +87,7 @@ func GenerateInternalProxyCompose(cfg *InternalProxyConfig) (string, error) {
 	compose := proxyCompose{
 		Services: map[string]proxyService{
 			"traefik": {
-				Image:   "traefik:v3.4",
+				Image:   "traefik:v3.6",
 				Restart: "unless-stopped",
 				Command: cmd,
 				Ports:   ports,
@@ -95,8 +96,8 @@ func GenerateInternalProxyCompose(cfg *InternalProxyConfig) (string, error) {
 					"/opt/warpgate/traefik/dynamic:/etc/traefik/dynamic:ro",
 				},
 				Networks: []string{"warpgate"},
-				Environment: map[string]string{
-					"DOCKER_API_VERSION": "1.45",
+				Environment: []string{
+					"DOCKER_API_VERSION=1.45",
 				},
 			},
 		},
