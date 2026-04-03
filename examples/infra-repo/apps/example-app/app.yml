@@ -1,6 +1,11 @@
 image: ghcr.io/org/example-app
 version: v1.0.0
 targets: [node-1]
-domains: [app.example.com]
 secrets_prefix: example-app/prod
 port: 8080
+
+expose:
+  public:
+    domains: [app.example.com]
+  private:
+    port: 8080

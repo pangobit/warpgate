@@ -15,8 +15,8 @@ type StepConfig struct {
 	GoProxy string
 	// Networking is the cluster networking configuration.
 	Networking *config.NetworkingConfig
-	// TailscaleIP is the node's Tailscale IP for internal proxy binding.
-	TailscaleIP string
+	// PrivateIP is the node's private network IP for internal proxy binding.
+	PrivateIP string
 	// MasterPassword is the SecretSauce master password for vault initialization.
 	MasterPassword string
 
@@ -85,7 +85,7 @@ func BuildSteps(client *ssh.Client, cfg *StepConfig) []tui.StepDef {
 		{
 			Name: "Setting up Internal Proxy",
 			Run: func() (string, error) {
-				return setupInternalProxy(client, cfg.TailscaleIP)
+				return setupInternalProxy(client, cfg.PrivateIP)
 			},
 		},
 		{

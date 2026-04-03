@@ -9,18 +9,20 @@ import (
 
 func TestGenerateInternalRoute(t *testing.T) {
 	app := &config.AppConfig{
-		Name:     "auth",
-		Image:    "ghcr.io/org/auth",
-		Internal: "auth.internal",
-		Port:     8085,
-		Targets:  []string{"node-1", "node-2"},
+		Name:    "auth",
+		Image:   "ghcr.io/org/auth",
+		Port:    8085,
+		Targets: []string{"node-1", "node-2"},
+		Expose: &config.ExposeConfig{
+			Internal: &config.InternalExpose{Hostname: "auth.internal"},
+		},
 	}
 
 	cluster := &config.ClusterConfig{
 		Nodes: []config.NodeConfig{
-			{ID: "node-1", Host: "10.0.0.1", TailscaleIP: "100.95.115.81"},
-			{ID: "node-2", Host: "10.0.0.2", TailscaleIP: "100.95.115.82"},
-			{ID: "node-3", Host: "10.0.0.3", TailscaleIP: "100.95.115.83"},
+			{ID: "node-1", Host: "10.0.0.1", PrivateIP: "100.95.115.81"},
+			{ID: "node-2", Host: "10.0.0.2", PrivateIP: "100.95.115.82"},
+			{ID: "node-3", Host: "10.0.0.3", PrivateIP: "100.95.115.83"},
 		},
 	}
 
@@ -33,10 +35,10 @@ func TestGenerateInternalRoute(t *testing.T) {
 		t.Error("expected Host rule with auth.internal")
 	}
 	if !strings.Contains(output, "100.95.115.81:8085") {
-		t.Error("expected node-1 tailscale IP as backend")
+		t.Error("expected node-1 private IP as backend")
 	}
 	if !strings.Contains(output, "100.95.115.82:8085") {
-		t.Error("expected node-2 tailscale IP as backend")
+		t.Error("expected node-2 private IP as backend")
 	}
 	if strings.Contains(output, "100.95.115.83") {
 		t.Error("node-3 should not be included (not a target)")
@@ -55,7 +57,7 @@ func TestGenerateInternalRouteNoInternal(t *testing.T) {
 
 	cluster := &config.ClusterConfig{
 		Nodes: []config.NodeConfig{
-			{ID: "node-1", Host: "10.0.0.1", TailscaleIP: "100.95.115.81"},
+			{ID: "node-1", Host: "10.0.0.1", PrivateIP: "100.95.115.81"},
 		},
 	}
 
@@ -71,16 +73,18 @@ func TestGenerateInternalRouteNoInternal(t *testing.T) {
 
 func TestGenerateInternalRouteAllNodes(t *testing.T) {
 	app := &config.AppConfig{
-		Name:     "auth",
-		Image:    "ghcr.io/org/auth",
-		Internal: "auth.internal",
-		Port:     8085,
+		Name:  "auth",
+		Image: "ghcr.io/org/auth",
+		Port:  8085,
+		Expose: &config.ExposeConfig{
+			Internal: &config.InternalExpose{Hostname: "auth.internal"},
+		},
 	}
 
 	cluster := &config.ClusterConfig{
 		Nodes: []config.NodeConfig{
-			{ID: "node-1", Host: "10.0.0.1", TailscaleIP: "100.95.115.81"},
-			{ID: "node-2", Host: "10.0.0.2", TailscaleIP: "100.95.115.82"},
+			{ID: "node-1", Host: "10.0.0.1", PrivateIP: "100.95.115.81"},
+			{ID: "node-2", Host: "10.0.0.2", PrivateIP: "100.95.115.82"},
 		},
 	}
 
@@ -97,18 +101,20 @@ func TestGenerateInternalRouteAllNodes(t *testing.T) {
 	}
 }
 
-func TestGenerateInternalRouteSkipsNoTailscaleIP(t *testing.T) {
+func TestGenerateInternalRouteSkipsNoPrivateIP(t *testing.T) {
 	app := &config.AppConfig{
-		Name:     "auth",
-		Image:    "ghcr.io/org/auth",
-		Internal: "auth.internal",
-		Port:     8085,
-		Targets:  []string{"node-1", "node-2"},
+		Name:    "auth",
+		Image:   "ghcr.io/org/auth",
+		Port:    8085,
+		Targets: []string{"node-1", "node-2"},
+		Expose: &config.ExposeConfig{
+			Internal: &config.InternalExpose{Hostname: "auth.internal"},
+		},
 	}
 
 	cluster := &config.ClusterConfig{
 		Nodes: []config.NodeConfig{
-			{ID: "node-1", Host: "10.0.0.1", TailscaleIP: "100.95.115.81"},
+			{ID: "node-1", Host: "10.0.0.1", PrivateIP: "100.95.115.81"},
 			{ID: "node-2", Host: "10.0.0.2"},
 		},
 	}
@@ -119,9 +125,9 @@ func TestGenerateInternalRouteSkipsNoTailscaleIP(t *testing.T) {
 	}
 
 	if !strings.Contains(output, "100.95.115.81") {
-		t.Error("expected node-1 with tailscale IP")
+		t.Error("expected node-1 with private IP")
 	}
 	if strings.Contains(output, "10.0.0.2") {
-		t.Error("node-2 without tailscale IP should be skipped")
+		t.Error("node-2 without private IP should be skipped")
 	}
 }

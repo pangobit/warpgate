@@ -120,12 +120,12 @@ func (r *RepoConfig) GetAppsForNode(nodeID string) []*AppConfig {
 func (r *RepoConfig) InternalHosts() []string {
 	var hosts []string
 	for _, app := range r.Apps {
-		if app.Internal != "" {
-			hosts = append(hosts, app.Internal)
+		if ie := app.EffectiveExpose().Internal; ie != nil {
+			hosts = append(hosts, ie.Hostname)
 		}
 		for _, sidecar := range app.Sidecars {
-			if sidecar.Internal != "" {
-				hosts = append(hosts, sidecar.Internal)
+			if ie := sidecar.EffectiveExpose().Internal; ie != nil {
+				hosts = append(hosts, ie.Hostname)
 			}
 		}
 	}

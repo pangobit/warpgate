@@ -19,8 +19,10 @@ func TestGenerateOverrideWithDomains(t *testing.T) {
 		Name:    "api",
 		Image:   "ghcr.io/org/api",
 		Version: "v2.0.0",
-		Domains: []string{"api.example.com"},
 		Port:    3000,
+		Expose: &config.ExposeConfig{
+			Public: &config.PublicExpose{Domains: []string{"api.example.com"}},
+		},
 	}
 
 	networking := &config.NetworkingConfig{
@@ -152,8 +154,10 @@ func TestGenerateOverrideMultipleDomains(t *testing.T) {
 		Name:    "site",
 		Image:   "ghcr.io/org/site",
 		Version: "v1.0.0",
-		Domains: []string{"example.com", "www.example.com"},
 		Port:    80,
+		Expose: &config.ExposeConfig{
+			Public: &config.PublicExpose{Domains: []string{"example.com", "www.example.com"}},
+		},
 	}
 
 	networking := &config.NetworkingConfig{
@@ -193,11 +197,14 @@ func TestGenerateOverrideMultipleDomains(t *testing.T) {
 
 func TestGenerateOverrideInternalLabels(t *testing.T) {
 	app := &config.AppConfig{
-		Name:     "auth",
-		Image:    "ghcr.io/org/auth",
-		Version:  "v1.0.0",
-		Internal: "auth.internal",
-		Port:     8085,
+		Name:    "auth",
+		Image:   "ghcr.io/org/auth",
+		Version: "v1.0.0",
+		Port:    8085,
+		Expose: &config.ExposeConfig{
+			Private:  &config.PrivateExpose{Port: 8085},
+			Internal: &config.InternalExpose{Hostname: "auth.internal"},
+		},
 	}
 
 	networking := &config.NetworkingConfig{}
@@ -281,10 +288,17 @@ func TestGenerateOverrideAllServicesGetNetwork(t *testing.T) {
 		Name:    "brighter-platform",
 		Image:   "ghcr.io/org/client",
 		Version: "v1.0.0",
-		Domains: []string{"example.com"},
 		Port:    8083,
+		Expose: &config.ExposeConfig{
+			Public: &config.PublicExpose{Domains: []string{"example.com"}},
+		},
 		Sidecars: map[string]config.SidecarConfig{
-			"admin": {Port: 8087},
+			"admin": {
+				Port: 8087,
+				Expose: &config.ExposeConfig{
+					Private: &config.PrivateExpose{Port: 8087},
+				},
+			},
 		},
 	}
 
@@ -375,7 +389,12 @@ func TestGenerateOverrideSidecarLabels(t *testing.T) {
 		Version: "v1.0.0",
 		Port:    8083,
 		Sidecars: map[string]config.SidecarConfig{
-			"admin": {Port: 8087},
+			"admin": {
+				Port: 8087,
+				Expose: &config.ExposeConfig{
+					Private: &config.PrivateExpose{Port: 8087},
+				},
+			},
 		},
 	}
 
@@ -418,6 +437,9 @@ func TestGenerateOverrideMainServiceInternalPortLabels(t *testing.T) {
 		Image:   "ghcr.io/org/client",
 		Version: "v1.0.0",
 		Port:    8083,
+		Expose: &config.ExposeConfig{
+			Private: &config.PrivateExpose{Port: 8083},
+		},
 	}
 
 	compose := `services:
@@ -470,8 +492,8 @@ func TestGenerateTraefikCompose(t *testing.T) {
 		t.Fatalf("GenerateTraefikCompose() error: %v", err)
 	}
 
-	if !strings.Contains(output, "traefik:v3.4") {
-		t.Error("expected traefik:v3.4 image")
+	if !strings.Contains(output, "traefik:v3.6") {
+		t.Error("expected traefik:v3.6 image")
 	}
 	if !strings.Contains(output, "acme-staging") {
 		t.Error("expected staging ACME server")

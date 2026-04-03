@@ -121,7 +121,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 		deployed = append(deployed, nodeID)
 	}
 
-	if app.Internal != "" {
+	if app.EffectiveExpose().Internal != nil {
 		if err := d.updateInternalRoutes(app); err != nil {
 			d.log.Warnf("Failed to update internal routes: %v", err)
 		}
@@ -129,7 +129,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 
 	for _, sidecarName := range sortedKeys(app.Sidecars) {
 		sidecar := app.Sidecars[sidecarName]
-		if sidecar.Internal != "" {
+		if sidecar.EffectiveExpose().Internal != nil {
 			if err := d.updateSidecarInternalRoutes(app, sidecarName, sidecar); err != nil {
 				d.log.Warnf("Failed to update internal routes for sidecar %s: %v", sidecarName, err)
 			}
@@ -602,7 +602,7 @@ func (d *Deployer) updateInternalProxy(app *config.AppConfig) error {
 	targetNodes := app.GetTargetNodes(d.Repo.Cluster.Nodes)
 	for _, nodeID := range targetNodes {
 		node := d.Repo.Cluster.GetNode(nodeID)
-		if node == nil || node.TailscaleIP == "" {
+		if node == nil || node.PrivateIP == "" {
 			continue
 		}
 
@@ -610,7 +610,7 @@ func (d *Deployer) updateInternalProxy(app *config.AppConfig) error {
 		entrypoints := compose.CollectInternalEntrypoints(apps)
 
 		proxyCfg := &compose.InternalProxyConfig{
-			TailscaleIP: node.TailscaleIP,
+			PrivateIP:   node.PrivateIP,
 			Entrypoints: entrypoints,
 		}
 
@@ -684,7 +684,7 @@ func (d *Deployer) updateInternalRoutes(app *config.AppConfig) error {
 	}
 
 	remotePath := "/opt/warpgate/traefik/dynamic/" + app.Name + ".yml"
-	d.log.Infof("Updating internal route for %s across all nodes...", app.Internal)
+	d.log.Infof("Updating internal route for %s across all nodes...", app.EffectiveExpose().Internal.Hostname)
 
 	for _, node := range d.Repo.Cluster.Nodes {
 		client, err := d.connect(&node)
