@@ -3,6 +3,7 @@ package compose
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/pangobit/warpgate/pkg/config"
@@ -23,10 +24,16 @@ type ServiceOverride struct {
 	Image string `yaml:"image,omitempty"`
 	// Labels holds container labels (Traefik routing).
 	Labels map[string]string `yaml:"labels,omitempty"`
-	// Networks is the list of networks to attach to.
-	Networks []string `yaml:"networks,omitempty"`
+	// Networks attaches the service to networks with optional aliases.
+	Networks map[string]ServiceNetworkConfig `yaml:"networks,omitempty"`
 	// ExtraHosts maps internal hostnames to host-gateway for service discovery.
 	ExtraHosts []string `yaml:"extra_hosts,omitempty"`
+}
+
+// ServiceNetworkConfig holds per-service network settings.
+type ServiceNetworkConfig struct {
+	// Aliases are additional hostnames for the service on this network.
+	Aliases []string `yaml:"aliases,omitempty"`
 }
 
 // Network represents a Docker Compose network definition.
@@ -36,33 +43,60 @@ type Network struct {
 }
 
 // GenerateOverride creates a docker-compose.override.yml that injects the image tag,
-// Traefik labels, the warpgate network, and extra_hosts for internal service discovery.
-// internalHosts is the list of all internal hostnames across the cluster.
-func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig, internalHosts []string) (string, error) {
+// Traefik labels, the warpgate network with aliases, and strips host port bindings.
+// composeContent is the raw compose.yml content, used to discover all service names.
+func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig, internalHosts []string, composeContent string) (string, error) {
 	version := app.Version
 	if version == "" {
 		version = "latest"
 	}
 
-	labels := buildTraefikLabels(app, networking)
-	buildInternalLabels(app, labels)
+	serviceNames, err := ParseComposeServices(composeContent)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse compose services: %w", err)
+	}
+	if len(serviceNames) == 0 {
+		serviceNames = []string{app.Name}
+	}
 
 	var extraHosts []string
 	for _, host := range internalHosts {
 		extraHosts = append(extraHosts, host+":host-gateway")
 	}
 
-	svc := ServiceOverride{
-		Image:      app.Image + ":" + version,
-		Networks:   []string{"warpgate"},
-		Labels:     labels,
-		ExtraHosts: extraHosts,
+	services := make(map[string]ServiceOverride)
+
+	for _, svcName := range serviceNames {
+		svc := ServiceOverride{
+			Networks: map[string]ServiceNetworkConfig{
+				"warpgate": {Aliases: []string{svcName}},
+			},
+			ExtraHosts: extraHosts,
+		}
+
+		if svcName == app.Name {
+			svc.Image = app.Image + ":" + version
+
+			labels := buildTraefikLabels(app, networking)
+			buildInternalPortLabels(app, labels)
+			buildInternalLabels(app, labels)
+			if len(labels) > 0 {
+				svc.Labels = labels
+			}
+		}
+
+		if sidecar, ok := app.Sidecars[svcName]; ok {
+			labels := buildSidecarInternalLabels(app.Name, svcName, sidecar)
+			if len(labels) > 0 {
+				svc.Labels = labels
+			}
+		}
+
+		services[svcName] = svc
 	}
 
 	override := &OverrideFile{
-		Services: map[string]ServiceOverride{
-			app.Name: svc,
-		},
+		Services: services,
 		Networks: map[string]Network{
 			"warpgate": {External: true},
 		},
@@ -88,21 +122,21 @@ func buildTraefikLabels(app *config.AppConfig, networking *config.NetworkingConf
 	for i, domain := range app.Domains {
 		suffix := ""
 		if i > 0 {
-			suffix = fmt.Sprintf("-%d", i)
+			suffix = "-" + strconv.Itoa(i)
 		}
 
 		routerName := app.Name + suffix
-		labels[fmt.Sprintf("traefik.http.routers.%s.rule", routerName)] = fmt.Sprintf("Host(`%s`)", domain)
-		labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", routerName)] = strings.Join(networking.Traefik.EntryPoints, ",")
+		labels["traefik.http.routers."+routerName+".rule"] = "Host(`" + domain + "`)"
+		labels["traefik.http.routers."+routerName+".entrypoints"] = strings.Join(networking.Traefik.EntryPoints, ",")
 
 		if networking.Traefik.ACME.Enabled {
-			labels[fmt.Sprintf("traefik.http.routers.%s.tls", routerName)] = "true"
-			labels[fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", routerName)] = networking.Traefik.ACME.Provider
+			labels["traefik.http.routers."+routerName+".tls"] = "true"
+			labels["traefik.http.routers."+routerName+".tls.certresolver"] = networking.Traefik.ACME.Provider
 		}
 	}
 
 	if app.Port > 0 {
-		labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", app.Name)] = fmt.Sprintf("%d", app.Port)
+		labels["traefik.http.services."+app.Name+".loadbalancer.server.port"] = strconv.Itoa(app.Port)
 	}
 
 	return labels
@@ -114,13 +148,42 @@ func buildInternalLabels(app *config.AppConfig, labels map[string]string) {
 	}
 
 	routerName := app.Name + "-internal"
-	labels["traefik.http.routers."+routerName+".rule"] = fmt.Sprintf("Host(`%s`)", app.Internal)
+	labels["traefik.enable"] = "true"
+	labels["traefik.http.routers."+routerName+".rule"] = "Host(`" + app.Internal + "`)"
 	labels["traefik.http.routers."+routerName+".entrypoints"] = "internal"
 	labels["traefik.http.routers."+routerName+".service"] = routerName
-	labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", routerName)] = fmt.Sprintf("%d", app.Port)
+	labels["traefik.http.services."+routerName+".loadbalancer.server.port"] = strconv.Itoa(app.Port)
 }
 
-// GenerateTraefikCompose creates the Traefik service compose file for bootstrap.
+func buildInternalPortLabels(app *config.AppConfig, labels map[string]string) {
+	if app.Port == 0 {
+		return
+	}
+
+	routerName := app.Name + "-port-internal"
+	labels["traefik.enable"] = "true"
+	labels["traefik.http.routers."+routerName+".rule"] = "PathPrefix(`/`)"
+	labels["traefik.http.routers."+routerName+".entrypoints"] = routerName
+	labels["traefik.http.routers."+routerName+".service"] = routerName
+	labels["traefik.http.services."+routerName+".loadbalancer.server.port"] = strconv.Itoa(app.Port)
+}
+
+func buildSidecarInternalLabels(appName, sidecarName string, sidecar config.SidecarConfig) map[string]string {
+	labels := make(map[string]string)
+	if sidecar.Port == 0 {
+		return labels
+	}
+
+	routerName := appName + "-" + sidecarName + "-internal"
+	labels["traefik.enable"] = "true"
+	labels["traefik.http.routers."+routerName+".rule"] = "PathPrefix(`/`)"
+	labels["traefik.http.routers."+routerName+".entrypoints"] = routerName
+	labels["traefik.http.routers."+routerName+".service"] = routerName
+	labels["traefik.http.services."+routerName+".loadbalancer.server.port"] = strconv.Itoa(sidecar.Port)
+	return labels
+}
+
+// GenerateTraefikCompose creates the public Traefik service compose file for bootstrap.
 func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error) {
 	cmd := []string{
 		"--providers.docker=true",
@@ -157,13 +220,6 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 		}
 	}
 
-	cmd = append(cmd,
-		"--entrypoints.internal.address=:8080",
-		"--providers.file.directory=/etc/traefik/dynamic",
-		"--providers.file.watch=true",
-	)
-	ports = append(ports, "8080:8080")
-
 	type traefikService struct {
 		Image       string            `yaml:"image"`
 		Restart     string            `yaml:"restart"`
@@ -190,7 +246,6 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 				Volumes: []string{
 					"/var/run/docker.sock:/var/run/docker.sock:ro",
 					"traefik-acme:/letsencrypt",
-					"/opt/warpgate/traefik/dynamic:/etc/traefik/dynamic:ro",
 				},
 				Networks: []string{"warpgate"},
 				Environment: map[string]string{

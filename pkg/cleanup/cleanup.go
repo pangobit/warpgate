@@ -133,7 +133,10 @@ sudo systemctl daemon-reload 2>/dev/null || true`)
 		{
 			Name: "Removing Warpgate directories",
 			Run: func() (string, error) {
-				return runScript(client, "sudo rm -rf /opt/warpgate")
+				return runScript(client, `
+sudo mkdir -p /opt/warpgate
+sudo rm -rf /opt/warpgate/apps /opt/warpgate/traefik /opt/warpgate/internal-proxy /opt/warpgate/bootstrap
+sudo find /opt/warpgate -mindepth 1 -maxdepth 1 ! -name secretsauce -exec rm -rf {} + 2>/dev/null || true`)
 			},
 		},
 		{
@@ -145,7 +148,9 @@ sudo systemctl daemon-reload 2>/dev/null || true`)
 		{
 			Name: "Removing warpgate user",
 			Run: func() (string, error) {
-				return runScript(client, "sudo userdel -r warpgate 2>/dev/null || true")
+				return runScript(client, `
+sudo userdel -r warpgate 2>/dev/null || true
+sudo rm -f /usr/local/bin/secretsauce`)
 			},
 		},
 	}

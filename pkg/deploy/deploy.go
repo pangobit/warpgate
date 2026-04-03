@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +15,15 @@ import (
 	"github.com/pangobit/warpgate/pkg/ssh"
 	"github.com/sirupsen/logrus"
 )
+
+func sortedKeys(m map[string]config.SidecarConfig) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
 
 const remoteAppsDir = "/opt/warpgate/apps"
 
@@ -64,7 +74,12 @@ func (d *Deployer) Deploy(appName, version string) error {
 		return fmt.Errorf("compose.yml not found for app '%s' at %s", appName, composePath)
 	}
 
-	override, err := compose.GenerateOverride(app, &d.Repo.Cluster.Networking, d.Repo.InternalHosts())
+	composeContent, err := os.ReadFile(composePath)
+	if err != nil {
+		return fmt.Errorf("failed to read compose.yml: %w", err)
+	}
+
+	override, err := compose.GenerateOverride(app, &d.Repo.Cluster.Networking, d.Repo.InternalHosts(), string(composeContent))
 	if err != nil {
 		return fmt.Errorf("failed to generate override: %w", err)
 	}
@@ -110,6 +125,19 @@ func (d *Deployer) Deploy(appName, version string) error {
 		if err := d.updateInternalRoutes(app); err != nil {
 			d.log.Warnf("Failed to update internal routes: %v", err)
 		}
+	}
+
+	for _, sidecarName := range sortedKeys(app.Sidecars) {
+		sidecar := app.Sidecars[sidecarName]
+		if sidecar.Internal != "" {
+			if err := d.updateSidecarInternalRoutes(app, sidecarName, sidecar); err != nil {
+				d.log.Warnf("Failed to update internal routes for sidecar %s: %v", sidecarName, err)
+			}
+		}
+	}
+
+	if err := d.updateInternalProxy(app); err != nil {
+		d.log.Warnf("Failed to update internal proxy: %v", err)
 	}
 
 	d.log.Infof("Deploy complete: %s:%s across %d node(s)", app.Name, app.Version, len(deployed))
@@ -455,6 +483,195 @@ type NodeStatus struct {
 	Containers string
 	// Error is set if the node could not be reached.
 	Error string
+}
+
+// AppNodeStatus holds the deployment status of a single app on a single node.
+type AppNodeStatus struct {
+	// App is the application name.
+	App string
+	// NodeID is the node identifier.
+	NodeID string
+	// Version is the currently deployed version.
+	Version string
+	// Slot is the active blue/green slot.
+	Slot string
+	// State is the deployment state: "healthy", "running", "unhealthy", "not deployed".
+	State string
+	// Error is set if the status could not be determined.
+	Error string
+}
+
+// ClusterStatusResult holds the full cluster status across all nodes and apps.
+type ClusterStatusResult struct {
+	// NodeReachable maps node IDs to whether the node was reachable via SSH.
+	NodeReachable map[string]bool
+	// Apps holds the status of each app on each node.
+	Apps []AppNodeStatus
+}
+
+// ClusterStatus queries the deployment status of all apps across all nodes.
+func (d *Deployer) ClusterStatus() (*ClusterStatusResult, error) {
+	result := &ClusterStatusResult{
+		NodeReachable: make(map[string]bool),
+	}
+
+	for _, node := range d.Repo.Cluster.Nodes {
+		client, err := d.connect(&node)
+		if err != nil {
+			result.NodeReachable[node.ID] = false
+			for _, app := range d.Repo.GetAppsForNode(node.ID) {
+				result.Apps = append(result.Apps, AppNodeStatus{
+					App:    app.Name,
+					NodeID: node.ID,
+					Error:  err.Error(),
+				})
+			}
+			continue
+		}
+
+		result.NodeReachable[node.ID] = true
+
+		for _, app := range d.Repo.GetAppsForNode(node.ID) {
+			remoteDir := remoteAppsDir + "/" + app.Name
+			state := d.readState(client, remoteDir)
+
+			status := AppNodeStatus{
+				App:     app.Name,
+				NodeID:  node.ID,
+				Version: state.CurrentVersion,
+				Slot:    state.ActiveSlot,
+			}
+
+			if state.ActiveSlot == "" {
+				status.State = "not deployed"
+				result.Apps = append(result.Apps, status)
+				continue
+			}
+
+			projectFlag := fmt.Sprintf("-p %s-%s", app.Name, state.ActiveSlot)
+			composeFiles := "-f compose.yml -f docker-compose.override.yml"
+			psCmd := fmt.Sprintf("cd %s && docker compose %s %s ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
+				remoteDir, projectFlag, composeFiles)
+			stdout, _, err := client.RunCommand(psCmd)
+			if err != nil || strings.TrimSpace(stdout) == "NOT_DEPLOYED" {
+				status.State = "not deployed"
+			} else {
+				status.State = ParseContainerHealth(strings.TrimSpace(stdout))
+			}
+
+			result.Apps = append(result.Apps, status)
+		}
+
+		client.Close()
+	}
+
+	return result, nil
+}
+
+// ParseContainerHealth determines overall health from docker compose ps output.
+// Each line has format: "container-name\tUp 2 minutes (healthy)"
+// Returns "healthy" if all containers report healthy, "unhealthy" if any report unhealthy,
+// or "running" if containers are up but have no health check.
+func ParseContainerHealth(psOutput string) string {
+	if psOutput == "" {
+		return "not deployed"
+	}
+
+	hasHealthy := false
+	for _, line := range strings.Split(psOutput, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "(unhealthy)") {
+			return "unhealthy"
+		}
+		if strings.Contains(lower, "(healthy)") {
+			hasHealthy = true
+		}
+	}
+
+	if hasHealthy {
+		return "healthy"
+	}
+	return "running"
+}
+
+func (d *Deployer) updateInternalProxy(app *config.AppConfig) error {
+	targetNodes := app.GetTargetNodes(d.Repo.Cluster.Nodes)
+	for _, nodeID := range targetNodes {
+		node := d.Repo.Cluster.GetNode(nodeID)
+		if node == nil || node.TailscaleIP == "" {
+			continue
+		}
+
+		apps := d.Repo.GetAppsForNode(nodeID)
+		entrypoints := compose.CollectInternalEntrypoints(apps)
+
+		proxyCfg := &compose.InternalProxyConfig{
+			TailscaleIP: node.TailscaleIP,
+			Entrypoints: entrypoints,
+		}
+
+		proxyYAML, err := compose.GenerateInternalProxyCompose(proxyCfg)
+		if err != nil {
+			d.log.Warnf("Failed to generate internal proxy for %s: %v", nodeID, err)
+			continue
+		}
+
+		client, err := d.connect(node)
+		if err != nil {
+			d.log.Warnf("Failed to connect to %s for internal proxy update: %v", nodeID, err)
+			continue
+		}
+
+		remotePath := "/opt/warpgate/internal-proxy/compose.yml"
+		if _, _, err := client.RunCommand("mkdir -p /opt/warpgate/internal-proxy"); err != nil {
+			d.log.Warnf("Failed to create internal proxy directory on %s: %v", nodeID, err)
+			client.Close()
+			continue
+		}
+
+		if err := client.WriteFile(remotePath, proxyYAML); err != nil {
+			d.log.Warnf("Failed to write internal proxy compose to %s: %v", nodeID, err)
+			client.Close()
+			continue
+		}
+
+		if _, _, err := client.RunCommand("cd /opt/warpgate/internal-proxy && docker compose -p warpgate-internal-proxy up -d"); err != nil {
+			d.log.Warnf("Failed to start internal proxy on %s: %v", nodeID, err)
+		}
+
+		client.Close()
+	}
+	return nil
+}
+
+func (d *Deployer) updateSidecarInternalRoutes(app *config.AppConfig, sidecarName string, sidecar config.SidecarConfig) error {
+	routeYAML, err := GenerateSidecarInternalRoute(app, sidecarName, sidecar, d.Repo.Cluster)
+	if err != nil {
+		return err
+	}
+	if routeYAML == "" {
+		return nil
+	}
+
+	remotePath := "/opt/warpgate/traefik/dynamic/" + app.Name + "-" + sidecarName + ".yml"
+	d.log.Infof("Updating internal route for sidecar %s.%s across all nodes...", app.Name, sidecarName)
+
+	for _, node := range d.Repo.Cluster.Nodes {
+		client, err := d.connect(&node)
+		if err != nil {
+			d.log.Warnf("Failed to connect to %s for sidecar route update: %v", node.ID, err)
+			continue
+		}
+		if err := client.WriteFile(remotePath, routeYAML); err != nil {
+			d.log.Warnf("Failed to write sidecar route to %s: %v", node.ID, err)
+		}
+		client.Close()
+	}
+	return nil
 }
 
 func (d *Deployer) updateInternalRoutes(app *config.AppConfig) error {

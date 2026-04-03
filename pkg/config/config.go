@@ -93,6 +93,14 @@ type RegistryConfig struct {
 	Password string `yaml:"password,omitempty"`
 }
 
+// SidecarConfig defines a sidecar service that needs Traefik routing.
+type SidecarConfig struct {
+	// Port is the container port the sidecar listens on.
+	Port int `yaml:"port"`
+	// Internal is the hostname for cross-node internal routing (optional).
+	Internal string `yaml:"internal,omitempty"`
+}
+
 // AppConfig defines an application's deployment metadata, loaded from app.yml.
 type AppConfig struct {
 	// Name is derived from the directory name, not from YAML.
@@ -111,6 +119,8 @@ type AppConfig struct {
 	SecretsPrefix string `yaml:"secrets_prefix,omitempty"`
 	// Port is the container port Traefik routes to.
 	Port int `yaml:"port,omitempty"`
+	// Sidecars maps compose service names to their routing configuration.
+	Sidecars map[string]SidecarConfig `yaml:"sidecars,omitempty"`
 }
 
 // LoadClusterConfig reads and parses a cluster.yml file with environment variable expansion.
