@@ -53,6 +53,7 @@ using Docker Compose, Traefik, Tailscale, and your own infrastructure.`,
 
 // Deploy flags
 var (
+	deployAll          bool
 	deployDryRun       bool
 	deployTailscaleSSH bool
 	deploySSHKey       string
@@ -61,6 +62,7 @@ var (
 
 // Remove flags
 var (
+	removeAll          bool
 	removeForce        bool
 	removeTailscaleSSH bool
 	removeSSHKey       string
@@ -122,6 +124,7 @@ func init() {
 	rootCmd.AddCommand(cleanupCmd)
 
 	// deploy flags
+	deployCmd.Flags().BoolVar(&deployAll, "all", false, "Deploy all discovered apps")
 	deployCmd.Flags().BoolVar(&deployDryRun, "dry-run", false, "Show actions without executing")
 	deployCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
 	deployCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
@@ -154,6 +157,7 @@ func init() {
 	dashboardCmd.Flags().IntVar(&dashRefresh, "refresh", 30, "Auto-refresh interval in seconds")
 
 	// remove flags
+	removeCmd.Flags().BoolVar(&removeAll, "all", false, "Remove all discovered apps")
 	removeCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
 	removeCmd.Flags().BoolVar(&removeTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
 	removeCmd.Flags().StringVar(&removeSSHKey, "ssh-key", "", "Path to SSH private key")
@@ -233,7 +237,8 @@ secrets:
 			return fmt.Errorf("failed to create apps directory: %w", err)
 		}
 
-		appConfig := `image: ghcr.io/org/example-app
+		appConfig := `kind: warpgate/app
+image: ghcr.io/org/example-app
 version: latest
 secrets_prefix: example-app/prod
 port: 8080
@@ -282,10 +287,47 @@ expose:
 }
 
 var deployCmd = &cobra.Command{
-	Use:   "deploy <app-name> [version]",
+	Use:   "deploy [app-name] [version]",
 	Short: "Deploy an application to its target nodes",
-	Args:  cobra.RangeArgs(1, 2),
+	Long: `Deploy a single app or all apps at once.
+
+Examples:
+  warpgate deploy myapp
+  warpgate deploy myapp v2.0.0
+  warpgate deploy --all`,
+	Args: cobra.MaximumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if deployAll {
+			if len(args) > 0 {
+				return fmt.Errorf("--all does not accept app-name arguments")
+			}
+			if len(repo.Apps) == 0 {
+				return fmt.Errorf("no apps found")
+			}
+			if !deployDryRun {
+				fmt.Printf("Will deploy %d app(s):\n", len(repo.Apps))
+				for _, app := range repo.Apps {
+					fmt.Printf("  - %s\n", app.Name)
+				}
+				fmt.Print("Continue? [y/N] ")
+				var answer string
+				fmt.Scanln(&answer)
+				if answer != "y" && answer != "Y" {
+					fmt.Println("Aborted.")
+					return nil
+				}
+			}
+			d := deploy.NewDeployer(repo, deploySSHKey)
+			d.TailscaleSSH = deployTailscaleSSH
+			d.DryRun = deployDryRun
+			d.User = deployUser
+			return d.DeployAll()
+		}
+
+		if len(args) == 0 {
+			return fmt.Errorf("requires app-name argument or --all flag")
+		}
+
 		appName := args[0]
 		version := ""
 		if len(args) > 1 {
@@ -447,7 +489,7 @@ var rollbackCmd = &cobra.Command{
 }
 
 var removeCmd = &cobra.Command{
-	Use:   "remove <app-name>",
+	Use:   "remove [app-name]",
 	Short: "Stop and remove an application from target nodes",
 	Long: `Remove an application by stopping its containers and cleaning up
 its files from all target nodes. If the app config has already been deleted
@@ -456,9 +498,34 @@ from apps/, all cluster nodes are scanned.
 Examples:
   warpgate remove myapp --tailscale-ssh
   warpgate remove myapp --tailscale-ssh --force
-  warpgate remove myapp --tailscale-ssh --nodes node-1,node-2`,
-	Args: cobra.ExactArgs(1),
+  warpgate remove myapp --tailscale-ssh --nodes node-1,node-2
+  warpgate remove --all --force`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if removeAll {
+			if len(args) > 0 {
+				return fmt.Errorf("--all does not accept app-name arguments")
+			}
+			if !removeForce {
+				return fmt.Errorf("remove --all requires --force flag")
+			}
+			if len(repo.Apps) == 0 {
+				return fmt.Errorf("no apps found")
+			}
+			fmt.Printf("Removing %d app(s):\n", len(repo.Apps))
+			for _, app := range repo.Apps {
+				fmt.Printf("  - %s\n", app.Name)
+			}
+			d := deploy.NewDeployer(repo, removeSSHKey)
+			d.TailscaleSSH = removeTailscaleSSH
+			d.User = removeUser
+			return d.RemoveAll(removeNodes)
+		}
+
+		if len(args) == 0 {
+			return fmt.Errorf("requires app-name argument or --all flag")
+		}
+
 		if !removeForce {
 			fmt.Printf("This will stop and remove '%s' from target nodes.\n", args[0])
 			fmt.Print("Continue? [y/N] ")

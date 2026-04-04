@@ -4,10 +4,14 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// validAppName matches DNS-safe names: lowercase alphanumeric and hyphens, not starting/ending with a hyphen.
+var validAppName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // ClusterConfig is the cluster-level configuration loaded from cluster.yml.
 type ClusterConfig struct {
@@ -139,6 +143,8 @@ func (s *SidecarConfig) EffectiveExpose() ExposeConfig {
 
 // AppConfig defines an application's deployment metadata, loaded from app.yml.
 type AppConfig struct {
+	// Kind identifies the config type, expected to be "warpgate/app".
+	Kind string `yaml:"kind,omitempty"`
 	// Name is derived from the directory name, not from YAML.
 	Name string `yaml:"-"`
 	// Image is the Docker image reference (without tag).
@@ -269,6 +275,9 @@ func (c *ClusterConfig) Validate() error {
 func ValidateApp(app *AppConfig) error {
 	if app.Name == "" {
 		return fmt.Errorf("app name is required")
+	}
+	if !validAppName.MatchString(app.Name) {
+		return fmt.Errorf("app name %q is invalid: must be lowercase alphanumeric and hyphens only", app.Name)
 	}
 	if app.Image == "" {
 		return fmt.Errorf("app %s: image is required", app.Name)

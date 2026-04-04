@@ -1,3 +1,4 @@
+kind: warpgate/app
 image: ghcr.io/org/example-app
 version: v1.0.0
 targets: [node-1]

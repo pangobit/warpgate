@@ -113,6 +113,41 @@ func TestValidateApp(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "name with shell injection",
+			app:     AppConfig{Name: "app; rm -rf /", Image: "img"},
+			wantErr: true,
+		},
+		{
+			name:    "name with spaces",
+			app:     AppConfig{Name: "my app", Image: "img"},
+			wantErr: true,
+		},
+		{
+			name:    "name with uppercase",
+			app:     AppConfig{Name: "MyApp", Image: "img"},
+			wantErr: true,
+		},
+		{
+			name:    "name starting with hyphen",
+			app:     AppConfig{Name: "-app", Image: "img"},
+			wantErr: true,
+		},
+		{
+			name:    "name ending with hyphen",
+			app:     AppConfig{Name: "app-", Image: "img"},
+			wantErr: true,
+		},
+		{
+			name:    "valid hyphenated name",
+			app:     AppConfig{Name: "my-app", Image: "img"},
+			wantErr: false,
+		},
+		{
+			name:    "valid single char name",
+			app:     AppConfig{Name: "a", Image: "img"},
+			wantErr: false,
+		},
+		{
 			name:    "missing image",
 			app:     AppConfig{Name: "app"},
 			wantErr: true,
@@ -327,6 +362,135 @@ func TestDiscoverApps(t *testing.T) {
 		if app.Name != expected[i] {
 			t.Errorf("expected app %q at index %d, got %q", expected[i], i, app.Name)
 		}
+	}
+}
+
+func TestLoadAppConfigWithKind(t *testing.T) {
+	dir := t.TempDir()
+	appDir := filepath.Join(dir, "myapp")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	yml := "kind: warpgate/app\nimage: ghcr.io/org/myapp\n"
+	if err := os.WriteFile(filepath.Join(appDir, "app.yml"), []byte(yml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	app, err := LoadAppConfig(appDir)
+	if err != nil {
+		t.Fatalf("LoadAppConfig() error: %v", err)
+	}
+	if app.Kind != "warpgate/app" {
+		t.Errorf("expected kind %q, got %q", "warpgate/app", app.Kind)
+	}
+}
+
+func TestDiscoverAppsKindFiltering(t *testing.T) {
+	type appFixture struct {
+		name string
+		yml  string
+	}
+
+	tests := []struct {
+		name         string
+		apps         []appFixture
+		wantNames    []string
+		wantKinds    []string
+	}{
+		{
+			name: "correct kind accepted",
+			apps: []appFixture{
+				{"myapp", "kind: warpgate/app\nimage: ghcr.io/org/myapp\n"},
+			},
+			wantNames: []string{"myapp"},
+			wantKinds: []string{"warpgate/app"},
+		},
+		{
+			name: "no kind accepted for backwards compatibility",
+			apps: []appFixture{
+				{"legacy", "image: ghcr.io/org/legacy\n"},
+			},
+			wantNames: []string{"legacy"},
+			wantKinds: []string{""},
+		},
+		{
+			name: "explicit empty kind accepted",
+			apps: []appFixture{
+				{"empty-kind", "kind: \"\"\nimage: ghcr.io/org/empty\n"},
+			},
+			wantNames: []string{"empty-kind"},
+			wantKinds: []string{""},
+		},
+		{
+			name: "foreign kind skipped",
+			apps: []appFixture{
+				{"helm-app", "kind: helm/chart\nimage: ghcr.io/org/helm\n"},
+			},
+			wantNames: []string{},
+			wantKinds: []string{},
+		},
+		{
+			name: "case sensitive comparison",
+			apps: []appFixture{
+				{"upper", "kind: WARPGATE/APP\nimage: ghcr.io/org/upper\n"},
+			},
+			wantNames: []string{},
+			wantKinds: []string{},
+		},
+		{
+			name: "trailing whitespace rejected",
+			apps: []appFixture{
+				{"ws-app", "kind: \"warpgate/app \"\nimage: ghcr.io/org/ws\n"},
+			},
+			wantNames: []string{},
+			wantKinds: []string{},
+		},
+		{
+			name: "mixed: keeps valid and legacy, skips foreign",
+			apps: []appFixture{
+				{"aaa-valid", "kind: warpgate/app\nimage: ghcr.io/org/valid\n"},
+				{"bbb-legacy", "image: ghcr.io/org/legacy\n"},
+				{"ccc-foreign", "kind: other/thing\nimage: ghcr.io/org/foreign\n"},
+			},
+			wantNames: []string{"aaa-valid", "bbb-legacy"},
+			wantKinds: []string{"warpgate/app", ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			appsDir := filepath.Join(dir, "apps")
+
+			for _, a := range tt.apps {
+				appDir := filepath.Join(appsDir, a.name)
+				if err := os.MkdirAll(appDir, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(appDir, "app.yml"), []byte(a.yml), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			apps, err := DiscoverApps(dir)
+			if err != nil {
+				t.Fatalf("DiscoverApps() error: %v", err)
+			}
+
+			if len(apps) != len(tt.wantNames) {
+				t.Fatalf("expected %d apps, got %d", len(tt.wantNames), len(apps))
+			}
+
+			for i, app := range apps {
+				if app.Name != tt.wantNames[i] {
+					t.Errorf("app[%d].Name = %q, want %q", i, app.Name, tt.wantNames[i])
+				}
+				if app.Kind != tt.wantKinds[i] {
+					t.Errorf("app[%d].Kind = %q, want %q", i, app.Kind, tt.wantKinds[i])
+				}
+			}
+		})
 	}
 }
 
