@@ -185,11 +185,8 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 			return fmt.Errorf("failed to fetch secrets: %w", fetchErr)
 		}
 		envPath := remoteDir + "/.env"
-		if err := client.WriteFile(envPath, envContent); err != nil {
+		if err := client.WriteFileSecret(envPath, envContent); err != nil {
 			return fmt.Errorf("failed to write .env: %w", err)
-		}
-		if _, _, err := client.RunCommand("chmod 600 " + envPath); err != nil {
-			d.log.Warnf("Failed to set .env permissions: %v", err)
 		}
 		hasEnvFile = true
 	}
@@ -204,11 +201,10 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 		}
 	}
 	if reg.Username != "" {
-		loginCmd := fmt.Sprintf("echo '%s' | docker login %s -u %s --password-stdin",
-			reg.Password,
-			reg.Server,
-			reg.Username)
-		if _, _, err := client.RunCommand(loginCmd); err != nil {
+		loginCmd := fmt.Sprintf("docker login %s -u %s --password-stdin",
+			shellQuote(reg.Server),
+			shellQuote(reg.Username))
+		if _, _, err := client.RunCommandStdin(loginCmd, reg.Password); err != nil {
 			d.log.Warnf("Docker login failed: %v", err)
 		}
 	}
@@ -240,7 +236,7 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 
 	if hasEnvFile {
 		if _, _, err := client.RunCommand("rm -f " + remoteDir + "/.env"); err != nil {
-			d.log.Warnf("Failed to remove .env file: %v", err)
+			return fmt.Errorf("failed to remove .env file: %w", err)
 		}
 	}
 
@@ -860,4 +856,9 @@ func (d *Deployer) readState(client *ssh.Client, remoteDir string) *DeployState 
 		return &DeployState{}
 	}
 	return state
+}
+
+// shellQuote wraps a value in single quotes, escaping embedded single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

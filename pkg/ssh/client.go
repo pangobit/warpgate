@@ -79,7 +79,7 @@ func (c *Client) Connect() error {
 
 	hostKeyCallback, err := c.getHostKeyCallback()
 	if err != nil {
-		hostKeyCallback = gossh.InsecureIgnoreHostKey()
+		return fmt.Errorf("failed to load known_hosts: %w", err)
 	}
 
 	config := &gossh.ClientConfig{
@@ -144,6 +144,74 @@ func (c *Client) RunCommand(cmd string) (string, string, error) {
 
 	var stdoutBuf strings.Builder
 	var stderrBuf strings.Builder
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			stdoutBuf.WriteString(scanner.Text())
+			stdoutBuf.WriteString("\n")
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			stderrBuf.WriteString(scanner.Text())
+			stderrBuf.WriteString("\n")
+		}
+	}()
+
+	wg.Wait()
+	err = session.Wait()
+
+	return stdoutBuf.String(), stderrBuf.String(), err
+}
+
+// RunCommandStdin executes a command on the remote host and pipes stdinData
+// to the command's standard input.
+func (c *Client) RunCommandStdin(cmd, stdinData string) (string, string, error) {
+	if c.TailscaleSSH {
+		target := fmt.Sprintf("%s@%s", c.User, c.Host)
+		sshCmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", target, cmd)
+		sshCmd.Stdin = strings.NewReader(stdinData)
+		var stdoutBuf, stderrBuf strings.Builder
+		sshCmd.Stdout = &stdoutBuf
+		sshCmd.Stderr = &stderrBuf
+		err := sshCmd.Run()
+		return stdoutBuf.String(), stderrBuf.String(), err
+	}
+
+	if c.client == nil {
+		return "", "", fmt.Errorf("not connected")
+	}
+
+	session, err := c.client.NewSession()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
+
+	session.Stdin = strings.NewReader(stdinData)
+
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		return "", "", err
+	}
+
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		return "", "", err
+	}
+
+	if err := session.Start(cmd); err != nil {
+		return "", "", fmt.Errorf("failed to start command: %w", err)
+	}
+
+	var stdoutBuf, stderrBuf strings.Builder
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -261,7 +329,22 @@ func (c *Client) RunScriptSilent(script string) (string, error) {
 
 // WriteFile writes content to a file on the remote host via stdin piping.
 func (c *Client) WriteFile(remotePath, content string) error {
-	cmd := fmt.Sprintf("mkdir -p %s && cat > %s", filepath.Dir(remotePath), remotePath)
+	return c.writeFile(remotePath, content, false)
+}
+
+// WriteFileSecret writes content to a file on the remote host with mode 600.
+// Use this instead of WriteFile for files containing sensitive data.
+func (c *Client) WriteFileSecret(remotePath, content string) error {
+	return c.writeFile(remotePath, content, true)
+}
+
+func (c *Client) writeFile(remotePath, content string, restrictPerms bool) error {
+	var cmd string
+	if restrictPerms {
+		cmd = fmt.Sprintf("umask 077 && mkdir -p %s && cat > %s", filepath.Dir(remotePath), remotePath)
+	} else {
+		cmd = fmt.Sprintf("mkdir -p %s && cat > %s", filepath.Dir(remotePath), remotePath)
+	}
 
 	if c.TailscaleSSH {
 		sshCmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", fmt.Sprintf("%s@%s", c.User, c.Host), cmd)
