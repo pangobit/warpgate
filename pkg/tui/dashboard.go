@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/pangobit/warpgate/pkg/config"
@@ -45,6 +46,8 @@ type DashboardModel struct {
 	config      DashboardConfig
 	result      *deploy.ClusterStatusResult
 	spinner     spinner.Model
+	nodesTable  table.Model
+	appsTable   table.Model
 	loading     bool
 	lastErr     error
 	lastRefresh time.Time
@@ -58,10 +61,24 @@ func NewDashboard(cfg DashboardConfig) DashboardModel {
 
 	s := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
+	nodesTable := table.New(
+		table.WithColumns(nodeColumns),
+		table.WithWidth(tableWidth(nodeColumns)),
+		table.WithStyles(dashTableStyles),
+	)
+
+	appsTable := table.New(
+		table.WithColumns(appColumns),
+		table.WithWidth(tableWidth(appColumns)),
+		table.WithStyles(dashTableStyles),
+	)
+
 	return DashboardModel{
-		config:  cfg,
-		spinner: s,
-		loading: true,
+		config:     cfg,
+		spinner:    s,
+		nodesTable: nodesTable,
+		appsTable:  appsTable,
+		loading:    true,
 	}
 }
 
@@ -95,6 +112,7 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.lastErr = nil
 		m.lastRefresh = time.Now()
+		m.rebuildTables()
 		return m, nil
 
 	case errorMsg:
@@ -118,7 +136,6 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m DashboardModel) View() tea.View {
 	var b strings.Builder
 
-	// Title line
 	title := dashTitleStyle.Render("Warpgate Dashboard") + dashDimStyle.Render(" — "+m.config.Project)
 	refreshInfo := m.refreshStatus()
 	b.WriteString(title + "  " + dashDimStyle.Render(refreshInfo))
@@ -128,16 +145,35 @@ func (m DashboardModel) View() tea.View {
 		b.WriteString(dashErrorStyle.Render("Error: "+m.lastErr.Error()) + "\n\n")
 	}
 
-	// Nodes table
-	b.WriteString(dashHeaderStyle.Render("Nodes"))
-	b.WriteString("\n")
-	b.WriteString(dashDimStyle.Render(strings.Repeat("─", 60)))
+	if m.result != nil {
+		b.WriteString(dashHeaderStyle.Render("Nodes"))
+		b.WriteString("\n")
+		b.WriteString(m.nodesTable.View())
+		b.WriteString("\n\n")
+
+		b.WriteString(dashHeaderStyle.Render("Apps"))
+		b.WriteString("\n")
+		b.WriteString(m.appsTable.View())
+	} else if m.loading {
+		b.WriteString("  " + m.spinner.View() + " Fetching status...")
+	}
+
+	b.WriteString("\n\n")
+	b.WriteString(dashDimStyle.Render("  [r] refresh  [q] quit"))
 	b.WriteString("\n")
 
-	nodeHeader := fmt.Sprintf("  %-16s %-16s %-18s %s", "ID", "HOST", "TAILSCALE", "STATUS")
-	b.WriteString(dashColHeaderStyle.Render(nodeHeader))
-	b.WriteString("\n")
+	v := tea.NewView(b.String())
+	v.AltScreen = true
+	return v
+}
 
+func (m *DashboardModel) rebuildTables() {
+	m.rebuildNodesTable()
+	m.rebuildAppsTable()
+}
+
+func (m *DashboardModel) rebuildNodesTable() {
+	var rows []table.Row
 	for _, node := range m.config.Nodes {
 		reachable := m.nodeReachable(node.ID)
 		status := dashNodeOnlineStyle.Render(statusDot + " reachable")
@@ -150,58 +186,47 @@ func (m DashboardModel) View() tea.View {
 			host = host[:14] + ".."
 		}
 
-		line := fmt.Sprintf("  %-16s %-16s %-18s %s", node.ID, host, node.PrivateIP, status)
-		b.WriteString(line)
-		b.WriteString("\n")
+		rows = append(rows, table.Row{node.ID, host, node.PrivateIP, status})
 	}
 
-	b.WriteString("\n")
+	m.nodesTable.SetRows(rows)
+	m.nodesTable.SetHeight(len(rows) + 1)
+}
 
-	// Apps table
-	b.WriteString(dashHeaderStyle.Render("Apps"))
-	b.WriteString("\n")
-	b.WriteString(dashDimStyle.Render(strings.Repeat("─", 72)))
-	b.WriteString("\n")
+func (m *DashboardModel) rebuildAppsTable() {
+	var rows []table.Row
+	if m.result == nil {
+		return
+	}
 
-	appHeader := fmt.Sprintf("  %-22s %-14s %-8s %-14s %s", "NAME", "VERSION", "SLOT", "STATUS", "NODE")
-	b.WriteString(dashColHeaderStyle.Render(appHeader))
-	b.WriteString("\n")
-
-	if m.result != nil {
-		for _, app := range m.result.Apps {
-			version := app.Version
-			if version == "" {
-				version = "-"
-			}
-			slot := app.Slot
-			if slot == "" {
-				slot = "-"
-			}
-			state := app.State
-			if app.Error != "" {
-				state = "error"
-			}
-			if state == "" {
-				state = "-"
-			}
-
-			styledState := m.styleState(state)
-			line := fmt.Sprintf("  %-22s %-14s %-8s %-14s %s", app.App, version, slot, styledState, app.NodeID)
-			b.WriteString(line)
-			b.WriteString("\n")
+	for _, app := range m.result.Apps {
+		version := app.Version
+		if version == "" {
+			version = "-"
 		}
-	} else if m.loading {
-		b.WriteString("  " + m.spinner.View() + " Fetching status...")
-		b.WriteString("\n")
+		slot := app.Slot
+		if slot == "" {
+			slot = "-"
+		}
+		state := app.State
+		if app.Error != "" {
+			state = "error"
+		}
+		if state == "" {
+			state = "-"
+		}
+
+		rows = append(rows, table.Row{app.App, version, slot, styleState(state), app.NodeID})
+
+		for _, sc := range app.Sidecars {
+			rows = append(rows, table.Row{
+				dashDimStyle.Render("└ " + sc.Service), "", "", styleState(sc.State), "",
+			})
+		}
 	}
 
-	b.WriteString("\n")
-	b.WriteString(dashDimStyle.Render("  [r] refresh  [q] quit"))
-	b.WriteString("\n")
-
-	v := tea.NewView(b.String())
-	v.AltScreen = true
-	return v
+	m.appsTable.SetRows(rows)
+	m.appsTable.SetHeight(len(rows) + 1)
 }
 
 func (m DashboardModel) refreshStatus() string {
@@ -223,7 +248,7 @@ func (m DashboardModel) nodeReachable(nodeID string) bool {
 	return ok && reachable
 }
 
-func (m DashboardModel) styleState(state string) string {
+func styleState(state string) string {
 	switch state {
 	case "healthy":
 		return dashHealthyStyle.Render(statusDot + " healthy")
@@ -269,13 +294,37 @@ func RunDashboard(cfg DashboardConfig) error {
 	return nil
 }
 
-// Dashboard styles
+var (
+	nodeColumns = []table.Column{
+		{Title: "ID", Width: 16},
+		{Title: "HOST", Width: 16},
+		{Title: "TAILSCALE", Width: 18},
+		{Title: "STATUS", Width: 16},
+	}
+
+	appColumns = []table.Column{
+		{Title: "NAME", Width: 22},
+		{Title: "VERSION", Width: 14},
+		{Title: "SLOT", Width: 8},
+		{Title: "STATUS", Width: 16},
+		{Title: "NODE", Width: 16},
+	}
+)
+
+// tableWidth returns the total width for a set of columns, accounting for cell padding.
+func tableWidth(cols []table.Column) int {
+	w := 0
+	for _, c := range cols {
+		w += c.Width + 2
+	}
+	return w
+}
+
 var (
 	statusDot = "●"
 
 	dashTitleStyle     = lipgloss.NewStyle().Bold(true)
 	dashHeaderStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#04B575"))
-	dashColHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#888888"))
 	dashDimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#606060"))
 	dashErrorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4672"))
 
@@ -284,4 +333,10 @@ var (
 	dashUnhealthyStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4672"))
 	dashNodeOnlineStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
 	dashNodeOfflineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4672"))
+
+	dashTableStyles = table.Styles{
+		Header:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#888888")).Padding(0, 1),
+		Cell:     lipgloss.NewStyle().Padding(0, 1),
+		Selected: lipgloss.NewStyle(),
+	}
 )

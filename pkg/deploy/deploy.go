@@ -494,6 +494,16 @@ type NodeStatus struct {
 	Error string
 }
 
+// ContainerStatus holds the status of a single container within a compose project.
+type ContainerStatus struct {
+	// Service is the compose service name.
+	Service string
+	// Name is the container name.
+	Name string
+	// State is the container health: "healthy", "running", "unhealthy".
+	State string
+}
+
 // AppNodeStatus holds the deployment status of a single app on a single node.
 type AppNodeStatus struct {
 	// App is the application name.
@@ -506,6 +516,8 @@ type AppNodeStatus struct {
 	Slot string
 	// State is the deployment state: "healthy", "running", "unhealthy", "not deployed".
 	State string
+	// Sidecars holds per-container status for sidecar services.
+	Sidecars []ContainerStatus
 	// Error is set if the status could not be determined.
 	Error string
 }
@@ -559,13 +571,15 @@ func (d *Deployer) ClusterStatus() (*ClusterStatusResult, error) {
 
 			projectFlag := fmt.Sprintf("-p %s-%s", app.Name, state.ActiveSlot)
 			composeFiles := "-f compose.yml -f docker-compose.override.yml"
-			psCmd := fmt.Sprintf("cd %s && docker compose %s %s ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
+			psCmd := fmt.Sprintf("cd %s && docker compose %s %s ps --format '{{.Service}}\t{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
 				remoteDir, projectFlag, composeFiles)
 			stdout, _, err := client.RunCommand(psCmd)
 			if err != nil || strings.TrimSpace(stdout) == "NOT_DEPLOYED" {
 				status.State = "not deployed"
 			} else {
-				status.State = ParseContainerHealth(strings.TrimSpace(stdout))
+				trimmed := strings.TrimSpace(stdout)
+				status.State = ParseContainerHealth(trimmed)
+				status.Sidecars = parseSidecarStatuses(trimmed, app.Sidecars)
 			}
 
 			result.Apps = append(result.Apps, status)
@@ -605,6 +619,43 @@ func ParseContainerHealth(psOutput string) string {
 		return "healthy"
 	}
 	return "running"
+}
+
+// parseSidecarStatuses extracts per-container status for sidecar services
+// from docker compose ps output. Each line has format: "service\tname\tstatus".
+func parseSidecarStatuses(psOutput string, sidecars map[string]config.SidecarConfig) []ContainerStatus {
+	if len(sidecars) == 0 {
+		return nil
+	}
+
+	var result []ContainerStatus
+	for _, line := range strings.Split(psOutput, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		service, name, statusStr := parts[0], parts[1], parts[2]
+		if _, ok := sidecars[service]; !ok {
+			continue
+		}
+		state := "running"
+		lower := strings.ToLower(statusStr)
+		if strings.Contains(lower, "(healthy)") {
+			state = "healthy"
+		} else if strings.Contains(lower, "(unhealthy)") {
+			state = "unhealthy"
+		}
+		result = append(result, ContainerStatus{
+			Service: service,
+			Name:    name,
+			State:   state,
+		})
+	}
+	return result
 }
 
 func (d *Deployer) updateInternalProxy(app *config.AppConfig) error {
