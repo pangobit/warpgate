@@ -26,7 +26,7 @@ func BuildLogsCommand(opts LogsOptions) string {
 
 	dockerPS := "docker ps --format '{{.Names}}'"
 	if opts.App != "" {
-		dockerPS += " --filter 'name=" + opts.App + "'"
+		dockerPS += " --filter name=" + shellQuote(opts.App)
 	}
 
 	logsCmd := fmt.Sprintf(
@@ -35,7 +35,7 @@ func BuildLogsCommand(opts LogsOptions) string {
 	)
 
 	if opts.Grep != "" {
-		logsCmd += " | grep '" + opts.Grep + "'"
+		logsCmd += " | grep " + shellQuote(opts.Grep)
 	}
 
 	return logsCmd

@@ -537,22 +537,29 @@ WantedBy=multi-user.target`
 		generated = true
 	}
 
+	pwdFile := "/tmp/.ss-init-pwd"
+	if err := client.WriteFileSecret(pwdFile, masterPassword); err != nil {
+		return "", fmt.Errorf("failed to write temp password file: %w", err)
+	}
+	defer run(client, "rm -f "+pwdFile)
+
 	initCmd := fmt.Sprintf(
-		`sudo -u warpgate bash -c 'cd /home/warpgate && secretsauce init --db-path /opt/warpgate/secretsauce/vault.db --password "%s" --output-key'`,
-		strings.ReplaceAll(masterPassword, `"`, `\"`))
+		`sudo -u warpgate bash -c 'cd /home/warpgate && secretsauce init --db-path /opt/warpgate/secretsauce/vault.db --password "$(cat %s)" --output-key'`,
+		pwdFile)
 
 	stdout, _, err := runLogged(client, &log, initCmd, commandLogOptions{
 		DisplayCmd:    "sudo -u warpgate bash -c 'cd /home/warpgate && secretsauce init --db-path /opt/warpgate/secretsauce/vault.db --password [REDACTED] --output-key'",
 		IncludeStdout: false,
 		IncludeStderr: true,
 	})
+	run(client, "rm -f "+pwdFile)
 	if err != nil {
 		_ = writeBootstrapLog(client, logPath, log.String())
 		return "", fmt.Errorf("vault init failed: %w", err)
 	}
 
 	masterKey := strings.TrimSpace(stdout)
-	if err := client.WriteFile("/opt/warpgate/secretsauce/master.key", masterKey+"\n"); err != nil {
+	if err := client.WriteFileSecret("/opt/warpgate/secretsauce/master.key", masterKey+"\n"); err != nil {
 		return "", fmt.Errorf("failed to write master key: %w", err)
 	}
 
@@ -612,9 +619,9 @@ func storeRegistryCredentials(client *ssh.Client, reg *config.RegistryConfig) (s
 	}
 	for _, entry := range entries {
 		cmd := fmt.Sprintf(
-			"curl -sf -X POST -d %s http://localhost:8090/api/secrets/%s",
-			shellQuote("value="+entry[1]), url.PathEscape(entry[0]))
-		if _, stderr, err := client.RunCommand(cmd); err != nil {
+			"curl -sf -X POST --data-binary @- http://localhost:8090/api/secrets/%s",
+			url.PathEscape(entry[0]))
+		if _, stderr, err := client.RunCommandStdin(cmd, "value="+entry[1]); err != nil {
 			return "", fmt.Errorf("failed to store %s: %w\n%s", entry[0], err, stderr)
 		}
 	}
