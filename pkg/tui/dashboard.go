@@ -294,7 +294,6 @@ func RunDashboard(cfg DashboardConfig) error {
 	return nil
 }
 
-// Column definitions for dashboard tables.
 var (
 	nodeColumns = []table.Column{
 		{Title: "ID", Width: 16},
@@ -312,16 +311,15 @@ var (
 	}
 )
 
-// tableWidth returns the total width for a set of columns, including cell padding.
+// tableWidth returns the total width for a set of columns, accounting for cell padding.
 func tableWidth(cols []table.Column) int {
 	w := 0
 	for _, c := range cols {
-		w += c.Width + 2 // +2 for Padding(0, 1) on each side
+		w += c.Width + 2
 	}
 	return w
 }
 
-// Dashboard styles.
 var (
 	statusDot = "●"
 
