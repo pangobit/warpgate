@@ -7,6 +7,9 @@ import (
 	"sort"
 )
 
+// AppKind is the expected value of the Kind field in app.yml.
+const AppKind = "warpgate/app"
+
 // RepoConfig represents a warpgate infra repo with a cluster config and per-app configs.
 type RepoConfig struct {
 	// Root is the absolute path to the repo root (directory containing cluster.yml).
@@ -74,6 +77,11 @@ func DiscoverApps(repoRoot string) ([]*AppConfig, error) {
 		app, err := LoadAppConfig(appDir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load app %s: %w", entry.Name(), err)
+		}
+
+		if app.Kind != "" && app.Kind != AppKind {
+			fmt.Fprintf(os.Stderr, "skipping %s: unknown kind %q\n", entry.Name(), app.Kind)
+			continue
 		}
 
 		app.Name = entry.Name()

@@ -1,6 +1,36 @@
 package deploy
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/pangobit/warpgate/pkg/config"
+)
+
+func TestDeployAllNoApps(t *testing.T) {
+	d := NewDeployer(&config.RepoConfig{
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+	err := d.DeployAll()
+	if err == nil {
+		t.Fatal("expected error for empty app list")
+	}
+	if err.Error() != "no apps found" {
+		t.Errorf("error = %q, want %q", err.Error(), "no apps found")
+	}
+}
+
+func TestRemoveAllNoApps(t *testing.T) {
+	d := NewDeployer(&config.RepoConfig{
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+	err := d.RemoveAll(nil)
+	if err == nil {
+		t.Fatal("expected error for empty app list")
+	}
+	if err.Error() != "no apps found" {
+		t.Errorf("error = %q, want %q", err.Error(), "no apps found")
+	}
+}
 
 func TestShellQuote(t *testing.T) {
 	tests := []struct {

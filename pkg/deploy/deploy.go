@@ -300,6 +300,52 @@ func (d *Deployer) Rollback(appName string) error {
 	return d.Deploy(appName, state.PreviousVersion)
 }
 
+// DeployAll deploys every discovered app in order, continuing past failures.
+func (d *Deployer) DeployAll() error {
+	if len(d.Repo.Apps) == 0 {
+		return fmt.Errorf("no apps found")
+	}
+
+	var failed []string
+	for _, app := range d.Repo.Apps {
+		d.log.Infof("--- Deploying %s ---", app.Name)
+		if err := d.Deploy(app.Name, ""); err != nil {
+			d.log.Warnf("Deploy failed for %s: %v", app.Name, err)
+			failed = append(failed, app.Name)
+		}
+	}
+
+	if len(failed) > 0 {
+		return fmt.Errorf("deploy failed for %d app(s): %s", len(failed), strings.Join(failed, ", "))
+	}
+
+	d.log.Infof("All %d app(s) deployed successfully", len(d.Repo.Apps))
+	return nil
+}
+
+// RemoveAll removes every discovered app, continuing past failures.
+func (d *Deployer) RemoveAll(nodeIDs []string) error {
+	if len(d.Repo.Apps) == 0 {
+		return fmt.Errorf("no apps found")
+	}
+
+	var failed []string
+	for _, app := range d.Repo.Apps {
+		d.log.Infof("--- Removing %s ---", app.Name)
+		if err := d.Remove(app.Name, nodeIDs); err != nil {
+			d.log.Warnf("Remove failed for %s: %v", app.Name, err)
+			failed = append(failed, app.Name)
+		}
+	}
+
+	if len(failed) > 0 {
+		return fmt.Errorf("remove failed for %d app(s): %s", len(failed), strings.Join(failed, ", "))
+	}
+
+	d.log.Infof("All %d app(s) removed successfully", len(d.Repo.Apps))
+	return nil
+}
+
 // Remove stops and removes an app from all target nodes.
 func (d *Deployer) Remove(appName string, nodeIDs []string) error {
 	if len(nodeIDs) == 0 {
