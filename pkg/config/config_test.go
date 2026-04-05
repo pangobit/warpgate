@@ -393,10 +393,10 @@ func TestDiscoverAppsKindFiltering(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		apps         []appFixture
-		wantNames    []string
-		wantKinds    []string
+		name      string
+		apps      []appFixture
+		wantNames []string
+		wantKinds []string
 	}{
 		{
 			name: "correct kind accepted",
@@ -522,5 +522,119 @@ func TestRepoConfigGetAppsForNode(t *testing.T) {
 	node3Apps := repo.GetAppsForNode("node-3")
 	if len(node3Apps) != 0 {
 		t.Fatalf("expected 0 apps for node-3, got %d", len(node3Apps))
+	}
+}
+
+func TestLoadAppConfigWithSource(t *testing.T) {
+	tests := []struct {
+		name            string
+		yaml            string
+		wantRepo        string
+		wantRef         string
+		wantComposePath string
+		wantEnvCount    int
+		wantEnvKey      string
+		wantEnvVal      string
+	}{
+		{
+			name: "full source and environment",
+			yaml: `image: ghcr.io/org/myapp
+source:
+  repo: github.com/pangobit/myapp
+  ref: v2.0.0
+  compose_path: deploy/compose.yml
+environment:
+  DOMAIN: example.com
+  AUTH_HOST: id.example.com
+`,
+			wantRepo:        "github.com/pangobit/myapp",
+			wantRef:         "v2.0.0",
+			wantComposePath: "deploy/compose.yml",
+			wantEnvCount:    2,
+			wantEnvKey:      "DOMAIN",
+			wantEnvVal:      "example.com",
+		},
+		{
+			name: "minimal source with defaults",
+			yaml: `image: ghcr.io/org/myapp
+source:
+  repo: github.com/pangobit/myapp
+  ref: main
+`,
+			wantRepo:        "github.com/pangobit/myapp",
+			wantRef:         "main",
+			wantComposePath: "",
+			wantEnvCount:    0,
+		},
+		{
+			name: "source without compose_path",
+			yaml: `image: ghcr.io/org/myapp
+source:
+  repo: pangobit/app
+  ref: abc123
+environment:
+  KEY: val
+`,
+			wantRepo:     "pangobit/app",
+			wantRef:      "abc123",
+			wantEnvCount: 1,
+			wantEnvKey:   "KEY",
+			wantEnvVal:   "val",
+		},
+		{
+			name: "no source is valid",
+			yaml: `image: ghcr.io/org/myapp
+version: v1.0.0
+`,
+			wantRepo:     "",
+			wantRef:      "",
+			wantEnvCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			appDir := filepath.Join(dir, "myapp")
+			if err := os.MkdirAll(appDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(appDir, "app.yml"), []byte(tt.yaml), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			app, err := LoadAppConfig(appDir)
+			if err != nil {
+				t.Fatalf("LoadAppConfig() error: %v", err)
+			}
+
+			if tt.wantRepo == "" && tt.wantRef == "" {
+				if app.Source != nil {
+					t.Errorf("expected no Source, got repo=%q ref=%q", app.Source.Repo, app.Source.Ref)
+				}
+				return
+			}
+
+			if app.Source == nil {
+				t.Fatalf("expected Source, got nil")
+			}
+			if app.Source.Repo != tt.wantRepo {
+				t.Errorf("Source.Repo = %q, want %q", app.Source.Repo, tt.wantRepo)
+			}
+			if app.Source.Ref != tt.wantRef {
+				t.Errorf("Source.Ref = %q, want %q", app.Source.Ref, tt.wantRef)
+			}
+			if app.Source.ComposePath != tt.wantComposePath {
+				t.Errorf("Source.ComposePath = %q, want %q", app.Source.ComposePath, tt.wantComposePath)
+			}
+			if len(app.Environment) != tt.wantEnvCount {
+				t.Errorf("len(Environment) = %d, want %d", len(app.Environment), tt.wantEnvCount)
+			}
+			if tt.wantEnvKey != "" {
+				if app.Environment[tt.wantEnvKey] != tt.wantEnvVal {
+					t.Errorf("Environment[%q] = %q, want %q", tt.wantEnvKey, app.Environment[tt.wantEnvKey], tt.wantEnvVal)
+				}
+			}
+		})
 	}
 }
