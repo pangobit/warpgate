@@ -152,6 +152,16 @@ const (
 	StrategyRecreate DeployStrategy = "recreate"
 )
 
+// SourceConfig defines a remote source for the compose file.
+type SourceConfig struct {
+	// Repo is the GitHub repository (e.g., "github.com/owner/repo").
+	Repo string `yaml:"repo"`
+	// Ref is the git reference (tag, branch, or commit SHA) to fetch.
+	Ref string `yaml:"ref"`
+	// ComposePath is the path to the compose file within the repo (default: "compose.yml").
+	ComposePath string `yaml:"compose_path,omitempty"`
+}
+
 // AppConfig defines an application's deployment metadata, loaded from app.yml.
 type AppConfig struct {
 	// Kind identifies the config type, expected to be "warpgate/app".
@@ -174,6 +184,12 @@ type AppConfig struct {
 	Expose *ExposeConfig `yaml:"expose,omitempty"`
 	// Sidecars maps compose service names to their routing configuration.
 	Sidecars map[string]SidecarConfig `yaml:"sidecars,omitempty"`
+	// Source specifies a remote GitHub repo to fetch compose from. If set, compose.yml
+	// is not expected locally and will be fetched at deploy time.
+	Source *SourceConfig `yaml:"source,omitempty"`
+	// Environment provides non-secret environment variables that are merged with secrets
+	// and written to the .env file at deploy time. Secrets take precedence on collision.
+	Environment map[string]string `yaml:"environment,omitempty"`
 }
 
 // EffectiveExpose returns the app's expose config, or a zero value if nil.

@@ -70,13 +70,24 @@ func (d *Deployer) Deploy(appName, version string) error {
 
 	appDir := d.Repo.AppDir(appName)
 	composePath := d.Repo.AppComposePath(appName)
-	if _, err := os.Stat(composePath); os.IsNotExist(err) {
-		return fmt.Errorf("compose.yml not found for app '%s' at %s", appName, composePath)
-	}
 
-	composeContent, err := os.ReadFile(composePath)
-	if err != nil {
-		return fmt.Errorf("failed to read compose.yml: %w", err)
+	var composeContent []byte
+	var err error
+	if app.Source != nil {
+		d.log.Infof("Fetching compose from %s@%s...", app.Source.Repo, app.Source.Ref)
+		composeContent, err = FetchComposeFromSource(app.Source)
+		if err != nil {
+			return fmt.Errorf("failed to fetch remote compose: %w", err)
+		}
+		appDir = ""
+	} else {
+		if _, err = os.Stat(composePath); os.IsNotExist(err) {
+			return fmt.Errorf("compose.yml not found for app '%s' at %s", appName, composePath)
+		}
+		composeContent, err = os.ReadFile(composePath)
+		if err != nil {
+			return fmt.Errorf("failed to read compose.yml: %w", err)
+		}
 	}
 
 	override, err := compose.GenerateOverride(app, &d.Repo.Cluster.Networking, d.Repo.InternalHosts(), string(composeContent))
@@ -97,8 +108,14 @@ func (d *Deployer) Deploy(appName, version string) error {
 		fmt.Println("Override that will be applied:")
 		fmt.Println(override)
 		fmt.Printf("Targets: %v\n", targetNodes)
+		if app.Source != nil {
+			fmt.Printf("Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.Source.Ref, app.Source.ComposePath)
+		}
 		if app.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
 			fmt.Printf("Secrets: fetch from %s (prefix: %s) → .env file\n", d.Repo.Cluster.Secrets.Server, app.SecretsPrefix)
+		}
+		if len(app.Environment) > 0 {
+			fmt.Printf("Environment: %d variable(s) from app.yml\n", len(app.Environment))
 		}
 		if app.Strategy == config.StrategyRecreate {
 			fmt.Printf("Each node: pull -> stop old -> start new -> health check\n")
@@ -118,7 +135,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 
 		d.log.Infof("[%d/%d] Deploying to node %s...", i+1, len(targetNodes), nodeID)
 
-		if err := d.deployToNode(app, node, appDir, composePath, override); err != nil {
+		if err := d.deployToNode(app, node, appDir, composeContent, override); err != nil {
 			d.log.Warnf("Deploy to node %s failed: %v", nodeID, err)
 			if len(deployed) > 0 {
 				d.log.Warnf("Nodes already updated: %v", deployed)
@@ -152,7 +169,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 	return nil
 }
 
-func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, appDir, composePath, override string) error {
+func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, appDir string, composeContent []byte, override string) error {
 	client, err := d.connect(node)
 	if err != nil {
 		return err
@@ -174,12 +191,14 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 	nextSlot := currentState.InactiveSlot()
 	prevSlot := currentState.ActiveSlot
 
-	if err := client.UploadFile(composePath, remoteDir+"/compose.yml"); err != nil {
+	if err := client.WriteFile(remoteDir+"/compose.yml", string(composeContent)); err != nil {
 		return fmt.Errorf("failed to upload compose.yml: %w", err)
 	}
 
-	if err := d.uploadExtraFiles(client, appDir, remoteDir); err != nil {
-		return err
+	if appDir != "" {
+		if err := d.uploadExtraFiles(client, appDir, remoteDir); err != nil {
+			return err
+		}
 	}
 
 	if err := client.WriteFile(remoteDir+"/docker-compose.override.yml", override); err != nil {
@@ -226,7 +245,6 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 		return fmt.Errorf("pull failed: %w\n%s", err, stderr)
 	}
 
-	// Recreate strategy: stop old slot before starting new to free host ports.
 	if app.Strategy == config.StrategyRecreate && prevSlot != "" {
 		prevProjectFlag := fmt.Sprintf("-p %s-%s", app.Name, prevSlot)
 		d.log.Infof("Recreate strategy: stopping %s slot before starting %s...", prevSlot, nextSlot)
@@ -881,14 +899,33 @@ func (d *Deployer) composeUpCommand(app *config.AppConfig, projectFlag, composeF
 }
 
 func (d *Deployer) fetchSecrets(app *config.AppConfig) (string, error) {
-	client := secrets.NewClient(d.Repo.Cluster.Secrets.Server)
-	d.log.Infof("Fetching secrets for prefix %s...", app.SecretsPrefix)
-	env, err := client.FetchEnv(app.SecretsPrefix)
-	if err != nil {
-		return "", err
+	var secretEnv map[string]string
+	if app.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
+		client := secrets.NewClient(d.Repo.Cluster.Secrets.Server)
+		d.log.Infof("Fetching secrets for prefix %s...", app.SecretsPrefix)
+		var err error
+		secretEnv, err = client.FetchEnv(app.SecretsPrefix)
+		if err != nil {
+			return "", err
+		}
+		d.log.Infof("Fetched %d secret(s)", len(secretEnv))
 	}
-	d.log.Infof("Fetched %d secret(s)", len(env))
-	return secrets.FormatDotEnv(env), nil
+
+	merged := mergeEnvironment(app.Environment, secretEnv)
+	return secrets.FormatDotEnv(merged), nil
+}
+
+// mergeEnvironment combines app-level environment variables with secrets.
+// Secrets take precedence over environment variables on key collision.
+func mergeEnvironment(env, secrets map[string]string) map[string]string {
+	merged := make(map[string]string)
+	for k, v := range env {
+		merged[k] = v
+	}
+	for k, v := range secrets {
+		merged[k] = v
+	}
+	return merged
 }
 
 // fetchRegistryCredentials retrieves Docker registry credentials from SecretSauce.
