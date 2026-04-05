@@ -1,10 +1,8 @@
-// Package compose generates Docker Compose override files for Traefik integration.
+// Package compose generates Docker Compose override and Traefik bootstrap files.
 package compose
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/pangobit/warpgate/pkg/config"
 	"gopkg.in/yaml.v3"
@@ -14,26 +12,14 @@ import (
 type OverrideFile struct {
 	// Services maps service names to their override definitions.
 	Services map[string]ServiceOverride `yaml:"services"`
-	// Networks maps network names to their definitions.
-	Networks map[string]Network `yaml:"networks,omitempty"`
 }
 
 // ServiceOverride holds the fields injected by warpgate into a compose override.
 type ServiceOverride struct {
 	// Image is the full image reference with tag.
 	Image string `yaml:"image,omitempty"`
-	// Labels holds container labels (Traefik routing).
-	Labels map[string]string `yaml:"labels,omitempty"`
-	// Networks attaches the service to networks with optional aliases.
-	Networks map[string]ServiceNetworkConfig `yaml:"networks,omitempty"`
 	// ExtraHosts maps internal hostnames to host-gateway for service discovery.
 	ExtraHosts []string `yaml:"extra_hosts,omitempty"`
-}
-
-// ServiceNetworkConfig holds per-service network settings.
-type ServiceNetworkConfig struct {
-	// Aliases are additional hostnames for the service on this network.
-	Aliases []string `yaml:"aliases,omitempty"`
 }
 
 // Network represents a Docker Compose network definition.
@@ -42,9 +28,9 @@ type Network struct {
 	External bool `yaml:"external,omitempty"`
 }
 
-// GenerateOverride creates a docker-compose.override.yml that injects the image tag,
-// Traefik labels, the warpgate network with aliases, and strips host port bindings.
-// composeContent is the raw compose.yml content, used to discover all service names.
+// GenerateOverride creates a docker-compose.override.yml that injects the image tag
+// and extra_hosts for internal service discovery. Traefik labels and network
+// configuration are authored directly in each app's compose.yml.
 func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig, internalHosts []string, composeContent string) (string, error) {
 	version := app.Version
 	if version == "" {
@@ -68,28 +54,11 @@ func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig
 
 	for _, svcName := range serviceNames {
 		svc := ServiceOverride{
-			Networks: map[string]ServiceNetworkConfig{
-				"warpgate": {Aliases: []string{svcName}},
-			},
 			ExtraHosts: extraHosts,
 		}
 
 		if svcName == app.Name {
 			svc.Image = app.Image + ":" + version
-
-			labels := buildTraefikLabels(app, networking)
-			buildPrivatePortLabels(app, labels)
-			buildInternalLabels(app, labels)
-			if len(labels) > 0 {
-				svc.Labels = labels
-			}
-		}
-
-		if sidecar, ok := app.Sidecars[svcName]; ok {
-			labels := buildSidecarLabels(app.Name, svcName, sidecar)
-			if len(labels) > 0 {
-				svc.Labels = labels
-			}
 		}
 
 		services[svcName] = svc
@@ -97,9 +66,6 @@ func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig
 
 	override := &OverrideFile{
 		Services: services,
-		Networks: map[string]Network{
-			"warpgate": {External: true},
-		},
 	}
 
 	yamlBytes, err := yaml.Marshal(override)
@@ -108,84 +74,6 @@ func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig
 	}
 
 	return string(yamlBytes), nil
-}
-
-func buildTraefikLabels(app *config.AppConfig, networking *config.NetworkingConfig) map[string]string {
-	labels := make(map[string]string)
-
-	pub := app.EffectiveExpose().Public
-	if pub == nil || len(pub.Domains) == 0 {
-		return labels
-	}
-
-	labels["traefik.enable"] = "true"
-
-	for i, domain := range pub.Domains {
-		suffix := ""
-		if i > 0 {
-			suffix = "-" + strconv.Itoa(i)
-		}
-
-		routerName := app.Name + suffix
-		labels["traefik.http.routers."+routerName+".rule"] = "Host(`" + domain + "`)"
-		labels["traefik.http.routers."+routerName+".entrypoints"] = strings.Join(networking.Traefik.EntryPoints, ",")
-
-		if networking.Traefik.ACME.Enabled {
-			labels["traefik.http.routers."+routerName+".tls"] = "true"
-			labels["traefik.http.routers."+routerName+".tls.certresolver"] = networking.Traefik.ACME.Provider
-		}
-	}
-
-	if app.Port > 0 {
-		labels["traefik.http.services."+app.Name+".loadbalancer.server.port"] = strconv.Itoa(app.Port)
-	}
-
-	return labels
-}
-
-func buildInternalLabels(app *config.AppConfig, labels map[string]string) {
-	ie := app.EffectiveExpose().Internal
-	if ie == nil || app.Port == 0 {
-		return
-	}
-
-	routerName := app.Name + "-internal"
-	labels["traefik.enable"] = "true"
-	labels["traefik.http.routers."+routerName+".rule"] = "Host(`" + ie.Hostname + "`)"
-	labels["traefik.http.routers."+routerName+".entrypoints"] = "internal"
-	labels["traefik.http.routers."+routerName+".service"] = routerName
-	labels["traefik.http.services."+routerName+".loadbalancer.server.port"] = strconv.Itoa(app.Port)
-}
-
-func buildPrivatePortLabels(app *config.AppConfig, labels map[string]string) {
-	pe := app.EffectiveExpose().Private
-	if pe == nil {
-		return
-	}
-
-	routerName := app.Name + "-port-internal"
-	labels["traefik.enable"] = "true"
-	labels["traefik.http.routers."+routerName+".rule"] = "PathPrefix(`/`)"
-	labels["traefik.http.routers."+routerName+".entrypoints"] = routerName
-	labels["traefik.http.routers."+routerName+".service"] = routerName
-	labels["traefik.http.services."+routerName+".loadbalancer.server.port"] = strconv.Itoa(app.Port)
-}
-
-func buildSidecarLabels(appName, sidecarName string, sidecar config.SidecarConfig) map[string]string {
-	labels := make(map[string]string)
-
-	pe := sidecar.EffectiveExpose().Private
-	if pe == nil {
-		return labels
-	}
-
-	routerName := appName + "-" + sidecarName + "-internal"
-	labels["traefik.enable"] = "true"
-	labels["traefik.http.routers."+routerName+".rule"] = "PathPrefix(`/`)"
-	labels["traefik.http.routers."+routerName+".entrypoints"] = routerName
-	labels["traefik.http.routers."+routerName+".service"] = routerName
-	labels["traefik.http.services."+routerName+".loadbalancer.server.port"] = strconv.Itoa(sidecar.Port)
-	return labels
 }
 
 // GenerateTraefikCompose creates the public Traefik service compose file for bootstrap.
