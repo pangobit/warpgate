@@ -111,11 +111,12 @@ func (d *Deployer) Deploy(appName, version string) error {
 		if app.Source != nil {
 			fmt.Printf("Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.Source.Ref, app.Source.ComposePath)
 		}
-		if app.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
+		needsSecrets := app.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != ""
+		if needsSecrets {
 			fmt.Printf("Secrets: fetch from %s (prefix: %s) → .env file\n", d.Repo.Cluster.Secrets.Server, app.SecretsPrefix)
 		}
 		if len(app.Environment) > 0 {
-			fmt.Printf("Environment: %d variable(s) from app.yml\n", len(app.Environment))
+			fmt.Printf("Environment: %d variable(s) from app.yml → .env file\n", len(app.Environment))
 		}
 		if app.Strategy == config.StrategyRecreate {
 			fmt.Printf("Each node: pull -> stop old -> start new -> health check\n")
@@ -206,7 +207,7 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 	}
 
 	hasEnvFile := false
-	if app.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
+	if needsEnvFile(app, d.Repo.Cluster.Secrets.Server) {
 		envContent, fetchErr := d.fetchSecrets(app)
 		if fetchErr != nil {
 			return fmt.Errorf("failed to fetch secrets: %w", fetchErr)
@@ -887,6 +888,15 @@ func (d *Deployer) connect(node *config.NodeConfig) (*ssh.Client, error) {
 	}
 
 	return client, nil
+}
+
+// needsEnvFile reports whether the app requires a .env file on the remote node.
+// This is true when the app has environment variables, fetchable secrets, or both.
+func needsEnvFile(app *config.AppConfig, secretsServer string) bool {
+	if len(app.Environment) > 0 {
+		return true
+	}
+	return app.SecretsPrefix != "" && secretsServer != ""
 }
 
 func (d *Deployer) composeUpCommand(app *config.AppConfig, projectFlag, composeFiles string, hasEnvFile bool) string {
