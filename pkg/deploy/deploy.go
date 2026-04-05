@@ -88,7 +88,11 @@ func (d *Deployer) Deploy(appName, version string) error {
 	d.log.Infof("Deploying %s:%s to nodes: %v", app.Image, app.Version, targetNodes)
 
 	if d.DryRun {
-		d.log.Info("DRY RUN — zero-downtime deploy via blue/green swap")
+		if app.Strategy == config.StrategyRecreate {
+			d.log.Info("DRY RUN — recreate deploy (brief downtime)")
+		} else {
+			d.log.Info("DRY RUN — zero-downtime deploy via blue/green swap")
+		}
 		fmt.Println()
 		fmt.Println("Override that will be applied:")
 		fmt.Println(override)
@@ -96,7 +100,11 @@ func (d *Deployer) Deploy(appName, version string) error {
 		if app.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
 			fmt.Printf("Secrets: fetch from %s (prefix: %s) → .env file\n", d.Repo.Cluster.Secrets.Server, app.SecretsPrefix)
 		}
-		fmt.Printf("Each node: pull -> start new -> health check -> stop old\n")
+		if app.Strategy == config.StrategyRecreate {
+			fmt.Printf("Each node: pull -> stop old -> start new -> health check\n")
+		} else {
+			fmt.Printf("Each node: pull -> start new -> health check -> stop old\n")
+		}
 		return nil
 	}
 
@@ -216,6 +224,17 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 	d.log.Info("Pulling images...")
 	if _, stderr, err := client.RunCommand(pullCmd); err != nil {
 		return fmt.Errorf("pull failed: %w\n%s", err, stderr)
+	}
+
+	// Recreate strategy: stop old slot before starting new to free host ports.
+	if app.Strategy == config.StrategyRecreate && prevSlot != "" {
+		prevProjectFlag := fmt.Sprintf("-p %s-%s", app.Name, prevSlot)
+		d.log.Infof("Recreate strategy: stopping %s slot before starting %s...", prevSlot, nextSlot)
+		stopCmd := fmt.Sprintf("cd %s && docker compose %s %s down", remoteDir, prevProjectFlag, composeFiles)
+		if _, _, err := client.RunCommand(stopCmd); err != nil {
+			d.log.Warnf("Failed to stop old slot: %v", err)
+		}
+		prevSlot = "" // already stopped, skip the post-healthcheck stop
 	}
 
 	upCmd := d.composeUpCommand(app, projectFlag, composeFiles, hasEnvFile)

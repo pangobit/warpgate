@@ -141,6 +141,17 @@ func (s *SidecarConfig) EffectiveExpose() ExposeConfig {
 	return ExposeConfig{}
 }
 
+// DeployStrategy controls how blue/green slot transitions are performed.
+type DeployStrategy string
+
+const (
+	// StrategyBlueGreen is the default zero-downtime strategy: start new, health check, stop old.
+	StrategyBlueGreen DeployStrategy = "blue-green"
+	// StrategyRecreate stops the old slot before starting the new one.
+	// Use this for apps with host port bindings that prevent two slots from running simultaneously.
+	StrategyRecreate DeployStrategy = "recreate"
+)
+
 // AppConfig defines an application's deployment metadata, loaded from app.yml.
 type AppConfig struct {
 	// Kind identifies the config type, expected to be "warpgate/app".
@@ -157,6 +168,8 @@ type AppConfig struct {
 	SecretsPrefix string `yaml:"secrets_prefix,omitempty"`
 	// Port is the container port Traefik routes to.
 	Port int `yaml:"port,omitempty"`
+	// Strategy is the deploy strategy: "blue-green" (default) or "recreate".
+	Strategy DeployStrategy `yaml:"strategy,omitempty"`
 	// Expose declares how the app is reachable at each visibility tier.
 	Expose *ExposeConfig `yaml:"expose,omitempty"`
 	// Sidecars maps compose service names to their routing configuration.
@@ -281,6 +294,13 @@ func ValidateApp(app *AppConfig) error {
 	}
 	if app.Image == "" {
 		return fmt.Errorf("app %s: image is required", app.Name)
+	}
+
+	switch app.Strategy {
+	case "", StrategyBlueGreen, StrategyRecreate:
+		// valid
+	default:
+		return fmt.Errorf("app %s: invalid strategy %q (must be \"blue-green\" or \"recreate\")", app.Name, app.Strategy)
 	}
 
 	expose := app.EffectiveExpose()
