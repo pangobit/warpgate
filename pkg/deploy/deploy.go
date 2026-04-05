@@ -191,12 +191,10 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 	nextSlot := currentState.InactiveSlot()
 	prevSlot := currentState.ActiveSlot
 
-	// Upload compose content (from remote source or local file)
 	if err := client.WriteFile(remoteDir+"/compose.yml", string(composeContent)); err != nil {
 		return fmt.Errorf("failed to upload compose.yml: %w", err)
 	}
 
-	// Upload extra files only if we have a local app directory
 	if appDir != "" {
 		if err := d.uploadExtraFiles(client, appDir, remoteDir); err != nil {
 			return err
@@ -247,7 +245,6 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 		return fmt.Errorf("pull failed: %w\n%s", err, stderr)
 	}
 
-	// Recreate strategy: stop old slot before starting new to free host ports.
 	if app.Strategy == config.StrategyRecreate && prevSlot != "" {
 		prevProjectFlag := fmt.Sprintf("-p %s-%s", app.Name, prevSlot)
 		d.log.Infof("Recreate strategy: stopping %s slot before starting %s...", prevSlot, nextSlot)
