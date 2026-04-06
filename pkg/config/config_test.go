@@ -529,8 +529,8 @@ func TestLoadAppConfigWithSource(t *testing.T) {
 	tests := []struct {
 		name            string
 		yaml            string
+		wantSource      bool
 		wantRepo        string
-		wantRef         string
 		wantComposePath string
 		wantEnvCount    int
 		wantEnvKey      string
@@ -541,42 +541,39 @@ func TestLoadAppConfigWithSource(t *testing.T) {
 			yaml: `image: ghcr.io/org/myapp
 source:
   repo: github.com/pangobit/myapp
-  ref: v2.0.0
   compose_path: deploy/compose.yml
 environment:
   DOMAIN: example.com
   AUTH_HOST: id.example.com
 `,
+			wantSource:      true,
 			wantRepo:        "github.com/pangobit/myapp",
-			wantRef:         "v2.0.0",
 			wantComposePath: "deploy/compose.yml",
 			wantEnvCount:    2,
 			wantEnvKey:      "DOMAIN",
 			wantEnvVal:      "example.com",
 		},
 		{
-			name: "minimal source with defaults",
+			name: "minimal source",
 			yaml: `image: ghcr.io/org/myapp
 source:
   repo: github.com/pangobit/myapp
-  ref: main
 `,
+			wantSource:      true,
 			wantRepo:        "github.com/pangobit/myapp",
-			wantRef:         "main",
 			wantComposePath: "",
 			wantEnvCount:    0,
 		},
 		{
-			name: "source without compose_path",
+			name: "source with environment",
 			yaml: `image: ghcr.io/org/myapp
 source:
   repo: pangobit/app
-  ref: abc123
 environment:
   KEY: val
 `,
+			wantSource:   true,
 			wantRepo:     "pangobit/app",
-			wantRef:      "abc123",
 			wantEnvCount: 1,
 			wantEnvKey:   "KEY",
 			wantEnvVal:   "val",
@@ -586,8 +583,7 @@ environment:
 			yaml: `image: ghcr.io/org/myapp
 version: v1.0.0
 `,
-			wantRepo:     "",
-			wantRef:      "",
+			wantSource:   false,
 			wantEnvCount: 0,
 		},
 	}
@@ -608,9 +604,9 @@ version: v1.0.0
 				t.Fatalf("LoadAppConfig() error: %v", err)
 			}
 
-			if tt.wantRepo == "" && tt.wantRef == "" {
+			if !tt.wantSource {
 				if app.Source != nil {
-					t.Errorf("expected no Source, got repo=%q ref=%q", app.Source.Repo, app.Source.Ref)
+					t.Errorf("expected no Source, got repo=%q", app.Source.Repo)
 				}
 				return
 			}
@@ -620,9 +616,6 @@ version: v1.0.0
 			}
 			if app.Source.Repo != tt.wantRepo {
 				t.Errorf("Source.Repo = %q, want %q", app.Source.Repo, tt.wantRepo)
-			}
-			if app.Source.Ref != tt.wantRef {
-				t.Errorf("Source.Ref = %q, want %q", app.Source.Ref, tt.wantRef)
 			}
 			if app.Source.ComposePath != tt.wantComposePath {
 				t.Errorf("Source.ComposePath = %q, want %q", app.Source.ComposePath, tt.wantComposePath)

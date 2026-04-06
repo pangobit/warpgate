@@ -153,11 +153,12 @@ const (
 )
 
 // SourceConfig defines a remote source for the compose file.
+// The git reference used to fetch the compose file comes from AppConfig.Version,
+// not from this struct — version is the single source of truth for both the
+// image tag and the git ref.
 type SourceConfig struct {
 	// Repo is the GitHub repository (e.g., "github.com/owner/repo").
 	Repo string `yaml:"repo"`
-	// Ref is the git reference (tag, branch, or commit SHA) to fetch.
-	Ref string `yaml:"ref"`
 	// ComposePath is the path to the compose file within the repo (default: "compose.yml").
 	ComposePath string `yaml:"compose_path,omitempty"`
 }
@@ -310,6 +311,10 @@ func ValidateApp(app *AppConfig) error {
 	}
 	if app.Image == "" {
 		return fmt.Errorf("app %s: image is required", app.Name)
+	}
+
+	if app.Source != nil && app.Version == "" {
+		return fmt.Errorf("app %s: version is required when source is set (used as git ref for fetching compose)", app.Name)
 	}
 
 	switch app.Strategy {

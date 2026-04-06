@@ -16,9 +16,9 @@ import (
 const githubRawTimeout = 30 * time.Second
 
 // FetchComposeFromSource retrieves the compose file from a remote GitHub repository.
-// It constructs a raw GitHub URL from the SourceConfig and returns the content.
-func FetchComposeFromSource(source *config.SourceConfig, token string) ([]byte, error) {
-	url, err := BuildGitHubRawURL(source)
+// ref is the git reference (tag, branch, or SHA) — typically AppConfig.Version.
+func FetchComposeFromSource(source *config.SourceConfig, ref string, token string) ([]byte, error) {
+	url, err := BuildGitHubRawURL(source, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -26,7 +26,8 @@ func FetchComposeFromSource(source *config.SourceConfig, token string) ([]byte, 
 }
 
 // BuildGitHubRawURL constructs the raw GitHub URL for fetching compose content.
-func BuildGitHubRawURL(source *config.SourceConfig) (string, error) {
+// ref is the git reference (tag, branch, or SHA) — typically AppConfig.Version.
+func BuildGitHubRawURL(source *config.SourceConfig, ref string) (string, error) {
 	if source == nil {
 		return "", fmt.Errorf("source is nil")
 	}
@@ -51,7 +52,7 @@ func BuildGitHubRawURL(source *config.SourceConfig) (string, error) {
 	u := &url.URL{
 		Scheme: "https",
 		Host:   "raw.githubusercontent.com",
-		Path:   path.Join(owner, repoName, source.Ref, composePath),
+		Path:   path.Join(owner, repoName, ref, composePath),
 	}
 
 	return u.String(), nil

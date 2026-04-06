@@ -307,7 +307,11 @@ Examples:
 			if !deployDryRun {
 				fmt.Printf("Will deploy %d app(s):\n", len(repo.Apps))
 				for _, app := range repo.Apps {
-					fmt.Printf("  - %s\n", app.Name)
+					version := app.Version
+					if version == "" {
+						version = "latest"
+					}
+					fmt.Printf("  - %s (%s)\n", app.Name, version)
 				}
 				fmt.Print("Continue? [y/N] ")
 				var answer string
