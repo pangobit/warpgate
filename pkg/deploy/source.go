@@ -17,12 +17,12 @@ const githubRawTimeout = 30 * time.Second
 
 // FetchComposeFromSource retrieves the compose file from a remote GitHub repository.
 // It constructs a raw GitHub URL from the SourceConfig and returns the content.
-func FetchComposeFromSource(source *config.SourceConfig) ([]byte, error) {
+func FetchComposeFromSource(source *config.SourceConfig, token string) ([]byte, error) {
 	url, err := BuildGitHubRawURL(source)
 	if err != nil {
 		return nil, err
 	}
-	return fetchWithRetry(url, 3)
+	return fetchWithRetry(url, 3, token)
 }
 
 // BuildGitHubRawURL constructs the raw GitHub URL for fetching compose content.
@@ -57,12 +57,19 @@ func BuildGitHubRawURL(source *config.SourceConfig) (string, error) {
 	return u.String(), nil
 }
 
-func fetchWithRetry(url string, maxRetries int) ([]byte, error) {
+func fetchWithRetry(url string, maxRetries int, token string) ([]byte, error) {
 	client := &http.Client{Timeout: githubRawTimeout}
 
 	var lastErr error
 	for i := range maxRetries {
-		resp, err := client.Get(url)
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "token "+token)
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
 			if i < maxRetries-1 {

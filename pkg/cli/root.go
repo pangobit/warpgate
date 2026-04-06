@@ -321,6 +321,7 @@ Examples:
 			d.TailscaleSSH = deployTailscaleSSH
 			d.DryRun = deployDryRun
 			d.User = deployUser
+			d.GitHubToken = os.Getenv("GITHUB_TOKEN")
 			return d.DeployAll()
 		}
 
@@ -338,6 +339,7 @@ Examples:
 		d.TailscaleSSH = deployTailscaleSSH
 		d.DryRun = deployDryRun
 		d.User = deployUser
+		d.GitHubToken = os.Getenv("GITHUB_TOKEN")
 
 		return d.Deploy(appName, version)
 	},

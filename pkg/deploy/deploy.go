@@ -39,6 +39,9 @@ type Deployer struct {
 	DryRun bool
 	// User is the SSH username. Defaults to the current OS user.
 	User string
+	// GitHubToken is an optional token for authenticating GitHub API requests
+	// when fetching compose files from private repositories.
+	GitHubToken string
 
 	log *logrus.Logger
 }
@@ -75,7 +78,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 	var err error
 	if app.Source != nil {
 		d.log.Infof("Fetching compose from %s@%s...", app.Source.Repo, app.Source.Ref)
-		composeContent, err = FetchComposeFromSource(app.Source)
+		composeContent, err = FetchComposeFromSource(app.Source, d.GitHubToken)
 		if err != nil {
 			return fmt.Errorf("failed to fetch remote compose: %w", err)
 		}
