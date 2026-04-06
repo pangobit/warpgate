@@ -93,10 +93,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 		}
 	}
 
-	override, err := compose.GenerateOverride(app, &d.Repo.Cluster.Networking, d.Repo.InternalHosts(), string(composeContent))
-	if err != nil {
-		return fmt.Errorf("failed to generate override: %w", err)
-	}
+	internalHosts := d.Repo.InternalHosts()
 
 	targetNodes := app.GetTargetNodes(d.Repo.Cluster.Nodes)
 	d.log.Infof("Deploying %s:%s to nodes: %v", app.Image, app.Version, targetNodes)
@@ -108,6 +105,17 @@ func (d *Deployer) Deploy(appName, version string) error {
 			d.log.Info("DRY RUN — zero-downtime deploy via blue/green swap")
 		}
 		fmt.Println()
+		dryRunIP := "<nodePrivateIP>"
+		for _, nodeID := range targetNodes {
+			if n := d.Repo.Cluster.GetNode(nodeID); n != nil && n.PrivateIP != "" {
+				dryRunIP = n.PrivateIP
+				break
+			}
+		}
+		override, err := compose.GenerateOverride(app, &d.Repo.Cluster.Networking, internalHosts, dryRunIP, string(composeContent))
+		if err != nil {
+			return fmt.Errorf("failed to generate override: %w", err)
+		}
 		fmt.Println("Override that will be applied:")
 		fmt.Println(override)
 		fmt.Printf("Targets: %v\n", targetNodes)
@@ -138,6 +146,11 @@ func (d *Deployer) Deploy(appName, version string) error {
 		}
 
 		d.log.Infof("[%d/%d] Deploying to node %s...", i+1, len(targetNodes), nodeID)
+
+		override, err := compose.GenerateOverride(app, &d.Repo.Cluster.Networking, internalHosts, node.PrivateIP, string(composeContent))
+		if err != nil {
+			return fmt.Errorf("failed to generate override for node %s: %w", nodeID, err)
+		}
 
 		if err := d.deployToNode(app, node, appDir, composeContent, override); err != nil {
 			d.log.Warnf("Deploy to node %s failed: %v", nodeID, err)
