@@ -77,8 +77,8 @@ func (d *Deployer) Deploy(appName, version string) error {
 	var composeContent []byte
 	var err error
 	if app.Source != nil {
-		d.log.Infof("Fetching compose from %s@%s...", app.Source.Repo, app.Source.Ref)
-		composeContent, err = FetchComposeFromSource(app.Source, d.GitHubToken)
+		d.log.Infof("Fetching compose from %s@%s...", app.Source.Repo, app.Version)
+		composeContent, err = FetchComposeFromSource(app.Source, app.Version, d.GitHubToken)
 		if err != nil {
 			return fmt.Errorf("failed to fetch remote compose: %w", err)
 		}
@@ -120,7 +120,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 		fmt.Println(override)
 		fmt.Printf("Targets: %v\n", targetNodes)
 		if app.Source != nil {
-			fmt.Printf("Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.Source.Ref, app.Source.ComposePath)
+			fmt.Printf("Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.Version, app.Source.ComposePath)
 		}
 		needsSecrets := app.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != ""
 		if needsSecrets {
