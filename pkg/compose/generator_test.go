@@ -13,6 +13,7 @@ func TestGenerateOverride(t *testing.T) {
 		name          string
 		app           *config.AppConfig
 		internalHosts []string
+		nodePrivateIP string
 		compose       string
 		check         func(t *testing.T, override OverrideFile, raw string)
 	}{
@@ -57,6 +58,7 @@ func TestGenerateOverride(t *testing.T) {
 				Version: "v1.0.0",
 			},
 			internalHosts: []string{"auth.internal", "api.internal"},
+			nodePrivateIP: "10.0.0.1",
 			compose: `services:
   auth:
     image: ghcr.io/org/auth
@@ -66,11 +68,11 @@ func TestGenerateOverride(t *testing.T) {
 				if len(svc.ExtraHosts) != 2 {
 					t.Fatalf("expected 2 extra_hosts, got %d", len(svc.ExtraHosts))
 				}
-				if svc.ExtraHosts[0] != "auth.internal:host-gateway" {
-					t.Errorf("expected auth.internal:host-gateway, got %q", svc.ExtraHosts[0])
+				if svc.ExtraHosts[0] != "auth.internal:10.0.0.1" {
+					t.Errorf("expected auth.internal:10.0.0.1, got %q", svc.ExtraHosts[0])
 				}
-				if svc.ExtraHosts[1] != "api.internal:host-gateway" {
-					t.Errorf("expected api.internal:host-gateway, got %q", svc.ExtraHosts[1])
+				if svc.ExtraHosts[1] != "api.internal:10.0.0.1" {
+					t.Errorf("expected api.internal:10.0.0.1, got %q", svc.ExtraHosts[1])
 				}
 			},
 		},
@@ -99,6 +101,7 @@ func TestGenerateOverride(t *testing.T) {
 				Version: "v1.0.0",
 			},
 			internalHosts: []string{"auth.internal"},
+			nodePrivateIP: "10.0.0.1",
 			compose: `services:
   auth:
     image: ghcr.io/org/auth
@@ -116,6 +119,28 @@ func TestGenerateOverride(t *testing.T) {
 					if len(o.Services[svcName].ExtraHosts) != 1 {
 						t.Errorf("service %s: expected 1 extra_host, got %d", svcName, len(o.Services[svcName].ExtraHosts))
 					}
+				}
+			},
+		},
+		{
+			name: "empty nodePrivateIP produces empty-target extra_hosts",
+			app: &config.AppConfig{
+				Name:    "api",
+				Image:   "ghcr.io/org/api",
+				Version: "v1.0.0",
+			},
+			internalHosts: []string{"auth.internal"},
+			compose: `services:
+  api:
+    image: ghcr.io/org/api
+`,
+			check: func(t *testing.T, o OverrideFile, _ string) {
+				svc := o.Services["api"]
+				if len(svc.ExtraHosts) != 1 {
+					t.Fatalf("expected 1 extra_host, got %d", len(svc.ExtraHosts))
+				}
+				if svc.ExtraHosts[0] != "auth.internal:" {
+					t.Errorf("expected auth.internal: (empty IP), got %q", svc.ExtraHosts[0])
 				}
 			},
 		},
@@ -147,7 +172,7 @@ func TestGenerateOverride(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			output, err := GenerateOverride(tt.app, &config.NetworkingConfig{}, tt.internalHosts, tt.compose)
+			output, err := GenerateOverride(tt.app, &config.NetworkingConfig{}, tt.internalHosts, tt.nodePrivateIP, tt.compose)
 			if err != nil {
 				t.Fatalf("GenerateOverride() error: %v", err)
 			}

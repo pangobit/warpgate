@@ -18,7 +18,7 @@ type OverrideFile struct {
 type ServiceOverride struct {
 	// Image is the full image reference with tag.
 	Image string `yaml:"image,omitempty"`
-	// ExtraHosts maps internal hostnames to host-gateway for service discovery.
+	// ExtraHosts maps internal hostnames to the node's private IP for service discovery.
 	ExtraHosts []string `yaml:"extra_hosts,omitempty"`
 }
 
@@ -29,9 +29,10 @@ type Network struct {
 }
 
 // GenerateOverride creates a docker-compose.override.yml that injects the image tag
-// and extra_hosts for internal service discovery. Traefik labels and network
+// and extra_hosts for internal service discovery. nodePrivateIP is the IP address
+// containers use to resolve internal hostnames. Traefik labels and network
 // configuration are authored directly in each app's compose.yml.
-func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig, internalHosts []string, composeContent string) (string, error) {
+func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
 	version := app.Version
 	if version == "" {
 		version = "latest"
@@ -47,7 +48,7 @@ func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig
 
 	var extraHosts []string
 	for _, host := range internalHosts {
-		extraHosts = append(extraHosts, host+":host-gateway")
+		extraHosts = append(extraHosts, host+":"+nodePrivateIP)
 	}
 
 	services := make(map[string]ServiceOverride)
