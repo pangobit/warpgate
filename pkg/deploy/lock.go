@@ -33,12 +33,20 @@ func acquireLock(client *ssh.Client, appDir string, log *logrus.Logger) error {
 			return fmt.Errorf("deploy lock held (could not read lock info: %s)", strings.TrimSpace(stderr))
 		}
 		age := time.Since(info.AcquiredAt).Truncate(time.Second)
-		msg := "deploy lock held by " + info.User + "@" + info.Host +
-			" since " + info.AcquiredAt.Format(time.RFC3339) + " (" + age.String() + " ago)"
 		if age > lockTimeout {
-			msg += "\nlock appears stale — use 'warpgate lock break <app>' to remove it"
+			log.Warnf("Breaking stale lock held by %s@%s since %s (%s ago)",
+				info.User, info.Host, info.AcquiredAt.Format(time.RFC3339), age)
+			if _, breakErr := breakLock(client, appDir, log); breakErr != nil {
+				return fmt.Errorf("failed to break stale lock: %w", breakErr)
+			}
+			_, stderr, err = client.RunCommand("mkdir " + lockDir + " 2>&1")
+			if err != nil {
+				return fmt.Errorf("failed to acquire lock after breaking stale lock: %s", strings.TrimSpace(stderr))
+			}
+		} else {
+			return fmt.Errorf("deploy lock held by %s@%s since %s (%s ago)",
+				info.User, info.Host, info.AcquiredAt.Format(time.RFC3339), age)
 		}
-		return fmt.Errorf("%s", msg)
 	}
 
 	info := LockInfo{
