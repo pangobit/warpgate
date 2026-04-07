@@ -307,9 +307,10 @@ func installSecretSauce(client *ssh.Client, goProxy string) (string, error) {
 	}
 
 	if _, _, err := runLogged(client, &log, fmt.Sprintf(
-		`sudo cat %s`,
+		`sudo test -f %s`,
 		warpgateEnvPath,
 	), commandLogOptions{
+		DisplayCmd:    "sudo test -f " + warpgateEnvPath,
 		IncludeStdout: true,
 		IncludeStderr: true,
 	}); err != nil {
@@ -327,10 +328,10 @@ func installSecretSauce(client *ssh.Client, goProxy string) (string, error) {
 	}
 
 	if _, _, err := runLogged(client, &log, fmt.Sprintf(
-		`sudo -u warpgate bash -c 'set -a && . %s && set +a && cd /home/warpgate && go env GOPROXY GOPATH'`,
+		`sudo -u warpgate bash -c 'set -a && . %s && set +a && cd /home/warpgate && test -n "$GOPROXY" && go env GOPATH'`,
 		warpgateEnvPath,
 	), commandLogOptions{
-		DisplayCmd:    "sudo -u warpgate bash -c 'set -a && . " + warpgateEnvPath + " && set +a && cd /home/warpgate && go env GOPROXY GOPATH'",
+		DisplayCmd:    "sudo -u warpgate bash -c 'set -a && . " + warpgateEnvPath + " && set +a && cd /home/warpgate && test -n \"$GOPROXY\" && go env GOPATH'",
 		IncludeStdout: true,
 		IncludeStderr: true,
 	}); err != nil {

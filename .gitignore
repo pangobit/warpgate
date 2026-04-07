@@ -12,3 +12,4 @@ generated/
 .idea/
 .vscode/
 *.swp
+.codex
