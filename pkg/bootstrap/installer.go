@@ -55,7 +55,21 @@ type commandLogOptions struct {
 }
 
 func runLogged(client *ssh.Client, log *strings.Builder, cmd string, opts commandLogOptions) (string, string, error) {
-	stdout, stderr, err := client.RunCommand(cmd)
+	stdout, stderr, err := runLoggedWithExecutor(client, log, cmd, opts, func(command string) (string, string, error) {
+		return client.RunCommand(command)
+	})
+
+	return stdout, stderr, err
+}
+
+func runLoggedStdin(client *ssh.Client, log *strings.Builder, cmd string, stdinData string, opts commandLogOptions) (string, string, error) {
+	return runLoggedWithExecutor(client, log, cmd, opts, func(command string) (string, string, error) {
+		return client.RunCommandStdin(command, stdinData)
+	})
+}
+
+func runLoggedWithExecutor(client *ssh.Client, log *strings.Builder, cmd string, opts commandLogOptions, exec func(string) (string, string, error)) (string, string, error) {
+	stdout, stderr, err := exec(cmd)
 
 	displayCmd := opts.DisplayCmd
 	if displayCmd == "" {
@@ -105,6 +119,10 @@ func writeBootstrapLog(client *ssh.Client, name string, content string) error {
 
 func shellSingleQuote(value string) string {
 	return strings.ReplaceAll(value, `'`, `'\''`)
+}
+
+func secretSauceInitCommand() string {
+	return `sudo -u warpgate bash -c 'cd /home/warpgate && IFS= read -r SS_MASTER_PASSWORD && secretsauce init --db-path /opt/warpgate/secretsauce/vault.db --password "$SS_MASTER_PASSWORD" --output-key'`
 }
 
 func warpgateEnvScript(goProxy string) string {
@@ -538,22 +556,11 @@ WantedBy=multi-user.target`
 		generated = true
 	}
 
-	pwdFile := "/tmp/.ss-init-pwd"
-	if err := client.WriteFileSecret(pwdFile, masterPassword); err != nil {
-		return "", fmt.Errorf("failed to write temp password file: %w", err)
-	}
-	defer run(client, "rm -f "+pwdFile)
-
-	initCmd := fmt.Sprintf(
-		`sudo -u warpgate bash -c 'cd /home/warpgate && secretsauce init --db-path /opt/warpgate/secretsauce/vault.db --password "$(cat %s)" --output-key'`,
-		pwdFile)
-
-	stdout, _, err := runLogged(client, &log, initCmd, commandLogOptions{
-		DisplayCmd:    "sudo -u warpgate bash -c 'cd /home/warpgate && secretsauce init --db-path /opt/warpgate/secretsauce/vault.db --password [REDACTED] --output-key'",
+	stdout, _, err := runLoggedStdin(client, &log, secretSauceInitCommand(), masterPassword+"\n", commandLogOptions{
+		DisplayCmd:    "sudo -u warpgate bash -c 'cd /home/warpgate && IFS= read -r SS_MASTER_PASSWORD && secretsauce init --db-path /opt/warpgate/secretsauce/vault.db --password [REDACTED] --output-key'",
 		IncludeStdout: false,
 		IncludeStderr: true,
 	})
-	run(client, "rm -f "+pwdFile)
 	if err != nil {
 		_ = writeBootstrapLog(client, logPath, log.String())
 		return "", fmt.Errorf("vault init failed: %w", err)
