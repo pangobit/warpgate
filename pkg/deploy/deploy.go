@@ -567,6 +567,20 @@ func (d *Deployer) Status(appName string) ([]NodeStatus, error) {
 			status.State = "not deployed"
 		}
 
+		if state.ShadowVersion != "" {
+			status.ShadowVersion = state.ShadowVersion
+			shadowProjectFlag := fmt.Sprintf("-p %s-%s", appName, shadowSlot)
+			shadowComposeFiles := "-f compose.yml -f docker-compose.shadow-override.yml"
+			shadowPsCmd := fmt.Sprintf("cd %s && docker compose %s %s ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
+				remoteDir, shadowProjectFlag, shadowComposeFiles)
+			shadowOut, _, shadowErr := client.RunCommand(shadowPsCmd)
+			if shadowErr != nil || strings.TrimSpace(shadowOut) == "NOT_DEPLOYED" {
+				status.ShadowState = "not deployed"
+			} else {
+				status.ShadowState = ParseContainerHealth(strings.TrimSpace(shadowOut))
+			}
+		}
+
 		client.Close()
 		statuses = append(statuses, status)
 	}
@@ -588,6 +602,10 @@ type NodeStatus struct {
 	Containers string
 	// Error is set if the node could not be reached.
 	Error string
+	// ShadowVersion is the shadow deployment version, if any.
+	ShadowVersion string
+	// ShadowState is the shadow container state.
+	ShadowState string
 }
 
 // ContainerStatus holds the status of a single container within a compose project.
@@ -616,6 +634,10 @@ type AppNodeStatus struct {
 	Sidecars []ContainerStatus
 	// Error is set if the status could not be determined.
 	Error string
+	// ShadowVersion is the shadow deployment version, if any.
+	ShadowVersion string
+	// ShadowState is the shadow container state.
+	ShadowState string
 }
 
 // ClusterStatusResult holds the full cluster status across all nodes and apps.
@@ -676,6 +698,22 @@ func (d *Deployer) ClusterStatus() (*ClusterStatusResult, error) {
 				trimmed := strings.TrimSpace(stdout)
 				status.State = ParseContainerHealth(trimmed)
 				status.Sidecars = parseSidecarStatuses(trimmed, app.Sidecars)
+			}
+
+			// Populate shadow status if a shadow is deployed.
+			if state.ShadowVersion != "" {
+				status.ShadowVersion = state.ShadowVersion
+
+				shadowProjectFlag := fmt.Sprintf("-p %s-%s", app.Name, shadowSlot)
+				shadowComposeFiles := "-f compose.yml -f docker-compose.shadow-override.yml"
+				shadowPsCmd := fmt.Sprintf("cd %s && docker compose %s %s ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
+					remoteDir, shadowProjectFlag, shadowComposeFiles)
+				shadowOut, _, shadowErr := client.RunCommand(shadowPsCmd)
+				if shadowErr != nil || strings.TrimSpace(shadowOut) == "NOT_DEPLOYED" {
+					status.ShadowState = "not deployed"
+				} else {
+					status.ShadowState = ParseContainerHealth(strings.TrimSpace(shadowOut))
+				}
 			}
 
 			result.Apps = append(result.Apps, status)

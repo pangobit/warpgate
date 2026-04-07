@@ -223,6 +223,12 @@ func (m *DashboardModel) rebuildAppsTable() {
 				dashDimStyle.Render("└ " + sc.Service), "", "", styleState(sc.State), "",
 			})
 		}
+
+		if app.ShadowVersion != "" {
+			rows = append(rows, table.Row{
+				dashDimStyle.Render("└ shadow"), app.ShadowVersion, "shadow", styleState(app.ShadowState), "",
+			})
+		}
 	}
 
 	m.appsTable.SetRows(rows)

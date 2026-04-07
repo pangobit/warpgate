@@ -20,6 +20,8 @@ type ServiceOverride struct {
 	Image string `yaml:"image,omitempty"`
 	// ExtraHosts maps internal hostnames to the node's private IP for service discovery.
 	ExtraHosts []string `yaml:"extra_hosts,omitempty"`
+	// Labels sets Docker container labels (used by shadow overrides to disable public Traefik).
+	Labels map[string]string `yaml:"labels,omitempty"`
 }
 
 // Network represents a Docker Compose network definition.
@@ -72,6 +74,59 @@ func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig
 	yamlBytes, err := yaml.Marshal(override)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal override: %w", err)
+	}
+
+	return string(yamlBytes), nil
+}
+
+// GenerateShadowOverride creates a docker-compose.shadow-override.yml that disables
+// public Traefik routing via traefik.enable=false, sets the shadow image tag, and
+// configures extra_hosts for internal service discovery. The shadow hostname
+// (shadow-{app}.internal) is added to extra_hosts for direct access over Tailscale.
+func GenerateShadowOverride(app *config.AppConfig, version string, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
+	if version == "" {
+		version = "latest"
+	}
+
+	serviceNames, err := ParseComposeServices(composeContent)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse compose services: %w", err)
+	}
+	if len(serviceNames) == 0 {
+		serviceNames = []string{app.Name}
+	}
+
+	var extraHosts []string
+	for _, host := range internalHosts {
+		extraHosts = append(extraHosts, host+":"+nodePrivateIP)
+	}
+	if ie := app.EffectiveExpose().Internal; ie != nil {
+		extraHosts = append(extraHosts, "shadow-"+ie.Hostname+":"+nodePrivateIP)
+	}
+
+	labels := map[string]string{
+		"traefik.enable": "false",
+	}
+
+	services := make(map[string]ServiceOverride)
+	for _, svcName := range serviceNames {
+		svc := ServiceOverride{
+			ExtraHosts: extraHosts,
+			Labels:     labels,
+		}
+		if svcName == app.Name {
+			svc.Image = app.Image + ":" + version
+		}
+		services[svcName] = svc
+	}
+
+	override := &OverrideFile{
+		Services: services,
+	}
+
+	yamlBytes, err := yaml.Marshal(override)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal shadow override: %w", err)
 	}
 
 	return string(yamlBytes), nil
