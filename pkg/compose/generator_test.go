@@ -224,3 +224,45 @@ func TestGenerateTraefikCompose(t *testing.T) {
 		t.Error("public Traefik should not have file provider (moved to internal proxy)")
 	}
 }
+
+func TestGenerateTraefikComposeDNSChallenge(t *testing.T) {
+	networking := &config.NetworkingConfig{
+		DNS: config.DNSConfig{
+			Provider: "cloudflare",
+			APIToken: "secret-token",
+		},
+		Traefik: config.TraefikConfig{
+			EntryPoints: []string{"websecure"},
+			ACME: config.ACMEConfig{
+				Enabled:   true,
+				Email:     "admin@example.com",
+				Provider:  "letsencrypt",
+				Challenge: "dns",
+			},
+		},
+	}
+
+	output, err := GenerateTraefikCompose(networking)
+	if err != nil {
+		t.Fatalf("GenerateTraefikCompose() error: %v", err)
+	}
+
+	if !strings.Contains(output, "dnschallenge=true") {
+		t.Error("expected dns challenge flag")
+	}
+	if !strings.Contains(output, "dnschallenge.provider=cloudflare") {
+		t.Error("expected cloudflare dns provider")
+	}
+	if !strings.Contains(output, "dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53") {
+		t.Error("expected explicit public DNS resolvers for dns challenge")
+	}
+	if strings.Contains(output, "tlschallenge=true") {
+		t.Error("dns challenge config must not enable tls challenge")
+	}
+	if !strings.Contains(output, "/etc/warpgate/traefik/acme.env") {
+		t.Error("expected root-only env file reference")
+	}
+	if strings.Contains(output, "secret-token") {
+		t.Error("compose must not embed DNS API token")
+	}
+}

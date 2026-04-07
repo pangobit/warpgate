@@ -79,18 +79,6 @@ func BuildSteps(client *ssh.Client, cfg *StepConfig) []tui.StepDef {
 			},
 		},
 		{
-			Name: "Setting up Warpgate + Traefik",
-			Run: func() (string, error) {
-				return setupWarpgate(client, cfg.Networking)
-			},
-		},
-		{
-			Name: "Setting up Internal Proxy",
-			Run: func() (string, error) {
-				return setupInternalProxy(client, cfg.PrivateIP)
-			},
-		},
-		{
 			Name: "Setting up SecretSauce server",
 			Run: func() (string, error) {
 				detail, err := setupSecretsServer(client, cfg.MasterPassword)
@@ -102,6 +90,24 @@ func BuildSteps(client *ssh.Client, cfg *StepConfig) []tui.StepDef {
 					return "initialized and started", nil
 				}
 				return detail, nil
+			},
+		},
+		{
+			Name: "Configuring Traefik ACME credentials",
+			Run: func() (string, error) {
+				return setupTraefikACMECredentials(client, cfg.Networking)
+			},
+		},
+		{
+			Name: "Setting up Warpgate + Traefik",
+			Run: func() (string, error) {
+				return setupWarpgate(client, cfg.Networking)
+			},
+		},
+		{
+			Name: "Setting up Internal Proxy",
+			Run: func() (string, error) {
+				return setupInternalProxy(client, cfg.PrivateIP)
 			},
 		},
 		{

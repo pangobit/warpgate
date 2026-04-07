@@ -19,6 +19,8 @@ const passwordLength = 24
 const bootstrapLogDir = "/opt/warpgate/bootstrap"
 const warpgateEnvPath = "/home/warpgate/.config/warpgate/env.sh"
 const secretsauceModulePattern = "github.com/pangobit/*"
+const traefikACMEEnvPath = "/etc/warpgate/traefik/acme.env"
+const cloudflareDNSAPITokenEnv = "CF_DNS_API_TOKEN"
 
 // generatePassword creates a cryptographically random password.
 func generatePassword() (string, error) {
@@ -55,7 +57,21 @@ type commandLogOptions struct {
 }
 
 func runLogged(client *ssh.Client, log *strings.Builder, cmd string, opts commandLogOptions) (string, string, error) {
-	stdout, stderr, err := client.RunCommand(cmd)
+	stdout, stderr, err := runLoggedWithExecutor(client, log, cmd, opts, func(command string) (string, string, error) {
+		return client.RunCommand(command)
+	})
+
+	return stdout, stderr, err
+}
+
+func runLoggedStdin(client *ssh.Client, log *strings.Builder, cmd string, stdinData string, opts commandLogOptions) (string, string, error) {
+	return runLoggedWithExecutor(client, log, cmd, opts, func(command string) (string, string, error) {
+		return client.RunCommandStdin(command, stdinData)
+	})
+}
+
+func runLoggedWithExecutor(client *ssh.Client, log *strings.Builder, cmd string, opts commandLogOptions, exec func(string) (string, string, error)) (string, string, error) {
+	stdout, stderr, err := exec(cmd)
 
 	displayCmd := opts.DisplayCmd
 	if displayCmd == "" {
@@ -105,6 +121,34 @@ func writeBootstrapLog(client *ssh.Client, name string, content string) error {
 
 func shellSingleQuote(value string) string {
 	return strings.ReplaceAll(value, `'`, `'\''`)
+}
+
+func acmeChallengeMode(networking *config.NetworkingConfig) string {
+	if networking == nil {
+		return ""
+	}
+	if networking.Traefik.ACME.Challenge == "" {
+		return "tls"
+	}
+	return strings.ToLower(networking.Traefik.ACME.Challenge)
+}
+
+func secretSauceInitCommand() string {
+	return `sudo -u warpgate bash -c 'cd /home/warpgate && IFS= read -r SS_MASTER_PASSWORD && secretsauce init --db-path /opt/warpgate/secretsauce/vault.db --password "$SS_MASTER_PASSWORD" --output-key'`
+}
+
+func writeRootSecretFile(client *ssh.Client, remotePath string, content string) error {
+	tmpPath := "/tmp/" + filepath.Base(remotePath)
+	if err := client.WriteFileSecret(tmpPath, content); err != nil {
+		return err
+	}
+	defer run(client, "rm -f "+tmpPath)
+
+	cmd := "sudo mkdir -p " + filepath.Dir(remotePath) +
+		" && sudo mv " + tmpPath + " " + remotePath +
+		" && sudo chown root:root " + remotePath +
+		" && sudo chmod 600 " + remotePath
+	return run(client, cmd)
 }
 
 func warpgateEnvScript(goProxy string) string {
@@ -410,6 +454,42 @@ func setupWarpgate(client *ssh.Client, networking *config.NetworkingConfig) (str
 	return "", nil
 }
 
+func setupTraefikACMECredentials(client *ssh.Client, networking *config.NetworkingConfig) (string, error) {
+	if networking == nil || !networking.Traefik.ACME.Enabled {
+		return "skipped (ACME disabled)", nil
+	}
+	if acmeChallengeMode(networking) != "dns" {
+		return "skipped (non-DNS challenge)", nil
+	}
+	if strings.ToLower(networking.DNS.Provider) != "cloudflare" {
+		return "", fmt.Errorf("unsupported ACME DNS provider %q", networking.DNS.Provider)
+	}
+
+	token := strings.TrimSpace(networking.DNS.APIToken)
+	if token == "" {
+		stdout, _, err := client.RunCommand("sudo test -f " + traefikACMEEnvPath + " && echo exists")
+		if err == nil && strings.Contains(stdout, "exists") {
+			return "reused existing root-only env file", nil
+		}
+		return "", fmt.Errorf("networking.dns.api_token is required for DNS challenge bootstrap or re-bootstrap must reuse %s", traefikACMEEnvPath)
+	}
+
+	envFile := cloudflareDNSAPITokenEnv + "=" + token + "\n"
+	if err := writeRootSecretFile(client, traefikACMEEnvPath, envFile); err != nil {
+		return "", fmt.Errorf("failed to write Traefik ACME env file: %w", err)
+	}
+
+	cmd := fmt.Sprintf(
+		"curl -sf -X POST --data-binary @- http://localhost:8090/api/secrets/%s",
+		url.PathEscape(secrets.TraefikACMEPrefix+cloudflareDNSAPITokenEnv),
+	)
+	if _, stderr, err := client.RunCommandStdin(cmd, "value="+token); err != nil {
+		return "", fmt.Errorf("failed to store Traefik ACME token: %w\n%s", err, stderr)
+	}
+
+	return "stored in SecretSauce and root-only env file", nil
+}
+
 func setupInternalProxy(client *ssh.Client, privateIP string) (string, error) {
 	if privateIP == "" {
 		return "skipped (no private IP)", nil
@@ -538,22 +618,11 @@ WantedBy=multi-user.target`
 		generated = true
 	}
 
-	pwdFile := "/tmp/.ss-init-pwd"
-	if err := client.WriteFileSecret(pwdFile, masterPassword); err != nil {
-		return "", fmt.Errorf("failed to write temp password file: %w", err)
-	}
-	defer run(client, "rm -f "+pwdFile)
-
-	initCmd := fmt.Sprintf(
-		`sudo -u warpgate bash -c 'cd /home/warpgate && secretsauce init --db-path /opt/warpgate/secretsauce/vault.db --password "$(cat %s)" --output-key'`,
-		pwdFile)
-
-	stdout, _, err := runLogged(client, &log, initCmd, commandLogOptions{
-		DisplayCmd:    "sudo -u warpgate bash -c 'cd /home/warpgate && secretsauce init --db-path /opt/warpgate/secretsauce/vault.db --password [REDACTED] --output-key'",
+	stdout, _, err := runLoggedStdin(client, &log, secretSauceInitCommand(), masterPassword+"\n", commandLogOptions{
+		DisplayCmd:    "sudo -u warpgate bash -c 'cd /home/warpgate && IFS= read -r SS_MASTER_PASSWORD && secretsauce init --db-path /opt/warpgate/secretsauce/vault.db --password [REDACTED] --output-key'",
 		IncludeStdout: false,
 		IncludeStderr: true,
 	})
-	run(client, "rm -f "+pwdFile)
 	if err != nil {
 		_ = writeBootstrapLog(client, logPath, log.String())
 		return "", fmt.Errorf("vault init failed: %w", err)

@@ -14,8 +14,8 @@ func TestBuildStepsCount(t *testing.T) {
 
 	steps := BuildSteps(nil, cfg)
 
-	if len(steps) != 11 {
-		t.Errorf("expected 11 bootstrap steps, got %d", len(steps))
+	if len(steps) != 12 {
+		t.Errorf("expected 12 bootstrap steps, got %d", len(steps))
 	}
 
 	expected := []string{
@@ -26,9 +26,10 @@ func TestBuildStepsCount(t *testing.T) {
 		"Configuring docker group",
 		"Installing SecretSauce",
 		"Setting up SSH keys",
+		"Setting up SecretSauce server",
+		"Configuring Traefik ACME credentials",
 		"Setting up Warpgate + Traefik",
 		"Setting up Internal Proxy",
-		"Setting up SecretSauce server",
 		"Storing registry credentials",
 	}
 
@@ -47,12 +48,12 @@ func TestBuildStepsAlwaysIncludeSecretsServer(t *testing.T) {
 
 	steps := BuildSteps(nil, cfg)
 
-	if len(steps) != 11 {
-		t.Errorf("expected 11 bootstrap steps, got %d", len(steps))
+	if len(steps) != 12 {
+		t.Errorf("expected 12 bootstrap steps, got %d", len(steps))
 	}
 
-	if steps[10].Name != "Storing registry credentials" {
-		t.Errorf("expected last step to be 'Storing registry credentials', got %q", steps[10].Name)
+	if steps[11].Name != "Storing registry credentials" {
+		t.Errorf("expected last step to be 'Storing registry credentials', got %q", steps[11].Name)
 	}
 }
 
@@ -63,12 +64,12 @@ func TestBuildStepsWithoutGoProxyStillIncludeSecretsServer(t *testing.T) {
 
 	steps := BuildSteps(nil, cfg)
 
-	if len(steps) != 11 {
-		t.Errorf("expected 11 bootstrap steps, got %d", len(steps))
+	if len(steps) != 12 {
+		t.Errorf("expected 12 bootstrap steps, got %d", len(steps))
 	}
 
-	if steps[10].Name != "Storing registry credentials" {
-		t.Errorf("expected last step to be 'Storing registry credentials', got %q", steps[10].Name)
+	if steps[11].Name != "Storing registry credentials" {
+		t.Errorf("expected last step to be 'Storing registry credentials', got %q", steps[11].Name)
 	}
 }
 

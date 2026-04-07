@@ -70,12 +70,14 @@ networking:
   dns:
     provider: cloudflare
     zone: example.com
+    api_token: ${CF_DNS_API_TOKEN}
   traefik:
     entry_points: [web, websecure]
     acme:
       enabled: true
       email: admin@example.com
       provider: letsencrypt
+      challenge: dns
 
 registry:
   server: ghcr.io
@@ -151,12 +153,14 @@ networking:
   dns:
     provider: cloudflare
     zone: example.com
+    api_token: ${CF_DNS_API_TOKEN}
   traefik:
     entry_points: [web, websecure]
     acme:
       enabled: true
       email: admin@example.com
       provider: letsencrypt
+      challenge: dns
 
 registry:
   server: ghcr.io
@@ -175,6 +179,8 @@ Notes:
 - `registry.username` and `registry.password` are supported, but can also be stored in SecretSauce during bootstrap.
 - `secrets.server` is optional. Without it, secret fetching is skipped.
 - `go_proxy` is optional and is used during bootstrap when installing SecretSauce.
+- `networking.dns.api_token` should be injected via environment expansion rather than committed directly.
+- `networking.traefik.acme.challenge` defaults to `tls`; use `dns` for private services that still need public CA certificates.
 
 ## `app.yml`
 
@@ -347,6 +353,7 @@ The bootstrap flow includes:
 - Public Traefik setup
 - Internal proxy setup
 - SecretSauce server setup
+- Traefik DNS challenge credential setup when `challenge: dns`
 - Registry credential storage
 
 Examples:
@@ -356,6 +363,7 @@ warpgate bootstrap node-1 --tailscale-ssh
 warpgate bootstrap --host 203.0.113.10 --tailscale-ssh
 warpgate bootstrap node-1 --dry-run
 SS_MASTER_PASSWORD=secret warpgate bootstrap node-1 --tailscale-ssh
+CF_DNS_API_TOKEN=token warpgate bootstrap node-1 --tailscale-ssh
 ```
 
 After bootstrap, application data lives under `/opt/warpgate/apps/<app>/`, and Traefik-related files live under `/opt/warpgate/traefik/`.
