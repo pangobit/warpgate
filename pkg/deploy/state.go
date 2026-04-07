@@ -17,6 +17,10 @@ type DeployState struct {
 	ActiveSlot string `json:"active_slot"`
 	// DeployedAt is the timestamp of the last deployment.
 	DeployedAt time.Time `json:"deployed_at"`
+	// ShadowVersion is the image tag of the shadow deployment, if any.
+	ShadowVersion string `json:"shadow_version,omitempty"`
+	// ShadowDeployedAt is the timestamp of the shadow deployment.
+	ShadowDeployedAt *time.Time `json:"shadow_deployed_at,omitempty"`
 }
 
 // InactiveSlot returns the slot that is not currently active.

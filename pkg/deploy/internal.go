@@ -79,6 +79,26 @@ func GenerateSidecarInternalRoute(app *config.AppConfig, sidecarName string, sid
 	)
 }
 
+// GenerateShadowInternalRoute creates a Traefik dynamic file config for the
+// shadow version of an internal service. The shadow hostname uses the
+// "shadow-{app}.internal" convention.
+func GenerateShadowInternalRoute(app *config.AppConfig, cluster *config.ClusterConfig) (string, error) {
+	ie := app.EffectiveExpose().Internal
+	if ie == nil || app.Port == 0 {
+		return "", nil
+	}
+
+	shadowHostname := "shadow-" + ie.Hostname
+	return generateInternalRouteConfig(
+		app.Name+"-shadow-internal",
+		shadowHostname,
+		"internal",
+		app.Port,
+		app.GetTargetNodes(cluster.Nodes),
+		cluster,
+	)
+}
+
 func generateInternalRouteConfig(routerName, hostname, entrypoint string, port int, targetNodes []string, cluster *config.ClusterConfig) (string, error) {
 	var servers []internalServer
 	for _, nodeID := range targetNodes {

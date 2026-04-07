@@ -109,7 +109,16 @@ var (
 	cleanupRemoveDocker bool
 )
 
-func init() {
+// Shadow flags
+var (
+	shadowTailscaleSSH bool
+	shadowSSHKey       string
+	shadowUser         string
+)
+
+// Setup registers all commands and flags on the root command tree.
+// Called from Execute before running the CLI.
+func Setup() {
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "Path to cluster.yml config file")
 
 	rootCmd.AddCommand(initCmd)
@@ -122,25 +131,29 @@ func init() {
 	rootCmd.AddCommand(lockCmd)
 	rootCmd.AddCommand(bootstrapCmd)
 	rootCmd.AddCommand(cleanupCmd)
+	rootCmd.AddCommand(shadowCmd)
 
-	// deploy flags
+	shadowCmd.AddCommand(shadowDeployCmd)
+	shadowCmd.AddCommand(shadowPromoteCmd)
+	shadowCmd.AddCommand(shadowRemoveCmd)
+	shadowCmd.AddCommand(shadowStatusCmd)
+
+	lockCmd.AddCommand(lockBreakCmd)
+
 	deployCmd.Flags().BoolVar(&deployAll, "all", false, "Deploy all discovered apps")
 	deployCmd.Flags().BoolVar(&deployDryRun, "dry-run", false, "Show actions without executing")
 	deployCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
 	deployCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
 	deployCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
 
-	// status flags
 	statusCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
 	statusCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
 	statusCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
 
-	// rollback flags
 	rollbackCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
 	rollbackCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
 	rollbackCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
 
-	// logs flags
 	logsCmd.Flags().StringVar(&logsNode, "node", "", "Target node ID (required)")
 	logsCmd.Flags().StringVar(&logsApp, "app", "", "Filter to containers matching this app name")
 	logsCmd.Flags().IntVarP(&logsTail, "tail", "n", 100, "Number of recent lines per container")
@@ -150,13 +163,11 @@ func init() {
 	logsCmd.Flags().StringVar(&logsUser, "user", "", "SSH user (defaults to current user)")
 	logsCmd.MarkFlagRequired("node")
 
-	// dashboard flags
 	dashboardCmd.Flags().BoolVar(&dashTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
 	dashboardCmd.Flags().StringVar(&dashSSHKey, "ssh-key", "", "Path to SSH private key")
 	dashboardCmd.Flags().StringVar(&dashUser, "user", "", "SSH user (defaults to current user)")
 	dashboardCmd.Flags().IntVar(&dashRefresh, "refresh", 30, "Auto-refresh interval in seconds")
 
-	// remove flags
 	removeCmd.Flags().BoolVar(&removeAll, "all", false, "Remove all discovered apps")
 	removeCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
 	removeCmd.Flags().BoolVar(&removeTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
@@ -164,18 +175,15 @@ func init() {
 	removeCmd.Flags().StringVar(&removeUser, "user", "", "SSH user (defaults to current user)")
 	removeCmd.Flags().StringSliceVar(&removeNodes, "nodes", nil, "Override target nodes (comma-separated)")
 
-	// lock flags
 	lockBreakCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
 	lockBreakCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
-	lockCmd.AddCommand(lockBreakCmd)
 
-	// bootstrap flags
 	bootstrapCmd.Flags().StringVar(&bootstrapHost, "host", "", "Target host IP or hostname (ad-hoc mode)")
 	bootstrapCmd.Flags().StringVar(&bootstrapUser, "user", "", "SSH user (defaults to current user)")
 	bootstrapCmd.Flags().StringVar(&bootstrapSSHKey, "ssh-key", "", "Path to SSH private key")
 	bootstrapCmd.Flags().BoolVar(&bootstrapDryRun, "dry-run", false, "Show installation script without executing")
 	bootstrapCmd.Flags().BoolVar(&bootstrapTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH (no key needed)")
-	// cleanup flags
+
 	cleanupCmd.Flags().StringVar(&cleanupHost, "host", "", "Target host IP or hostname (ad-hoc mode)")
 	cleanupCmd.Flags().StringVar(&cleanupUser, "user", "", "SSH user (defaults to current user)")
 	cleanupCmd.Flags().StringVar(&cleanupSSHKey, "ssh-key", "", "Path to SSH private key")
@@ -183,6 +191,22 @@ func init() {
 	cleanupCmd.Flags().BoolVar(&cleanupForce, "force", false, "Skip confirmation prompt")
 	cleanupCmd.Flags().BoolVar(&cleanupRemoveGo, "remove-go", false, "Also remove Go installation")
 	cleanupCmd.Flags().BoolVar(&cleanupRemoveDocker, "remove-docker", false, "Also remove Docker")
+
+	shadowDeployCmd.Flags().BoolVar(&shadowTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	shadowDeployCmd.Flags().StringVar(&shadowSSHKey, "ssh-key", "", "Path to SSH private key")
+	shadowDeployCmd.Flags().StringVar(&shadowUser, "user", "", "SSH user (defaults to current user)")
+
+	shadowPromoteCmd.Flags().BoolVar(&shadowTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	shadowPromoteCmd.Flags().StringVar(&shadowSSHKey, "ssh-key", "", "Path to SSH private key")
+	shadowPromoteCmd.Flags().StringVar(&shadowUser, "user", "", "SSH user (defaults to current user)")
+
+	shadowRemoveCmd.Flags().BoolVar(&shadowTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	shadowRemoveCmd.Flags().StringVar(&shadowSSHKey, "ssh-key", "", "Path to SSH private key")
+	shadowRemoveCmd.Flags().StringVar(&shadowUser, "user", "", "SSH user (defaults to current user)")
+
+	shadowStatusCmd.Flags().BoolVar(&shadowTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
+	shadowStatusCmd.Flags().StringVar(&shadowSSHKey, "ssh-key", "", "Path to SSH private key")
+	shadowStatusCmd.Flags().StringVar(&shadowUser, "user", "", "SSH user (defaults to current user)")
 }
 
 var initCmd = &cobra.Command{
@@ -392,6 +416,9 @@ Examples:
 						fmt.Printf("    %s\n", line)
 					}
 				}
+			}
+			if s.ShadowVersion != "" {
+				fmt.Printf("    shadow: %s (version: %s)\n", s.ShadowState, s.ShadowVersion)
 			}
 		}
 
@@ -732,7 +759,130 @@ Examples:
 	},
 }
 
-// Execute runs the root cobra command.
+var shadowCmd = &cobra.Command{
+	Use:   "shadow",
+	Short: "Manage shadow deployments for pre-release testing",
+	Long: `Shadow deploys a version of an app alongside the live deployment,
+accessible only over the internal (Tailscale) network. Shadows are not wired
+to the public proxy.
+
+Examples:
+  warpgate shadow deploy client v2.0
+  warpgate shadow status client
+  warpgate shadow promote client
+  warpgate shadow remove client`,
+}
+
+var shadowDeployCmd = &cobra.Command{
+	Use:   "deploy <app-name> <version>",
+	Short: "Deploy a shadow version alongside the live deployment",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		d := deploy.NewDeployer(repo, shadowSSHKey)
+		d.TailscaleSSH = shadowTailscaleSSH
+		d.User = shadowUser
+		d.GitHubToken = os.Getenv("GITHUB_TOKEN")
+		return d.ShadowDeploy(args[0], args[1])
+	},
+}
+
+var shadowPromoteCmd = &cobra.Command{
+	Use:   "promote <app-name>",
+	Short: "Promote a shadow deployment to live",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		d := deploy.NewDeployer(repo, shadowSSHKey)
+		d.TailscaleSSH = shadowTailscaleSSH
+		d.User = shadowUser
+		d.GitHubToken = os.Getenv("GITHUB_TOKEN")
+		return d.ShadowPromote(args[0])
+	},
+}
+
+var shadowRemoveCmd = &cobra.Command{
+	Use:   "remove <app-name>",
+	Short: "Remove a shadow deployment and its companions",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		d := deploy.NewDeployer(repo, shadowSSHKey)
+		d.TailscaleSSH = shadowTailscaleSSH
+		d.User = shadowUser
+		return d.ShadowRemove(args[0])
+	},
+}
+
+var shadowStatusCmd = &cobra.Command{
+	Use:   "status [app-name]",
+	Short: "Show shadow deployment status",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return showShadowClusterStatus()
+		}
+
+		d := deploy.NewDeployer(repo, shadowSSHKey)
+		d.TailscaleSSH = shadowTailscaleSSH
+		d.User = shadowUser
+
+		statuses, err := d.ShadowStatus(args[0])
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Shadow: %s\n\n", args[0])
+		for _, s := range statuses {
+			if s.Error != "" {
+				fmt.Printf("  %s: error — %s\n", s.NodeID, s.Error)
+				continue
+			}
+			if s.Version == "" {
+				fmt.Printf("  %s: no shadow\n", s.NodeID)
+				continue
+			}
+			fmt.Printf("  %s: %s (version: %s)\n", s.NodeID, s.State, s.Version)
+			if s.Containers != "" {
+				for _, line := range strings.Split(s.Containers, "\n") {
+					if line != "" {
+						fmt.Printf("    %s\n", line)
+					}
+				}
+			}
+		}
+		return nil
+	},
+}
+
+// showShadowClusterStatus shows shadow status across all apps.
+func showShadowClusterStatus() error {
+	d := deploy.NewDeployer(repo, shadowSSHKey)
+	d.TailscaleSSH = shadowTailscaleSSH
+	d.User = shadowUser
+
+	hasShadow := false
+	for _, app := range repo.Apps {
+		statuses, err := d.ShadowStatus(app.Name)
+		if err != nil {
+			continue
+		}
+		for _, s := range statuses {
+			if s.Version != "" {
+				if !hasShadow {
+					fmt.Println("Active shadows:")
+					hasShadow = true
+				}
+				fmt.Printf("  %s on %s: %s (version: %s)\n", app.Name, s.NodeID, s.State, s.Version)
+			}
+		}
+	}
+
+	if !hasShadow {
+		fmt.Println("No active shadow deployments.")
+	}
+	return nil
+}
+
+// Execute registers all commands and runs the root cobra command.
 func Execute() error {
+	Setup()
 	return rootCmd.Execute()
 }

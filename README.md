@@ -10,6 +10,7 @@ It currently provides:
 - Rolling deploys to one or more nodes
 - Blue/green or recreate deployment strategies
 - Rollback, status, logs, app removal, deploy lock management, and node cleanup
+- Shadow deployments for pre-release testing on the internal network
 
 ## Requirements
 
@@ -291,6 +292,46 @@ strategy: recreate
 
 If you keep host `ports:` mappings in your compose file, `recreate` is usually the safer choice.
 
+## Shadow Deployments
+
+A shadow deployment runs a version of an app alongside the live deployment on the same node(s). The shadow is not wired to the public Traefik proxy, so it is only reachable over the internal (Tailscale) network. This lets you test a release candidate before promoting it to live.
+
+Deploy a shadow:
+
+```bash
+warpgate shadow deploy api v2.0.0 --tailscale-ssh
+```
+
+Check shadow status:
+
+```bash
+warpgate shadow status api --tailscale-ssh
+warpgate shadow status --tailscale-ssh
+```
+
+The shadow is accessible at `shadow-<hostname>` if the app has an `expose.internal.hostname` configured. For example, if `api` has `hostname: api.internal`, the shadow is reachable at `shadow-api.internal` from any node on the Tailscale network.
+
+When you are satisfied with the shadow, promote it to live:
+
+```bash
+warpgate shadow promote api --tailscale-ssh
+```
+
+Promote runs a standard blue/green deploy of the shadow version, then tears down the shadow containers. The live deployment is updated in place with zero downtime.
+
+To discard a shadow without promoting:
+
+```bash
+warpgate shadow remove api --tailscale-ssh
+```
+
+Notes:
+
+- A shadow requires a live deployment to already exist.
+- Only one shadow per app can exist at a time.
+- The shadow uses the same compose file, secrets, and environment as the live deployment.
+- The shadow runs as a separate Docker Compose project (`<app>-shadow`) alongside the live blue/green project.
+
 ## Bootstrap
 
 `warpgate bootstrap` installs the software Warpgate expects on a node and sets up `/opt/warpgate`.
@@ -378,6 +419,12 @@ warpgate remove api --tailscale-ssh --force
 warpgate remove --all --force
 
 warpgate lock break api --tailscale-ssh
+
+warpgate shadow deploy api v2.0.0 --tailscale-ssh
+warpgate shadow status api --tailscale-ssh
+warpgate shadow status --tailscale-ssh
+warpgate shadow promote api --tailscale-ssh
+warpgate shadow remove api --tailscale-ssh
 
 warpgate cleanup node-1 --tailscale-ssh
 warpgate cleanup --host 203.0.113.10 --tailscale-ssh --force
