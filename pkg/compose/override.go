@@ -3,6 +3,7 @@ package compose
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/pangobit/warpgate/pkg/config"
 	"gopkg.in/yaml.v3"
@@ -28,6 +29,13 @@ type ServiceOverride struct {
 type Network struct {
 	// External indicates the network is managed outside this compose file.
 	External bool `yaml:"external,omitempty"`
+}
+
+func acmeChallenge(cfg config.ACMEConfig) string {
+	if cfg.Challenge == "" {
+		return "tls"
+	}
+	return strings.ToLower(cfg.Challenge)
 }
 
 // GenerateOverride creates a docker-compose.override.yml that injects the image tag
@@ -158,10 +166,21 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 	if networking.Traefik.ACME.Enabled {
 		resolver := networking.Traefik.ACME.Provider
 		cmd = append(cmd,
-			fmt.Sprintf("--certificatesresolvers.%s.acme.tlschallenge=true", resolver),
 			fmt.Sprintf("--certificatesresolvers.%s.acme.email=%s", resolver, networking.Traefik.ACME.Email),
 			fmt.Sprintf("--certificatesresolvers.%s.acme.storage=/letsencrypt/acme.json", resolver),
 		)
+		switch acmeChallenge(networking.Traefik.ACME) {
+		case "dns":
+			cmd = append(cmd,
+				fmt.Sprintf("--certificatesresolvers.%s.acme.dnschallenge=true", resolver),
+				fmt.Sprintf("--certificatesresolvers.%s.acme.dnschallenge.provider=%s", resolver, networking.DNS.Provider),
+				fmt.Sprintf("--certificatesresolvers.%s.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53", resolver),
+			)
+		default:
+			cmd = append(cmd,
+				fmt.Sprintf("--certificatesresolvers.%s.acme.tlschallenge=true", resolver),
+			)
+		}
 		if networking.Traefik.ACME.Staging {
 			cmd = append(cmd,
 				fmt.Sprintf("--certificatesresolvers.%s.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory", resolver),
@@ -176,6 +195,7 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 		Ports       []string `yaml:"ports"`
 		Volumes     []string `yaml:"volumes"`
 		Networks    []string `yaml:"networks"`
+		EnvFile     []string `yaml:"env_file,omitempty"`
 		Environment []string `yaml:"environment,omitempty"`
 	}
 
@@ -208,6 +228,11 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 		Volumes: map[string]struct{}{
 			"traefik-acme": {},
 		},
+	}
+	if networking.Traefik.ACME.Enabled && acmeChallenge(networking.Traefik.ACME) == "dns" {
+		service := compose.Services["traefik"]
+		service.EnvFile = []string{"/etc/warpgate/traefik/acme.env"}
+		compose.Services["traefik"] = service
 	}
 
 	yamlBytes, err := yaml.Marshal(compose)

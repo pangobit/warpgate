@@ -236,12 +236,14 @@ networking:
   dns:
     provider: cloudflare
     zone: example.com
+    api_token: ${CF_DNS_API_TOKEN}
   traefik:
     entry_points: [web, websecure]
     acme:
       enabled: true
       email: admin@example.com
       provider: letsencrypt
+      challenge: dns
 
 registry:
   server: ghcr.io
@@ -615,6 +617,7 @@ During bootstrap, the SecretSauce vault is automatically initialized or reused:
 Examples:
   warpgate bootstrap test-node --tailscale-ssh
   SS_MASTER_PASSWORD=secret warpgate bootstrap node-1 --tailscale-ssh
+  CF_DNS_API_TOKEN=token warpgate bootstrap node-1 --tailscale-ssh
   warpgate bootstrap --host 100.95.115.81 --tailscale-ssh
   warpgate bootstrap node-1 --dry-run`,
 	RunE: func(cmd *cobra.Command, args []string) error {

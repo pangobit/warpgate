@@ -11,12 +11,14 @@ networking:
   dns:
     provider: cloudflare
     zone: example.com
+    api_token: ${CF_DNS_API_TOKEN}
   traefik:
     entry_points: [web, websecure]
     acme:
       enabled: true
       email: admin@example.com
       provider: letsencrypt
+      challenge: dns
 
 registry:
   server: ghcr.io

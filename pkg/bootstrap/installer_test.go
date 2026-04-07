@@ -3,6 +3,8 @@ package bootstrap
 import (
 	"strings"
 	"testing"
+
+	"github.com/pangobit/warpgate/pkg/config"
 )
 
 func TestWarpgateEnvScriptWithProxy(t *testing.T) {
@@ -51,5 +53,22 @@ func TestSecretSauceInitCommandReadsPasswordFromStdin(t *testing.T) {
 	}
 	if !strings.Contains(got, `--password "$SS_MASTER_PASSWORD"`) {
 		t.Fatalf("secretSauceInitCommand() = %q, want password expansion", got)
+	}
+}
+
+func TestACMEChallengeModeDefaultsToTLS(t *testing.T) {
+	if got := acmeChallengeMode(&config.NetworkingConfig{}); got != "tls" {
+		t.Fatalf("acmeChallengeMode() = %q, want %q", got, "tls")
+	}
+}
+
+func TestACMEChallengeModeReturnsLowercaseChallenge(t *testing.T) {
+	got := acmeChallengeMode(&config.NetworkingConfig{
+		Traefik: config.TraefikConfig{
+			ACME: config.ACMEConfig{Challenge: "DNS"},
+		},
+	})
+	if got != "dns" {
+		t.Fatalf("acmeChallengeMode() = %q, want %q", got, "dns")
 	}
 }

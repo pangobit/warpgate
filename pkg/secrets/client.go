@@ -14,6 +14,9 @@ import (
 // RegistryPrefix is the SecretSauce key prefix for Docker registry credentials.
 const RegistryPrefix = "warpgate/registry/"
 
+// TraefikACMEPrefix is the SecretSauce key prefix for Traefik ACME credentials.
+const TraefikACMEPrefix = "warpgate/traefik/acme/"
+
 // Client fetches decrypted secrets from a SecretSauce server.
 type Client struct {
 	// BaseURL is the SecretSauce server URL.

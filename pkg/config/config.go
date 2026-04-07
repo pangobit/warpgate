@@ -77,6 +77,8 @@ type ACMEConfig struct {
 	Email string `yaml:"email"`
 	// Provider is the ACME provider (letsencrypt or zerossl).
 	Provider string `yaml:"provider"`
+	// Challenge is the ACME challenge type (tls or dns).
+	Challenge string `yaml:"challenge,omitempty"`
 	// Staging uses the staging ACME endpoint to avoid rate limits.
 	Staging bool `yaml:"staging,omitempty"`
 }
