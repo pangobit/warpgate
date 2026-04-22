@@ -14,6 +14,7 @@ type DeployState struct {
 	// PreviousVersion is the previously deployed image tag (for rollback).
 	PreviousVersion string `json:"previous_version"`
 	// ActiveSlot is the currently active blue/green slot ("blue" or "green").
+	// Recreate deployments leave this empty.
 	ActiveSlot string `json:"active_slot"`
 	// DeployedAt is the timestamp of the last deployment.
 	DeployedAt time.Time `json:"deployed_at"`

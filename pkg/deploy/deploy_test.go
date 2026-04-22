@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -127,6 +128,139 @@ func TestComposeUpCommand(t *testing.T) {
 	}
 }
 
+func TestMakeDeployPlan(t *testing.T) {
+	tests := []struct {
+		name     string
+		strategy config.DeployStrategy
+		state    *DeployState
+		want     deployPlan
+	}{
+		{
+			name:     "blue green initial deploy starts on green",
+			strategy: config.StrategyBlueGreen,
+			state:    &DeployState{},
+			want: deployPlan{
+				activeSlot:  "green",
+				projectFlag: "-p myapp-green",
+			},
+		},
+		{
+			name:     "blue green flips from blue to green",
+			strategy: config.StrategyBlueGreen,
+			state: &DeployState{
+				ActiveSlot: "blue",
+			},
+			want: deployPlan{
+				activeSlot:  "green",
+				prevSlot:    "blue",
+				projectFlag: "-p myapp-green",
+			},
+		},
+		{
+			name:     "blue green flips from green to blue",
+			strategy: config.StrategyBlueGreen,
+			state: &DeployState{
+				ActiveSlot: "green",
+			},
+			want: deployPlan{
+				activeSlot:  "blue",
+				prevSlot:    "green",
+				projectFlag: "-p myapp-blue",
+			},
+		},
+		{
+			name:     "recreate ignores stale blue green slot",
+			strategy: config.StrategyRecreate,
+			state: &DeployState{
+				ActiveSlot: "green",
+			},
+			want: deployPlan{
+				projectFlag: "-p myapp",
+			},
+		},
+		{
+			name:     "nil state is treated as empty state",
+			strategy: config.StrategyBlueGreen,
+			state:    nil,
+			want: deployPlan{
+				activeSlot:  "green",
+				projectFlag: "-p myapp-green",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := makeDeployPlan("myapp", tt.strategy, tt.state)
+			if got != tt.want {
+				t.Errorf("makeDeployPlan() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestActiveProjectFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		strategy   config.DeployStrategy
+		activeSlot string
+		wantFlag   string
+		wantOK     bool
+	}{
+		{
+			name:       "blue green with active slot returns project",
+			strategy:   config.StrategyBlueGreen,
+			activeSlot: "blue",
+			wantFlag:   "-p probe-blue",
+			wantOK:     true,
+		},
+		{
+			name:     "blue green without active slot is not deployed",
+			strategy: config.StrategyBlueGreen,
+			wantOK:   false,
+		},
+		{
+			name:       "recreate with empty slot still resolves active project",
+			strategy:   config.StrategyRecreate,
+			activeSlot: "",
+			wantFlag:   "-p probe",
+			wantOK:     true,
+		},
+		{
+			name:       "recreate ignores adversarial stale slot",
+			strategy:   config.StrategyRecreate,
+			activeSlot: "green",
+			wantFlag:   "-p probe",
+			wantOK:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotFlag, gotOK := activeProjectFlag("probe", tt.strategy, tt.activeSlot)
+			if gotOK != tt.wantOK {
+				t.Fatalf("activeProjectFlag() ok = %v, want %v", gotOK, tt.wantOK)
+			}
+			if gotFlag != tt.wantFlag {
+				t.Errorf("activeProjectFlag() flag = %q, want %q", gotFlag, tt.wantFlag)
+			}
+		})
+	}
+}
+
+func TestAllDeploymentProjectFlags(t *testing.T) {
+	got := allDeploymentProjectFlags("probe")
+	want := []string{
+		"-p probe",
+		"-p probe-blue",
+		"-p probe-green",
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("allDeploymentProjectFlags() = %v, want %v", got, want)
+	}
+}
+
 func TestFetchSecretsEnvironmentOnly(t *testing.T) {
 	d := NewDeployer(&config.RepoConfig{
 		Cluster: &config.ClusterConfig{Project: "test"},
@@ -134,7 +268,7 @@ func TestFetchSecretsEnvironmentOnly(t *testing.T) {
 
 	app := &config.AppConfig{
 		Environment: map[string]string{
-			"DOMAIN":   "example.com",
+			"DOMAIN":    "example.com",
 			"LOG_LEVEL": "info",
 		},
 	}

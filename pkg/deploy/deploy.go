@@ -205,87 +205,23 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 	defer releaseLock(client, remoteDir, d.log)
 
 	currentState := d.readState(client, remoteDir)
-	nextSlot := currentState.InactiveSlot()
-	prevSlot := currentState.ActiveSlot
-
-	if err := client.WriteFile(remoteDir+"/compose.yml", string(composeContent)); err != nil {
-		return fmt.Errorf("failed to upload compose.yml: %w", err)
+	if err := d.uploadDeploymentFiles(client, remoteDir, appDir, composeContent, override); err != nil {
+		return err
 	}
 
-	if appDir != "" {
-		if err := d.uploadExtraFiles(client, appDir, remoteDir); err != nil {
-			return err
-		}
+	hasEnvFile, err := d.writeEnvFile(client, remoteDir, app)
+	if err != nil {
+		return err
 	}
 
-	if err := client.WriteFile(remoteDir+"/docker-compose.override.yml", override); err != nil {
-		return fmt.Errorf("failed to write override: %w", err)
-	}
-
-	hasEnvFile := false
-	if needsEnvFile(app, d.Repo.Cluster.Secrets.Server) {
-		envContent, fetchErr := d.fetchSecrets(app)
-		if fetchErr != nil {
-			return fmt.Errorf("failed to fetch secrets: %w", fetchErr)
-		}
-		envPath := remoteDir + "/.env"
-		if err := client.WriteFileSecret(envPath, envContent); err != nil {
-			return fmt.Errorf("failed to write .env: %w", err)
-		}
-		hasEnvFile = true
-	}
-
-	reg := d.Repo.Cluster.Registry
-	if reg.Username == "" && d.Repo.Cluster.Secrets.Server != "" {
-		fetched, fetchErr := d.fetchRegistryCredentials()
-		if fetchErr != nil {
-			d.log.Warnf("Failed to fetch registry credentials from SecretSauce: %v", fetchErr)
-		} else if fetched != nil {
-			reg = *fetched
-		}
-	}
-	if reg.Username != "" {
-		loginCmd := fmt.Sprintf("docker login %s -u %s --password-stdin",
-			shellQuote(reg.Server),
-			shellQuote(reg.Username))
-		if _, _, err := client.RunCommandStdin(loginCmd, reg.Password); err != nil {
-			d.log.Warnf("Docker login failed: %v", err)
-		}
+	if err := d.loginRegistry(client); err != nil {
+		return err
 	}
 
 	composeFiles := "-f compose.yml -f docker-compose.override.yml"
-	projectFlag := fmt.Sprintf("-p %s-%s", app.Name, nextSlot)
-
-	pullCmd := fmt.Sprintf("cd %s && docker compose %s %s pull", remoteDir, projectFlag, composeFiles)
-	d.log.Info("Pulling images...")
-	if _, stderr, err := client.RunCommand(pullCmd); err != nil {
-		return fmt.Errorf("pull failed: %w\n%s", err, stderr)
-	}
-
-	if app.Strategy == config.StrategyRecreate && prevSlot != "" {
-		prevProjectFlag := fmt.Sprintf("-p %s-%s", app.Name, prevSlot)
-		d.log.Infof("Recreate strategy: stopping %s slot before starting %s...", prevSlot, nextSlot)
-		stopCmd := fmt.Sprintf("cd %s && docker compose %s %s down", remoteDir, prevProjectFlag, composeFiles)
-		if _, _, err := client.RunCommand(stopCmd); err != nil {
-			d.log.Warnf("Failed to stop old slot: %v", err)
-		}
-		prevSlot = "" // already stopped, skip the post-healthcheck stop
-	}
-
-	upCmd := d.composeUpCommand(app, projectFlag, composeFiles, hasEnvFile)
-	fullCmd := fmt.Sprintf("cd %s && %s", remoteDir, upCmd)
-	d.log.Infof("Starting %s slot...", nextSlot)
-	if _, stderr, err := client.RunCommand(fullCmd); err != nil {
-		return fmt.Errorf("deploy failed: %w\n%s", err, stderr)
-	}
-
-	if err := WaitForHealthy(client, remoteDir, app.Name, projectFlag, composeFiles, d.log); err != nil {
-		d.log.Warnf("Health check failed, stopping %s slot...", nextSlot)
-		stopCmd := fmt.Sprintf("cd %s && docker compose %s %s down", remoteDir, projectFlag, composeFiles)
-		if _, _, stopErr := client.RunCommand(stopCmd); stopErr != nil {
-			d.log.Warnf("Failed to stop failed slot: %v", stopErr)
-		}
-		return fmt.Errorf("health check failed: %w", err)
+	result, err := d.deployWithStrategy(client, remoteDir, app, currentState, composeFiles, hasEnvFile)
+	if err != nil {
+		return err
 	}
 
 	if hasEnvFile {
@@ -294,30 +230,13 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 		}
 	}
 
-	if prevSlot != "" {
-		prevProjectFlag := fmt.Sprintf("-p %s-%s", app.Name, prevSlot)
-		d.log.Infof("Stopping %s slot...", prevSlot)
-		stopCmd := fmt.Sprintf("cd %s && docker compose %s %s down", remoteDir, prevProjectFlag, composeFiles)
-		if _, _, err := client.RunCommand(stopCmd); err != nil {
-			d.log.Warnf("Failed to stop old slot: %v", err)
-		}
-	}
+	d.saveDeployState(client, remoteDir, app, currentState, result.ActiveSlot)
 
-	newState := &DeployState{
-		App:             app.Name,
-		CurrentVersion:  app.Version,
-		PreviousVersion: currentState.CurrentVersion,
-		ActiveSlot:      nextSlot,
-		DeployedAt:      time.Now(),
+	if result.ActiveSlot == "" {
+		d.log.Infof("Node %s: %s:%s deployed", node.ID, app.Name, app.Version)
+	} else {
+		d.log.Infof("Node %s: %s slot active, %s:%s deployed", node.ID, result.ActiveSlot, app.Name, app.Version)
 	}
-	stateJSON, err := newState.Marshal()
-	if err != nil {
-		d.log.Warnf("Failed to marshal deploy state: %v", err)
-	} else if err := client.WriteFile(remoteDir+"/state.json", stateJSON); err != nil {
-		d.log.Warnf("Failed to save deploy state: %v", err)
-	}
-
-	d.log.Infof("Node %s: %s slot active, %s:%s deployed", node.ID, nextSlot, app.Name, app.Version)
 	return nil
 }
 
@@ -443,11 +362,10 @@ func (d *Deployer) Remove(appName string, nodeIDs []string) error {
 		state := d.readState(client, remoteDir)
 		composeFiles := "-f compose.yml -f docker-compose.override.yml"
 
-		for _, slot := range []string{"blue", "green"} {
-			projectFlag := fmt.Sprintf("-p %s-%s", appName, slot)
+		for _, projectFlag := range allDeploymentProjectFlags(appName) {
 			stopCmd := fmt.Sprintf("cd %s && docker compose %s %s down 2>/dev/null || true", remoteDir, projectFlag, composeFiles)
 			if _, _, err := client.RunCommand(stopCmd); err != nil {
-				d.log.Warnf("Failed to stop %s slot on %s: %v", slot, nodeID, err)
+				d.log.Warnf("Failed to stop deployment %s on %s: %v", projectFlag, nodeID, err)
 			}
 		}
 
@@ -551,8 +469,8 @@ func (d *Deployer) Status(appName string) ([]NodeStatus, error) {
 			Slot:    state.ActiveSlot,
 		}
 
-		if state.ActiveSlot != "" {
-			projectFlag := fmt.Sprintf("-p %s-%s", appName, state.ActiveSlot)
+		projectFlag, ok := activeProjectFlag(appName, app.Strategy, state.ActiveSlot)
+		if ok {
 			composeFiles := "-f compose.yml -f docker-compose.override.yml"
 			psCmd := fmt.Sprintf("cd %s && docker compose %s %s ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
 				remoteDir, projectFlag, composeFiles)
@@ -596,7 +514,7 @@ type NodeStatus struct {
 	State string
 	// Version is the currently deployed version.
 	Version string
-	// Slot is the active blue/green slot.
+	// Slot is the active blue/green slot. Recreate deployments leave this empty.
 	Slot string
 	// Containers is the docker compose ps output.
 	Containers string
@@ -626,7 +544,7 @@ type AppNodeStatus struct {
 	NodeID string
 	// Version is the currently deployed version.
 	Version string
-	// Slot is the active blue/green slot.
+	// Slot is the active blue/green slot. Recreate deployments leave this empty.
 	Slot string
 	// State is the deployment state: "healthy", "running", "unhealthy", "not deployed".
 	State string
@@ -681,13 +599,13 @@ func (d *Deployer) ClusterStatus() (*ClusterStatusResult, error) {
 				Slot:    state.ActiveSlot,
 			}
 
-			if state.ActiveSlot == "" {
+			projectFlag, ok := activeProjectFlag(app.Name, app.Strategy, state.ActiveSlot)
+			if !ok {
 				status.State = "not deployed"
 				result.Apps = append(result.Apps, status)
 				continue
 			}
 
-			projectFlag := fmt.Sprintf("-p %s-%s", app.Name, state.ActiveSlot)
 			composeFiles := "-f compose.yml -f docker-compose.override.yml"
 			psCmd := fmt.Sprintf("cd %s && docker compose %s %s ps --format '{{.Service}}\t{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
 				remoteDir, projectFlag, composeFiles)
@@ -960,6 +878,206 @@ func (d *Deployer) composeUpCommand(app *config.AppConfig, projectFlag, composeF
 	}
 	base += " up -d"
 	return base
+}
+
+type deployPlan struct {
+	activeSlot  string
+	prevSlot    string
+	projectFlag string
+}
+
+type deployResult struct {
+	ActiveSlot string
+}
+
+func makeDeployPlan(appName string, strategy config.DeployStrategy, state *DeployState) deployPlan {
+	if state == nil {
+		state = &DeployState{}
+	}
+	if strategy == config.StrategyRecreate {
+		return deployPlan{
+			projectFlag: deploymentProjectFlag(appName, strategy, ""),
+		}
+	}
+
+	nextSlot := state.InactiveSlot()
+	return deployPlan{
+		activeSlot:  nextSlot,
+		prevSlot:    state.ActiveSlot,
+		projectFlag: deploymentProjectFlag(appName, strategy, nextSlot),
+	}
+}
+
+func activeProjectFlag(appName string, strategy config.DeployStrategy, activeSlot string) (string, bool) {
+	if strategy == config.StrategyRecreate {
+		return deploymentProjectFlag(appName, strategy, ""), true
+	}
+	if activeSlot == "" {
+		return "", false
+	}
+	return deploymentProjectFlag(appName, strategy, activeSlot), true
+}
+
+func deploymentProjectFlag(appName string, strategy config.DeployStrategy, slot string) string {
+	projectName := appName
+	if strategy != config.StrategyRecreate {
+		projectName += "-" + slot
+	}
+	return "-p " + projectName
+}
+
+func allDeploymentProjectFlags(appName string) []string {
+	return []string{
+		deploymentProjectFlag(appName, config.StrategyRecreate, ""),
+		deploymentProjectFlag(appName, config.StrategyBlueGreen, "blue"),
+		deploymentProjectFlag(appName, config.StrategyBlueGreen, "green"),
+	}
+}
+
+func (d *Deployer) uploadDeploymentFiles(client *ssh.Client, remoteDir, appDir string, composeContent []byte, override string) error {
+	if err := client.WriteFile(remoteDir+"/compose.yml", string(composeContent)); err != nil {
+		return fmt.Errorf("failed to upload compose.yml: %w", err)
+	}
+	if appDir != "" {
+		if err := d.uploadExtraFiles(client, appDir, remoteDir); err != nil {
+			return err
+		}
+	}
+	if err := client.WriteFile(remoteDir+"/docker-compose.override.yml", override); err != nil {
+		return fmt.Errorf("failed to write override: %w", err)
+	}
+	return nil
+}
+
+func (d *Deployer) writeEnvFile(client *ssh.Client, remoteDir string, app *config.AppConfig) (bool, error) {
+	if !needsEnvFile(app, d.Repo.Cluster.Secrets.Server) {
+		return false, nil
+	}
+
+	envContent, err := d.fetchSecrets(app)
+	if err != nil {
+		return false, fmt.Errorf("failed to fetch secrets: %w", err)
+	}
+	envPath := remoteDir + "/.env"
+	if err := client.WriteFileSecret(envPath, envContent); err != nil {
+		return false, fmt.Errorf("failed to write .env: %w", err)
+	}
+	return true, nil
+}
+
+func (d *Deployer) loginRegistry(client *ssh.Client) error {
+	reg := d.Repo.Cluster.Registry
+	if reg.Username == "" && d.Repo.Cluster.Secrets.Server != "" {
+		fetched, err := d.fetchRegistryCredentials()
+		if err != nil {
+			d.log.Warnf("Failed to fetch registry credentials from SecretSauce: %v", err)
+		} else if fetched != nil {
+			reg = *fetched
+		}
+	}
+	if reg.Username == "" {
+		return nil
+	}
+
+	loginCmd := fmt.Sprintf("docker login %s -u %s --password-stdin",
+		shellQuote(reg.Server),
+		shellQuote(reg.Username))
+	if _, _, err := client.RunCommandStdin(loginCmd, reg.Password); err != nil {
+		d.log.Warnf("Docker login failed: %v", err)
+	}
+	return nil
+}
+
+func (d *Deployer) deployWithStrategy(client *ssh.Client, remoteDir string, app *config.AppConfig, state *DeployState, composeFiles string, hasEnvFile bool) (deployResult, error) {
+	plan := makeDeployPlan(app.Name, app.Strategy, state)
+	if app.Strategy == config.StrategyRecreate {
+		return d.runRecreateDeployment(client, remoteDir, app, composeFiles, hasEnvFile, plan)
+	}
+	return d.runBlueGreenDeployment(client, remoteDir, app, composeFiles, hasEnvFile, plan)
+}
+
+func (d *Deployer) runRecreateDeployment(client *ssh.Client, remoteDir string, app *config.AppConfig, composeFiles string, hasEnvFile bool, plan deployPlan) (deployResult, error) {
+	if err := d.pullProject(client, remoteDir, plan.projectFlag, composeFiles); err != nil {
+		return deployResult{}, err
+	}
+
+	d.log.Infof("Recreate strategy: stopping existing deployment before starting %s...", app.Name)
+	for _, projectFlag := range allDeploymentProjectFlags(app.Name) {
+		d.stopProject(client, remoteDir, projectFlag, composeFiles, fmt.Sprintf("Failed to stop old deployment %s", projectFlag))
+	}
+
+	if err := d.startAndVerifyProject(client, remoteDir, app, plan.projectFlag, composeFiles, hasEnvFile, app.Name); err != nil {
+		return deployResult{}, err
+	}
+	return deployResult{}, nil
+}
+
+func (d *Deployer) runBlueGreenDeployment(client *ssh.Client, remoteDir string, app *config.AppConfig, composeFiles string, hasEnvFile bool, plan deployPlan) (deployResult, error) {
+	if err := d.pullProject(client, remoteDir, plan.projectFlag, composeFiles); err != nil {
+		return deployResult{}, err
+	}
+
+	if err := d.startAndVerifyProject(client, remoteDir, app, plan.projectFlag, composeFiles, hasEnvFile, plan.activeSlot+" slot"); err != nil {
+		return deployResult{}, err
+	}
+
+	if plan.prevSlot != "" {
+		prevProjectFlag := deploymentProjectFlag(app.Name, app.Strategy, plan.prevSlot)
+		d.log.Infof("Stopping %s slot...", plan.prevSlot)
+		d.stopProject(client, remoteDir, prevProjectFlag, composeFiles, "Failed to stop old slot")
+	}
+
+	return deployResult{ActiveSlot: plan.activeSlot}, nil
+}
+
+func (d *Deployer) pullProject(client *ssh.Client, remoteDir, projectFlag, composeFiles string) error {
+	pullCmd := fmt.Sprintf("cd %s && docker compose %s %s pull", remoteDir, projectFlag, composeFiles)
+	d.log.Info("Pulling images...")
+	if _, stderr, err := client.RunCommand(pullCmd); err != nil {
+		return fmt.Errorf("pull failed: %w\n%s", err, stderr)
+	}
+	return nil
+}
+
+func (d *Deployer) startAndVerifyProject(client *ssh.Client, remoteDir string, app *config.AppConfig, projectFlag, composeFiles string, hasEnvFile bool, label string) error {
+	upCmd := d.composeUpCommand(app, projectFlag, composeFiles, hasEnvFile)
+	fullCmd := fmt.Sprintf("cd %s && %s", remoteDir, upCmd)
+	d.log.Infof("Starting %s...", label)
+	if _, stderr, err := client.RunCommand(fullCmd); err != nil {
+		return fmt.Errorf("deploy failed: %w\n%s", err, stderr)
+	}
+
+	if err := WaitForHealthy(client, remoteDir, app.Name, projectFlag, composeFiles, d.log); err != nil {
+		d.log.Warnf("Health check failed, stopping %s...", label)
+		d.stopProject(client, remoteDir, projectFlag, composeFiles, "Failed to stop failed deployment")
+		return fmt.Errorf("health check failed: %w", err)
+	}
+	return nil
+}
+
+func (d *Deployer) stopProject(client *ssh.Client, remoteDir, projectFlag, composeFiles, warning string) {
+	stopCmd := fmt.Sprintf("cd %s && docker compose %s %s down", remoteDir, projectFlag, composeFiles)
+	if _, _, err := client.RunCommand(stopCmd); err != nil {
+		d.log.Warnf("%s: %v", warning, err)
+	}
+}
+
+func (d *Deployer) saveDeployState(client *ssh.Client, remoteDir string, app *config.AppConfig, currentState *DeployState, activeSlot string) {
+	newState := &DeployState{
+		App:             app.Name,
+		CurrentVersion:  app.Version,
+		PreviousVersion: currentState.CurrentVersion,
+		ActiveSlot:      activeSlot,
+		DeployedAt:      time.Now(),
+	}
+	stateJSON, err := newState.Marshal()
+	if err != nil {
+		d.log.Warnf("Failed to marshal deploy state: %v", err)
+		return
+	}
+	if err := client.WriteFile(remoteDir+"/state.json", stateJSON); err != nil {
+		d.log.Warnf("Failed to save deploy state: %v", err)
+	}
 }
 
 func (d *Deployer) fetchSecrets(app *config.AppConfig) (string, error) {
