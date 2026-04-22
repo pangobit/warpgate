@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/pangobit/warpgate/pkg/ssh"
 )
 
 const (
@@ -31,20 +29,20 @@ const (
 
 // WaitForHealthy polls a container's health status until it becomes healthy,
 // unhealthy, or the timeout is reached.
-func WaitForHealthy(client *ssh.Client, composeDir, serviceName, projectFlag, composeFiles string, log logger) error {
+func WaitForHealthy(runner commandRunner, composeDir, serviceName, projectFlag, composeFiles string, log logger) error {
 	deadline := time.Now().Add(healthTimeout)
 
 	inspectCmd := fmt.Sprintf(
 		"cd %s && docker compose %s %s ps -q %s 2>/dev/null",
 		composeDir, projectFlag, composeFiles, serviceName,
 	)
-	containerID, _, err := client.RunCommand(inspectCmd)
+	containerID, _, err := runner.RunCommand(inspectCmd)
 	if err != nil || strings.TrimSpace(containerID) == "" {
 		return fmt.Errorf("container for %s not found after deploy", serviceName)
 	}
 	containerID = strings.TrimSpace(strings.Split(containerID, "\n")[0])
 
-	hasHealthcheck, err := containerHasHealthcheck(client, containerID)
+	hasHealthcheck, err := containerHasHealthcheck(runner, containerID)
 	if err != nil {
 		return fmt.Errorf("failed to check healthcheck config: %w", err)
 	}
@@ -56,7 +54,7 @@ func WaitForHealthy(client *ssh.Client, composeDir, serviceName, projectFlag, co
 	log.Infof("Waiting for %s to become healthy...", serviceName)
 
 	for time.Now().Before(deadline) {
-		status, err := pollHealth(client, containerID)
+		status, err := pollHealth(runner, containerID)
 		if err != nil {
 			return fmt.Errorf("health poll failed: %w", err)
 		}
@@ -66,7 +64,7 @@ func WaitForHealthy(client *ssh.Client, composeDir, serviceName, projectFlag, co
 			log.Infof("Container %s is healthy", serviceName)
 			return nil
 		case HealthUnhealthy:
-			logs := getHealthLogs(client, containerID)
+			logs := getHealthLogs(runner, containerID)
 			return fmt.Errorf("container %s is unhealthy\n%s", serviceName, logs)
 		case HealthNotFound:
 			return fmt.Errorf("container %s disappeared during health check", serviceName)
@@ -80,18 +78,18 @@ func WaitForHealthy(client *ssh.Client, composeDir, serviceName, projectFlag, co
 	return fmt.Errorf("health check timed out after %s for %s", healthTimeout, serviceName)
 }
 
-func containerHasHealthcheck(client *ssh.Client, containerID string) (bool, error) {
+func containerHasHealthcheck(runner commandRunner, containerID string) (bool, error) {
 	cmd := fmt.Sprintf("docker inspect --format '{{if .Config.Healthcheck}}true{{else}}false{{end}}' %s", containerID)
-	stdout, _, err := client.RunCommand(cmd)
+	stdout, _, err := runner.RunCommand(cmd)
 	if err != nil {
 		return false, err
 	}
 	return strings.TrimSpace(stdout) == "true", nil
 }
 
-func pollHealth(client *ssh.Client, containerID string) (HealthStatus, error) {
+func pollHealth(runner commandRunner, containerID string) (HealthStatus, error) {
 	cmd := fmt.Sprintf("docker inspect --format '{{.State.Health.Status}}' %s 2>/dev/null || echo 'not_found'", containerID)
-	stdout, _, err := client.RunCommand(cmd)
+	stdout, _, err := runner.RunCommand(cmd)
 	if err != nil {
 		return HealthNotFound, err
 	}
@@ -110,9 +108,9 @@ func pollHealth(client *ssh.Client, containerID string) (HealthStatus, error) {
 	}
 }
 
-func getHealthLogs(client *ssh.Client, containerID string) string {
+func getHealthLogs(runner commandRunner, containerID string) string {
 	cmd := fmt.Sprintf("docker inspect --format '{{range .State.Health.Log}}{{.Output}}{{end}}' %s 2>/dev/null", containerID)
-	stdout, _, _ := client.RunCommand(cmd)
+	stdout, _, _ := runner.RunCommand(cmd)
 	output := strings.TrimSpace(stdout)
 	if output == "" {
 		return "(no health check output)"

@@ -411,7 +411,11 @@ Examples:
 			if version == "" {
 				version = "none"
 			}
-			fmt.Printf("  %s: %s (version: %s, slot: %s)\n", s.NodeID, s.State, version, s.Slot)
+			slot := s.Slot
+			if slot == "" {
+				slot = "-"
+			}
+			fmt.Printf("  %s: %s (version: %s, slot: %s)\n", s.NodeID, s.State, version, slot)
 			if s.Containers != "" {
 				for _, line := range strings.Split(s.Containers, "\n") {
 					if line != "" {
