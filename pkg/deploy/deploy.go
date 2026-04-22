@@ -219,7 +219,7 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 	}
 
 	composeFiles := "-f compose.yml -f docker-compose.override.yml"
-	result, err := d.deployWithStrategy(client, remoteDir, app, currentState, composeFiles, hasEnvFile)
+	result, err := d.deployWithStrategy(client, remoteDir, app, currentState, composeFiles, hasEnvFile, WaitForHealthy)
 	if err != nil {
 		return err
 	}
@@ -814,7 +814,7 @@ func (d *Deployer) updateInternalRoutes(app *config.AppConfig) error {
 	return nil
 }
 
-func (d *Deployer) uploadExtraFiles(client *ssh.Client, appDir, remoteDir string) error {
+func (d *Deployer) uploadExtraFiles(uploader fileUploader, appDir, remoteDir string) error {
 	entries, err := os.ReadDir(appDir)
 	if err != nil {
 		return fmt.Errorf("failed to read app directory: %w", err)
@@ -828,7 +828,7 @@ func (d *Deployer) uploadExtraFiles(client *ssh.Client, appDir, remoteDir string
 		localPath := filepath.Join(appDir, entry.Name())
 		remotePath := remoteDir + "/" + entry.Name()
 		d.log.Infof("Uploading %s", entry.Name())
-		if err := client.UploadFile(localPath, remotePath); err != nil {
+		if err := uploader.UploadFile(localPath, remotePath); err != nil {
 			return fmt.Errorf("failed to upload %s: %w", entry.Name(), err)
 		}
 	}
@@ -879,6 +879,30 @@ func (d *Deployer) composeUpCommand(app *config.AppConfig, projectFlag, composeF
 	base += " up -d"
 	return base
 }
+
+type commandRunner interface {
+	RunCommand(cmd string) (string, string, error)
+}
+
+type stdinRunner interface {
+	RunCommandStdin(cmd, stdinData string) (string, string, error)
+}
+
+type fileWriter interface {
+	WriteFile(remotePath, content string) error
+	WriteFileSecret(remotePath, content string) error
+}
+
+type fileUploader interface {
+	UploadFile(localPath, remotePath string) error
+}
+
+type deploymentFS interface {
+	fileWriter
+	fileUploader
+}
+
+type healthWaitFunc func(commandRunner, string, string, string, string, logger) error
 
 type deployPlan struct {
 	activeSlot  string
@@ -934,22 +958,22 @@ func allDeploymentProjectFlags(appName string) []string {
 	}
 }
 
-func (d *Deployer) uploadDeploymentFiles(client *ssh.Client, remoteDir, appDir string, composeContent []byte, override string) error {
-	if err := client.WriteFile(remoteDir+"/compose.yml", string(composeContent)); err != nil {
+func (d *Deployer) uploadDeploymentFiles(fs deploymentFS, remoteDir, appDir string, composeContent []byte, override string) error {
+	if err := fs.WriteFile(remoteDir+"/compose.yml", string(composeContent)); err != nil {
 		return fmt.Errorf("failed to upload compose.yml: %w", err)
 	}
 	if appDir != "" {
-		if err := d.uploadExtraFiles(client, appDir, remoteDir); err != nil {
+		if err := d.uploadExtraFiles(fs, appDir, remoteDir); err != nil {
 			return err
 		}
 	}
-	if err := client.WriteFile(remoteDir+"/docker-compose.override.yml", override); err != nil {
+	if err := fs.WriteFile(remoteDir+"/docker-compose.override.yml", override); err != nil {
 		return fmt.Errorf("failed to write override: %w", err)
 	}
 	return nil
 }
 
-func (d *Deployer) writeEnvFile(client *ssh.Client, remoteDir string, app *config.AppConfig) (bool, error) {
+func (d *Deployer) writeEnvFile(writer fileWriter, remoteDir string, app *config.AppConfig) (bool, error) {
 	if !needsEnvFile(app, d.Repo.Cluster.Secrets.Server) {
 		return false, nil
 	}
@@ -959,13 +983,13 @@ func (d *Deployer) writeEnvFile(client *ssh.Client, remoteDir string, app *confi
 		return false, fmt.Errorf("failed to fetch secrets: %w", err)
 	}
 	envPath := remoteDir + "/.env"
-	if err := client.WriteFileSecret(envPath, envContent); err != nil {
+	if err := writer.WriteFileSecret(envPath, envContent); err != nil {
 		return false, fmt.Errorf("failed to write .env: %w", err)
 	}
 	return true, nil
 }
 
-func (d *Deployer) loginRegistry(client *ssh.Client) error {
+func (d *Deployer) loginRegistry(runner stdinRunner) error {
 	reg := d.Repo.Cluster.Registry
 	if reg.Username == "" && d.Repo.Cluster.Secrets.Server != "" {
 		fetched, err := d.fetchRegistryCredentials()
@@ -982,82 +1006,82 @@ func (d *Deployer) loginRegistry(client *ssh.Client) error {
 	loginCmd := fmt.Sprintf("docker login %s -u %s --password-stdin",
 		shellQuote(reg.Server),
 		shellQuote(reg.Username))
-	if _, _, err := client.RunCommandStdin(loginCmd, reg.Password); err != nil {
+	if _, _, err := runner.RunCommandStdin(loginCmd, reg.Password); err != nil {
 		d.log.Warnf("Docker login failed: %v", err)
 	}
 	return nil
 }
 
-func (d *Deployer) deployWithStrategy(client *ssh.Client, remoteDir string, app *config.AppConfig, state *DeployState, composeFiles string, hasEnvFile bool) (deployResult, error) {
+func (d *Deployer) deployWithStrategy(runner commandRunner, remoteDir string, app *config.AppConfig, state *DeployState, composeFiles string, hasEnvFile bool, waitForHealth healthWaitFunc) (deployResult, error) {
 	plan := makeDeployPlan(app.Name, app.Strategy, state)
 	if app.Strategy == config.StrategyRecreate {
-		return d.runRecreateDeployment(client, remoteDir, app, composeFiles, hasEnvFile, plan)
+		return d.runRecreateDeployment(runner, remoteDir, app, composeFiles, hasEnvFile, plan, waitForHealth)
 	}
-	return d.runBlueGreenDeployment(client, remoteDir, app, composeFiles, hasEnvFile, plan)
+	return d.runBlueGreenDeployment(runner, remoteDir, app, composeFiles, hasEnvFile, plan, waitForHealth)
 }
 
-func (d *Deployer) runRecreateDeployment(client *ssh.Client, remoteDir string, app *config.AppConfig, composeFiles string, hasEnvFile bool, plan deployPlan) (deployResult, error) {
-	if err := d.pullProject(client, remoteDir, plan.projectFlag, composeFiles); err != nil {
+func (d *Deployer) runRecreateDeployment(runner commandRunner, remoteDir string, app *config.AppConfig, composeFiles string, hasEnvFile bool, plan deployPlan, waitForHealth healthWaitFunc) (deployResult, error) {
+	if err := d.pullProject(runner, remoteDir, plan.projectFlag, composeFiles); err != nil {
 		return deployResult{}, err
 	}
 
 	d.log.Infof("Recreate strategy: stopping existing deployment before starting %s...", app.Name)
 	for _, projectFlag := range allDeploymentProjectFlags(app.Name) {
-		d.stopProject(client, remoteDir, projectFlag, composeFiles, fmt.Sprintf("Failed to stop old deployment %s", projectFlag))
+		d.stopProject(runner, remoteDir, projectFlag, composeFiles, fmt.Sprintf("Failed to stop old deployment %s", projectFlag))
 	}
 
-	if err := d.startAndVerifyProject(client, remoteDir, app, plan.projectFlag, composeFiles, hasEnvFile, app.Name); err != nil {
+	if err := d.startAndVerifyProject(runner, remoteDir, app, plan.projectFlag, composeFiles, hasEnvFile, app.Name, waitForHealth); err != nil {
 		return deployResult{}, err
 	}
 	return deployResult{}, nil
 }
 
-func (d *Deployer) runBlueGreenDeployment(client *ssh.Client, remoteDir string, app *config.AppConfig, composeFiles string, hasEnvFile bool, plan deployPlan) (deployResult, error) {
-	if err := d.pullProject(client, remoteDir, plan.projectFlag, composeFiles); err != nil {
+func (d *Deployer) runBlueGreenDeployment(runner commandRunner, remoteDir string, app *config.AppConfig, composeFiles string, hasEnvFile bool, plan deployPlan, waitForHealth healthWaitFunc) (deployResult, error) {
+	if err := d.pullProject(runner, remoteDir, plan.projectFlag, composeFiles); err != nil {
 		return deployResult{}, err
 	}
 
-	if err := d.startAndVerifyProject(client, remoteDir, app, plan.projectFlag, composeFiles, hasEnvFile, plan.activeSlot+" slot"); err != nil {
+	if err := d.startAndVerifyProject(runner, remoteDir, app, plan.projectFlag, composeFiles, hasEnvFile, plan.activeSlot+" slot", waitForHealth); err != nil {
 		return deployResult{}, err
 	}
 
 	if plan.prevSlot != "" {
 		prevProjectFlag := deploymentProjectFlag(app.Name, app.Strategy, plan.prevSlot)
 		d.log.Infof("Stopping %s slot...", plan.prevSlot)
-		d.stopProject(client, remoteDir, prevProjectFlag, composeFiles, "Failed to stop old slot")
+		d.stopProject(runner, remoteDir, prevProjectFlag, composeFiles, "Failed to stop old slot")
 	}
 
 	return deployResult{ActiveSlot: plan.activeSlot}, nil
 }
 
-func (d *Deployer) pullProject(client *ssh.Client, remoteDir, projectFlag, composeFiles string) error {
+func (d *Deployer) pullProject(runner commandRunner, remoteDir, projectFlag, composeFiles string) error {
 	pullCmd := fmt.Sprintf("cd %s && docker compose %s %s pull", remoteDir, projectFlag, composeFiles)
 	d.log.Info("Pulling images...")
-	if _, stderr, err := client.RunCommand(pullCmd); err != nil {
+	if _, stderr, err := runner.RunCommand(pullCmd); err != nil {
 		return fmt.Errorf("pull failed: %w\n%s", err, stderr)
 	}
 	return nil
 }
 
-func (d *Deployer) startAndVerifyProject(client *ssh.Client, remoteDir string, app *config.AppConfig, projectFlag, composeFiles string, hasEnvFile bool, label string) error {
+func (d *Deployer) startAndVerifyProject(runner commandRunner, remoteDir string, app *config.AppConfig, projectFlag, composeFiles string, hasEnvFile bool, label string, waitForHealth healthWaitFunc) error {
 	upCmd := d.composeUpCommand(app, projectFlag, composeFiles, hasEnvFile)
 	fullCmd := fmt.Sprintf("cd %s && %s", remoteDir, upCmd)
 	d.log.Infof("Starting %s...", label)
-	if _, stderr, err := client.RunCommand(fullCmd); err != nil {
+	if _, stderr, err := runner.RunCommand(fullCmd); err != nil {
 		return fmt.Errorf("deploy failed: %w\n%s", err, stderr)
 	}
 
-	if err := WaitForHealthy(client, remoteDir, app.Name, projectFlag, composeFiles, d.log); err != nil {
+	if err := waitForHealth(runner, remoteDir, app.Name, projectFlag, composeFiles, d.log); err != nil {
 		d.log.Warnf("Health check failed, stopping %s...", label)
-		d.stopProject(client, remoteDir, projectFlag, composeFiles, "Failed to stop failed deployment")
+		d.stopProject(runner, remoteDir, projectFlag, composeFiles, "Failed to stop failed deployment")
 		return fmt.Errorf("health check failed: %w", err)
 	}
 	return nil
 }
 
-func (d *Deployer) stopProject(client *ssh.Client, remoteDir, projectFlag, composeFiles, warning string) {
+func (d *Deployer) stopProject(runner commandRunner, remoteDir, projectFlag, composeFiles, warning string) {
 	stopCmd := fmt.Sprintf("cd %s && docker compose %s %s down", remoteDir, projectFlag, composeFiles)
-	if _, _, err := client.RunCommand(stopCmd); err != nil {
+	if _, _, err := runner.RunCommand(stopCmd); err != nil {
 		d.log.Warnf("%s: %v", warning, err)
 	}
 }

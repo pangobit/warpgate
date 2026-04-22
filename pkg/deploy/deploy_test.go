@@ -1,6 +1,9 @@
 package deploy
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -261,6 +264,261 @@ func TestAllDeploymentProjectFlags(t *testing.T) {
 	}
 }
 
+func TestDeployWithStrategy(t *testing.T) {
+	d := NewDeployer(&config.RepoConfig{
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+
+	tests := []struct {
+		name          string
+		app           *config.AppConfig
+		state         *DeployState
+		waitErr       error
+		wantResult    deployResult
+		wantErr       string
+		wantCommands  []string
+		wantWaitFlags []string
+	}{
+		{
+			name: "recreate uses stable project and cleans legacy slots",
+			app: &config.AppConfig{
+				Name:     "probe",
+				Strategy: config.StrategyRecreate,
+			},
+			state: &DeployState{
+				ActiveSlot: "green",
+			},
+			wantResult: deployResult{},
+			wantCommands: []string{
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml pull",
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml down",
+				"cd /remote && docker compose -p probe-blue -f compose.yml -f docker-compose.override.yml down",
+				"cd /remote && docker compose -p probe-green -f compose.yml -f docker-compose.override.yml down",
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml up -d",
+			},
+			wantWaitFlags: []string{"-p probe"},
+		},
+		{
+			name: "blue green promotes next slot and stops previous slot after health",
+			app: &config.AppConfig{
+				Name:     "probe",
+				Strategy: config.StrategyBlueGreen,
+			},
+			state: &DeployState{
+				ActiveSlot: "blue",
+			},
+			wantResult: deployResult{ActiveSlot: "green"},
+			wantCommands: []string{
+				"cd /remote && docker compose -p probe-green -f compose.yml -f docker-compose.override.yml pull",
+				"cd /remote && docker compose -p probe-green -f compose.yml -f docker-compose.override.yml up -d",
+				"cd /remote && docker compose -p probe-blue -f compose.yml -f docker-compose.override.yml down",
+			},
+			wantWaitFlags: []string{"-p probe-green"},
+		},
+		{
+			name: "health failure tears down only the new project",
+			app: &config.AppConfig{
+				Name:     "probe",
+				Strategy: config.StrategyBlueGreen,
+			},
+			state: &DeployState{
+				ActiveSlot: "blue",
+			},
+			waitErr: errors.New("unhealthy"),
+			wantErr: "health check failed: unhealthy",
+			wantCommands: []string{
+				"cd /remote && docker compose -p probe-green -f compose.yml -f docker-compose.override.yml pull",
+				"cd /remote && docker compose -p probe-green -f compose.yml -f docker-compose.override.yml up -d",
+				"cd /remote && docker compose -p probe-green -f compose.yml -f docker-compose.override.yml down",
+			},
+			wantWaitFlags: []string{"-p probe-green"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &fakeRemote{}
+			var gotWaitFlags []string
+			waitForHealth := func(_ commandRunner, _ string, _ string, projectFlag string, _ string, _ logger) error {
+				gotWaitFlags = append(gotWaitFlags, projectFlag)
+				return tt.waitErr
+			}
+
+			got, err := d.deployWithStrategy(runner, "/remote", tt.app, tt.state, "-f compose.yml -f docker-compose.override.yml", false, waitForHealth)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("deployWithStrategy() error = %v, want %q", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("deployWithStrategy() error = %v", err)
+			}
+
+			if got != tt.wantResult {
+				t.Errorf("deployWithStrategy() result = %+v, want %+v", got, tt.wantResult)
+			}
+			if !reflect.DeepEqual(runner.commands, tt.wantCommands) {
+				t.Errorf("deployWithStrategy() commands = %v, want %v", runner.commands, tt.wantCommands)
+			}
+			if !reflect.DeepEqual(gotWaitFlags, tt.wantWaitFlags) {
+				t.Errorf("deployWithStrategy() wait flags = %v, want %v", gotWaitFlags, tt.wantWaitFlags)
+			}
+		})
+	}
+}
+
+func TestStartAndVerifyProjectStartFailure(t *testing.T) {
+	d := NewDeployer(&config.RepoConfig{
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+	runner := &fakeRemote{
+		commandErrs: map[string]error{
+			"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml up -d": errors.New("boom"),
+		},
+		commandStderr: map[string]string{
+			"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml up -d": "bad start",
+		},
+	}
+	waitCalled := false
+	waitForHealth := func(_ commandRunner, _ string, _ string, _ string, _ string, _ logger) error {
+		waitCalled = true
+		return nil
+	}
+
+	err := d.startAndVerifyProject(runner, "/remote", &config.AppConfig{Name: "probe"}, "-p probe", "-f compose.yml -f docker-compose.override.yml", false, "probe", waitForHealth)
+	if err == nil || err.Error() != "deploy failed: boom\nbad start" {
+		t.Fatalf("startAndVerifyProject() error = %v", err)
+	}
+	if waitCalled {
+		t.Fatal("startAndVerifyProject() called waitForHealth after start failure")
+	}
+}
+
+func TestUploadExtraFiles(t *testing.T) {
+	d := NewDeployer(&config.RepoConfig{
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+	appDir := t.TempDir()
+	files := map[string]string{
+		"app.yml":     "skip",
+		"compose.yml": "skip",
+		"notes.txt":   "hello",
+		"config.json": "{}",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(appDir, name), []byte(content), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", name, err)
+		}
+	}
+
+	uploader := &fakeRemote{}
+	if err := d.uploadExtraFiles(uploader, appDir, "/remote"); err != nil {
+		t.Fatalf("uploadExtraFiles() error = %v", err)
+	}
+
+	wantUploads := []string{
+		appDir + "/config.json->/remote/config.json",
+		appDir + "/notes.txt->/remote/notes.txt",
+	}
+	if !reflect.DeepEqual(uploader.uploads, wantUploads) {
+		t.Errorf("uploadExtraFiles() uploads = %v, want %v", uploader.uploads, wantUploads)
+	}
+}
+
+func TestWriteEnvFile(t *testing.T) {
+	d := NewDeployer(&config.RepoConfig{
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+
+	tests := []struct {
+		name       string
+		app        *config.AppConfig
+		wantWrote  bool
+		wantSecret string
+	}{
+		{
+			name: "environment writes env file",
+			app: &config.AppConfig{
+				Environment: map[string]string{"DOMAIN": "example.com"},
+			},
+			wantWrote:  true,
+			wantSecret: "/remote/.env=DOMAIN=example.com\n",
+		},
+		{
+			name: "no environment and no secrets skips env file",
+			app:  &config.AppConfig{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writer := &fakeRemote{}
+			got, err := d.writeEnvFile(writer, "/remote", tt.app)
+			if err != nil {
+				t.Fatalf("writeEnvFile() error = %v", err)
+			}
+			if got != tt.wantWrote {
+				t.Fatalf("writeEnvFile() = %v, want %v", got, tt.wantWrote)
+			}
+			if tt.wantSecret == "" {
+				if len(writer.secretWrites) != 0 {
+					t.Fatalf("writeEnvFile() wrote unexpected secret files: %v", writer.secretWrites)
+				}
+				return
+			}
+			if !reflect.DeepEqual(writer.secretWrites, []string{tt.wantSecret}) {
+				t.Errorf("writeEnvFile() secret writes = %v, want %v", writer.secretWrites, []string{tt.wantSecret})
+			}
+		})
+	}
+}
+
+func TestLoginRegistry(t *testing.T) {
+	tests := []struct {
+		name      string
+		registry  config.RegistryConfig
+		wantCalls []string
+		wantStdin []string
+	}{
+		{
+			name: "configured registry logs in",
+			registry: config.RegistryConfig{
+				Server:   "ghcr.io",
+				Username: "alice",
+				Password: "secret",
+			},
+			wantCalls: []string{
+				"docker login 'ghcr.io' -u 'alice' --password-stdin",
+			},
+			wantStdin: []string{"secret"},
+		},
+		{
+			name:     "missing username skips login",
+			registry: config.RegistryConfig{Server: "ghcr.io"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := NewDeployer(&config.RepoConfig{
+				Cluster: &config.ClusterConfig{
+					Project:  "test",
+					Registry: tt.registry,
+				},
+			}, "")
+			runner := &fakeRemote{}
+			if err := d.loginRegistry(runner); err != nil {
+				t.Fatalf("loginRegistry() error = %v", err)
+			}
+			if !reflect.DeepEqual(runner.stdinCommands, tt.wantCalls) {
+				t.Errorf("loginRegistry() commands = %v, want %v", runner.stdinCommands, tt.wantCalls)
+			}
+			if !reflect.DeepEqual(runner.stdinPayloads, tt.wantStdin) {
+				t.Errorf("loginRegistry() stdin = %v, want %v", runner.stdinPayloads, tt.wantStdin)
+			}
+		})
+	}
+}
+
 func TestFetchSecretsEnvironmentOnly(t *testing.T) {
 	d := NewDeployer(&config.RepoConfig{
 		Cluster: &config.ClusterConfig{Project: "test"},
@@ -286,6 +544,44 @@ func TestFetchSecretsEnvironmentOnly(t *testing.T) {
 	if !strings.Contains(got, "LOG_LEVEL=info") {
 		t.Errorf("fetchSecrets() missing LOG_LEVEL, got:\n%s", got)
 	}
+}
+
+type fakeRemote struct {
+	commands      []string
+	commandStdout map[string]string
+	commandStderr map[string]string
+	commandErrs   map[string]error
+	stdinCommands []string
+	stdinPayloads []string
+	writes        []string
+	secretWrites  []string
+	uploads       []string
+}
+
+func (f *fakeRemote) RunCommand(cmd string) (string, string, error) {
+	f.commands = append(f.commands, cmd)
+	return f.commandStdout[cmd], f.commandStderr[cmd], f.commandErrs[cmd]
+}
+
+func (f *fakeRemote) RunCommandStdin(cmd, stdinData string) (string, string, error) {
+	f.stdinCommands = append(f.stdinCommands, cmd)
+	f.stdinPayloads = append(f.stdinPayloads, stdinData)
+	return "", "", nil
+}
+
+func (f *fakeRemote) WriteFile(remotePath, content string) error {
+	f.writes = append(f.writes, remotePath+"="+content)
+	return nil
+}
+
+func (f *fakeRemote) WriteFileSecret(remotePath, content string) error {
+	f.secretWrites = append(f.secretWrites, remotePath+"="+content)
+	return nil
+}
+
+func (f *fakeRemote) UploadFile(localPath, remotePath string) error {
+	f.uploads = append(f.uploads, localPath+"->"+remotePath)
+	return nil
 }
 
 func TestShellQuote(t *testing.T) {
