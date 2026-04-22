@@ -264,6 +264,122 @@ func TestAllDeploymentProjectFlags(t *testing.T) {
 	}
 }
 
+func TestStatusProjectFlags(t *testing.T) {
+	tests := []struct {
+		name       string
+		activeSlot string
+		want       []string
+	}{
+		{
+			name: "recreate-first when no active slot",
+			want: []string{
+				"-p probe",
+				"-p probe-blue",
+				"-p probe-green",
+			},
+		},
+		{
+			name:       "active blue checked before fallbacks",
+			activeSlot: "blue",
+			want: []string{
+				"-p probe-blue",
+				"-p probe",
+				"-p probe-green",
+			},
+		},
+		{
+			name:       "active green checked before fallbacks",
+			activeSlot: "green",
+			want: []string{
+				"-p probe-green",
+				"-p probe",
+				"-p probe-blue",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := statusProjectFlags("probe", tt.activeSlot)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("statusProjectFlags() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindProjectPS(t *testing.T) {
+	composeFiles := "-f compose.yml -f docker-compose.override.yml"
+	format := "{{.Name}}\t{{.Status}}"
+
+	tests := []struct {
+		name          string
+		activeSlot    string
+		commandStdout map[string]string
+		wantFlag      string
+		wantOutput    string
+		wantFound     bool
+		wantCommands  []string
+	}{
+		{
+			name:       "recreate finds stable project first",
+			activeSlot: "",
+			commandStdout: map[string]string{
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'": "probe-app-1\tUp 1 minute",
+			},
+			wantFlag:   "-p probe",
+			wantOutput: "probe-app-1\tUp 1 minute",
+			wantFound:  true,
+			wantCommands: []string{
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
+			},
+		},
+		{
+			name:       "falls back from stale active slot to stable project",
+			activeSlot: "green",
+			commandStdout: map[string]string{
+				"cd /remote && docker compose -p probe-green -f compose.yml -f docker-compose.override.yml ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'": "NOT_DEPLOYED",
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'":       "probe-app-1\tUp 1 minute",
+			},
+			wantFlag:   "-p probe",
+			wantOutput: "probe-app-1\tUp 1 minute",
+			wantFound:  true,
+			wantCommands: []string{
+				"cd /remote && docker compose -p probe-green -f compose.yml -f docker-compose.override.yml ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
+			},
+		},
+		{
+			name:       "falls back to legacy blue project when state is empty",
+			activeSlot: "",
+			commandStdout: map[string]string{
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'":      "NOT_DEPLOYED",
+				"cd /remote && docker compose -p probe-blue -f compose.yml -f docker-compose.override.yml ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'": "probe-blue-app-1\tUp 1 minute",
+			},
+			wantFlag:   "-p probe-blue",
+			wantOutput: "probe-blue-app-1\tUp 1 minute",
+			wantFound:  true,
+			wantCommands: []string{
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
+				"cd /remote && docker compose -p probe-blue -f compose.yml -f docker-compose.override.yml ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &fakeRemote{commandStdout: tt.commandStdout}
+			gotFlag, gotOutput, gotFound := findProjectPS(runner, "/remote", "probe", tt.activeSlot, composeFiles, format)
+			if gotFlag != tt.wantFlag || gotOutput != tt.wantOutput || gotFound != tt.wantFound {
+				t.Fatalf("findProjectPS() = (%q, %q, %v), want (%q, %q, %v)", gotFlag, gotOutput, gotFound, tt.wantFlag, tt.wantOutput, tt.wantFound)
+			}
+			if !reflect.DeepEqual(runner.commands, tt.wantCommands) {
+				t.Errorf("findProjectPS() commands = %v, want %v", runner.commands, tt.wantCommands)
+			}
+		})
+	}
+}
+
 func TestDeployWithStrategy(t *testing.T) {
 	d := NewDeployer(&config.RepoConfig{
 		Cluster: &config.ClusterConfig{Project: "test"},

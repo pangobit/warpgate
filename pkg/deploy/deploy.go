@@ -469,18 +469,11 @@ func (d *Deployer) Status(appName string) ([]NodeStatus, error) {
 			Slot:    state.ActiveSlot,
 		}
 
-		projectFlag, ok := activeProjectFlag(appName, app.Strategy, state.ActiveSlot)
+		composeFiles := "-f compose.yml -f docker-compose.override.yml"
+		_, stdout, ok := findProjectPS(client, remoteDir, appName, state.ActiveSlot, composeFiles, "{{.Name}}\t{{.Status}}")
 		if ok {
-			composeFiles := "-f compose.yml -f docker-compose.override.yml"
-			psCmd := fmt.Sprintf("cd %s && docker compose %s %s ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
-				remoteDir, projectFlag, composeFiles)
-			stdout, _, err := client.RunCommand(psCmd)
-			if err != nil || strings.TrimSpace(stdout) == "NOT_DEPLOYED" {
-				status.State = "not deployed"
-			} else {
-				status.State = "running"
-				status.Containers = strings.TrimSpace(stdout)
-			}
+			status.State = "running"
+			status.Containers = stdout
 		} else {
 			status.State = "not deployed"
 		}
@@ -599,24 +592,16 @@ func (d *Deployer) ClusterStatus() (*ClusterStatusResult, error) {
 				Slot:    state.ActiveSlot,
 			}
 
-			projectFlag, ok := activeProjectFlag(app.Name, app.Strategy, state.ActiveSlot)
+			composeFiles := "-f compose.yml -f docker-compose.override.yml"
+			_, stdout, ok := findProjectPS(client, remoteDir, app.Name, state.ActiveSlot, composeFiles, "{{.Service}}\t{{.Name}}\t{{.Status}}")
 			if !ok {
 				status.State = "not deployed"
 				result.Apps = append(result.Apps, status)
 				continue
 			}
 
-			composeFiles := "-f compose.yml -f docker-compose.override.yml"
-			psCmd := fmt.Sprintf("cd %s && docker compose %s %s ps --format '{{.Service}}\t{{.Name}}\t{{.Status}}' 2>/dev/null || echo 'NOT_DEPLOYED'",
-				remoteDir, projectFlag, composeFiles)
-			stdout, _, err := client.RunCommand(psCmd)
-			if err != nil || strings.TrimSpace(stdout) == "NOT_DEPLOYED" {
-				status.State = "not deployed"
-			} else {
-				trimmed := strings.TrimSpace(stdout)
-				status.State = ParseContainerHealth(trimmed)
-				status.Sidecars = parseSidecarStatuses(trimmed, app.Sidecars)
-			}
+			status.State = ParseContainerHealth(stdout)
+			status.Sidecars = parseSidecarStatuses(stdout, app.Sidecars)
 
 			// Populate shadow status if a shadow is deployed.
 			if state.ShadowVersion != "" {
@@ -942,6 +927,26 @@ func activeProjectFlag(appName string, strategy config.DeployStrategy, activeSlo
 	return deploymentProjectFlag(appName, strategy, activeSlot), true
 }
 
+func statusProjectFlags(appName, activeSlot string) []string {
+	var flags []string
+	add := func(flag string) {
+		for _, existing := range flags {
+			if existing == flag {
+				return
+			}
+		}
+		flags = append(flags, flag)
+	}
+
+	if activeSlot != "" {
+		add(deploymentProjectFlag(appName, config.StrategyBlueGreen, activeSlot))
+	}
+	add(deploymentProjectFlag(appName, config.StrategyRecreate, ""))
+	add(deploymentProjectFlag(appName, config.StrategyBlueGreen, "blue"))
+	add(deploymentProjectFlag(appName, config.StrategyBlueGreen, "green"))
+	return flags
+}
+
 func deploymentProjectFlag(appName string, strategy config.DeployStrategy, slot string) string {
 	projectName := appName
 	if strategy != config.StrategyRecreate {
@@ -956,6 +961,30 @@ func allDeploymentProjectFlags(appName string) []string {
 		deploymentProjectFlag(appName, config.StrategyBlueGreen, "blue"),
 		deploymentProjectFlag(appName, config.StrategyBlueGreen, "green"),
 	}
+}
+
+func queryProjectPS(runner commandRunner, remoteDir, projectFlag, composeFiles, format string) (string, bool) {
+	psCmd := fmt.Sprintf("cd %s && docker compose %s %s ps --format %s 2>/dev/null || echo 'NOT_DEPLOYED'",
+		remoteDir, projectFlag, composeFiles, shellQuote(format))
+	stdout, _, err := runner.RunCommand(psCmd)
+	if err != nil {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(stdout)
+	if trimmed == "" || trimmed == "NOT_DEPLOYED" {
+		return "", false
+	}
+	return trimmed, true
+}
+
+func findProjectPS(runner commandRunner, remoteDir, appName, activeSlot, composeFiles, format string) (string, string, bool) {
+	for _, projectFlag := range statusProjectFlags(appName, activeSlot) {
+		output, ok := queryProjectPS(runner, remoteDir, projectFlag, composeFiles, format)
+		if ok {
+			return projectFlag, output, true
+		}
+	}
+	return "", "", false
 }
 
 func (d *Deployer) uploadDeploymentFiles(fs deploymentFS, remoteDir, appDir string, composeContent []byte, override string) error {
