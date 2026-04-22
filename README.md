@@ -207,6 +207,10 @@ environment:
   LOG_LEVEL: info
   APP_ENV: production
 
+persistent_volumes:
+  - compose_name: api-data
+    name: warpgate-api-data
+
 sidecars:
   admin:
     port: 8081
@@ -224,6 +228,7 @@ Fields:
 - `secrets_prefix` tells Warpgate which SecretSauce keys to fetch.
 - `port` is the container port used for app-level routing metadata.
 - `strategy` may be `blue-green` or `recreate`.
+- `persistent_volumes` remaps compose volume keys to stable Docker volume names managed by Warpgate.
 - `environment` adds non-secret key/value pairs to the generated `.env` file during deploy.
 - `source` can be used instead of a local `compose.yml` to fetch a compose file from GitHub.
 
@@ -270,6 +275,7 @@ Deploy-time behavior:
 - If `app.yml` has a local `compose.yml`, Warpgate uploads it to the target node.
 - If `app.yml` uses `source`, Warpgate fetches the compose file from GitHub instead.
 - Warpgate writes a `docker-compose.override.yml` that currently injects the tagged image for the main service and `extra_hosts` entries for internal hostnames.
+- If `persistent_volumes` is set, Warpgate also injects top-level `volumes:` name overrides so named volumes stay stable across blue/green slot changes.
 - If `environment` or `secrets_prefix` is set, Warpgate writes a temporary `.env` file and passes `--env-file .env` to `docker compose`.
 
 Health checks matter:
@@ -288,12 +294,25 @@ Warpgate supports two strategies:
 
 `recreate` stops the old slot before starting the new one. Use it when your compose file binds host ports and both slots cannot run at the same time.
 
+For stateful apps that use SQLite or another single-writer local store, pair `recreate` with `persistent_volumes` so both slots resolve to the same Docker volume name without running concurrently.
+
 Example:
 
 ```yaml
 image: ghcr.io/acme/web
 port: 8080
 strategy: recreate
+```
+
+Named volume example:
+
+```yaml
+image: ghcr.io/acme/worker
+strategy: recreate
+
+persistent_volumes:
+  - compose_name: worker-data
+    name: warpgate-worker-data
 ```
 
 If you keep host `ports:` mappings in your compose file, `recreate` is usually the safer choice.

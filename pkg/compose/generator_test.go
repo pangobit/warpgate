@@ -168,6 +168,31 @@ func TestGenerateOverride(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "persistent volumes remap compose volume names",
+			app: &config.AppConfig{
+				Name:    "probe",
+				Image:   "ghcr.io/org/probe",
+				Version: "v1.0.0",
+				PersistentVolumes: []config.PersistentVolumeConfig{
+					{ComposeName: "probe-data", Name: "warpgate-probe-data"},
+				},
+			},
+			compose: `services:
+  probe:
+    image: ghcr.io/org/probe
+    volumes:
+      - probe-data:/data
+
+volumes:
+  probe-data:
+`,
+			check: func(t *testing.T, o OverrideFile, _ string) {
+				if o.Volumes["probe-data"].Name != "warpgate-probe-data" {
+					t.Errorf("expected persistent volume name override, got %q", o.Volumes["probe-data"].Name)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

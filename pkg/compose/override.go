@@ -13,6 +13,8 @@ import (
 type OverrideFile struct {
 	// Services maps service names to their override definitions.
 	Services map[string]ServiceOverride `yaml:"services"`
+	// Volumes remaps compose volume keys to stable Docker volume names.
+	Volumes map[string]VolumeOverride `yaml:"volumes,omitempty"`
 }
 
 // ServiceOverride holds the fields injected by warpgate into a compose override.
@@ -23,6 +25,12 @@ type ServiceOverride struct {
 	ExtraHosts []string `yaml:"extra_hosts,omitempty"`
 	// Labels sets Docker container labels (used by shadow overrides to disable public Traefik).
 	Labels map[string]string `yaml:"labels,omitempty"`
+}
+
+// VolumeOverride holds the fields injected into top-level compose volume definitions.
+type VolumeOverride struct {
+	// Name is the actual Docker volume name that Compose should use.
+	Name string `yaml:"name,omitempty"`
 }
 
 // Network represents a Docker Compose network definition.
@@ -77,6 +85,12 @@ func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig
 
 	override := &OverrideFile{
 		Services: services,
+	}
+	if len(app.PersistentVolumes) > 0 {
+		override.Volumes = make(map[string]VolumeOverride, len(app.PersistentVolumes))
+		for _, volume := range app.PersistentVolumes {
+			override.Volumes[volume.ComposeName] = VolumeOverride{Name: volume.Name}
+		}
 	}
 
 	yamlBytes, err := yaml.Marshal(override)
