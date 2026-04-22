@@ -13,6 +13,9 @@ import (
 // validAppName matches DNS-safe names: lowercase alphanumeric and hyphens, not starting/ending with a hyphen.
 var validAppName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
+// validVolumeName matches conservative Docker-compatible volume names.
+var validVolumeName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
 // ClusterConfig is the cluster-level configuration loaded from cluster.yml.
 type ClusterConfig struct {
 	// Version is the config schema version.
@@ -165,6 +168,14 @@ type SourceConfig struct {
 	ComposePath string `yaml:"compose_path,omitempty"`
 }
 
+// PersistentVolumeConfig remaps a compose volume key to a stable Docker volume name.
+type PersistentVolumeConfig struct {
+	// ComposeName is the volume key declared in the source compose file.
+	ComposeName string `yaml:"compose_name"`
+	// Name is the actual Docker volume name to use on the target node.
+	Name string `yaml:"name"`
+}
+
 // AppConfig defines an application's deployment metadata, loaded from app.yml.
 type AppConfig struct {
 	// Kind identifies the config type, expected to be "warpgate/app".
@@ -190,6 +201,8 @@ type AppConfig struct {
 	// Source specifies a remote GitHub repo to fetch compose from. If set, compose.yml
 	// is not expected locally and will be fetched at deploy time.
 	Source *SourceConfig `yaml:"source,omitempty"`
+	// PersistentVolumes remaps compose volume keys to stable Docker volume names.
+	PersistentVolumes []PersistentVolumeConfig `yaml:"persistent_volumes,omitempty"`
 	// Environment provides non-secret environment variables that are merged with secrets
 	// and written to the .env file at deploy time. Secrets take precedence on collision.
 	Environment map[string]string `yaml:"environment,omitempty"`
@@ -324,6 +337,31 @@ func ValidateApp(app *AppConfig) error {
 		// valid
 	default:
 		return fmt.Errorf("app %s: invalid strategy %q (must be \"blue-green\" or \"recreate\")", app.Name, app.Strategy)
+	}
+
+	seenComposeNames := make(map[string]struct{}, len(app.PersistentVolumes))
+	seenVolumeNames := make(map[string]struct{}, len(app.PersistentVolumes))
+	for _, volume := range app.PersistentVolumes {
+		if volume.ComposeName == "" {
+			return fmt.Errorf("app %s: persistent_volumes.compose_name is required", app.Name)
+		}
+		if volume.Name == "" {
+			return fmt.Errorf("app %s: persistent_volumes.name is required", app.Name)
+		}
+		if !validVolumeName.MatchString(volume.ComposeName) {
+			return fmt.Errorf("app %s: persistent_volumes.compose_name %q is invalid", app.Name, volume.ComposeName)
+		}
+		if !validVolumeName.MatchString(volume.Name) {
+			return fmt.Errorf("app %s: persistent_volumes.name %q is invalid", app.Name, volume.Name)
+		}
+		if _, exists := seenComposeNames[volume.ComposeName]; exists {
+			return fmt.Errorf("app %s: duplicate persistent_volumes.compose_name %q", app.Name, volume.ComposeName)
+		}
+		if _, exists := seenVolumeNames[volume.Name]; exists {
+			return fmt.Errorf("app %s: duplicate persistent_volumes.name %q", app.Name, volume.Name)
+		}
+		seenComposeNames[volume.ComposeName] = struct{}{}
+		seenVolumeNames[volume.Name] = struct{}{}
 	}
 
 	expose := app.EffectiveExpose()

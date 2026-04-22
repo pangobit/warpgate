@@ -157,6 +157,35 @@ func TestGenerateShadowOverride(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "does not inject persistent volume overrides into shadow deploys",
+			app: &config.AppConfig{
+				Name:    "probe",
+				Image:   "ghcr.io/org/probe",
+				Version: "v1.0.0",
+				PersistentVolumes: []config.PersistentVolumeConfig{
+					{ComposeName: "probe-data", Name: "warpgate-probe-data"},
+				},
+			},
+			version: "v1.1.0",
+			compose: `services:
+  probe:
+    image: ghcr.io/org/probe
+    volumes:
+      - probe-data:/data
+
+volumes:
+  probe-data:
+`,
+			check: func(t *testing.T, o OverrideFile, raw string) {
+				if len(o.Volumes) != 0 {
+					t.Errorf("expected no top-level volume overrides in shadow deploy, got %+v", o.Volumes)
+				}
+				if strings.Contains(raw, "warpgate-probe-data") {
+					t.Error("shadow override must not pin live persistent volume names")
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

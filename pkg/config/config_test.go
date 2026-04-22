@@ -214,6 +214,85 @@ func TestValidateApp(t *testing.T) {
 			app:     AppConfig{Name: "app", Image: "img", Port: 8080},
 			wantErr: false,
 		},
+		{
+			name: "persistent volumes valid",
+			app: AppConfig{
+				Name:  "app",
+				Image: "img",
+				PersistentVolumes: []PersistentVolumeConfig{
+					{ComposeName: "app-data", Name: "warpgate-app-data"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "persistent volume missing compose name",
+			app: AppConfig{
+				Name:  "app",
+				Image: "img",
+				PersistentVolumes: []PersistentVolumeConfig{
+					{Name: "warpgate-app-data"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "persistent volume missing name",
+			app: AppConfig{
+				Name:  "app",
+				Image: "img",
+				PersistentVolumes: []PersistentVolumeConfig{
+					{ComposeName: "app-data"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "persistent volume invalid compose name",
+			app: AppConfig{
+				Name:  "app",
+				Image: "img",
+				PersistentVolumes: []PersistentVolumeConfig{
+					{ComposeName: "app data", Name: "warpgate-app-data"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "persistent volume invalid name",
+			app: AppConfig{
+				Name:  "app",
+				Image: "img",
+				PersistentVolumes: []PersistentVolumeConfig{
+					{ComposeName: "app-data", Name: "warpgate/app/data"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "persistent volume duplicate compose name",
+			app: AppConfig{
+				Name:  "app",
+				Image: "img",
+				PersistentVolumes: []PersistentVolumeConfig{
+					{ComposeName: "app-data", Name: "warpgate-app-data-a"},
+					{ComposeName: "app-data", Name: "warpgate-app-data-b"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "persistent volume duplicate name",
+			app: AppConfig{
+				Name:  "app",
+				Image: "img",
+				PersistentVolumes: []PersistentVolumeConfig{
+					{ComposeName: "app-data-a", Name: "warpgate-app-data"},
+					{ComposeName: "app-data-b", Name: "warpgate-app-data"},
+				},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -532,9 +611,8 @@ func TestLoadAppConfigWithSource(t *testing.T) {
 		wantSource      bool
 		wantRepo        string
 		wantComposePath string
-		wantEnvCount    int
-		wantEnvKey      string
-		wantEnvVal      string
+		wantEnvironment map[string]string
+		wantVolumes     []PersistentVolumeConfig
 	}{
 		{
 			name: "full source and environment",
@@ -542,6 +620,9 @@ func TestLoadAppConfigWithSource(t *testing.T) {
 source:
   repo: github.com/pangobit/myapp
   compose_path: deploy/compose.yml
+persistent_volumes:
+  - compose_name: myapp-data
+    name: warpgate-myapp-data
 environment:
   DOMAIN: example.com
   AUTH_HOST: id.example.com
@@ -549,9 +630,13 @@ environment:
 			wantSource:      true,
 			wantRepo:        "github.com/pangobit/myapp",
 			wantComposePath: "deploy/compose.yml",
-			wantEnvCount:    2,
-			wantEnvKey:      "DOMAIN",
-			wantEnvVal:      "example.com",
+			wantEnvironment: map[string]string{
+				"DOMAIN":    "example.com",
+				"AUTH_HOST": "id.example.com",
+			},
+			wantVolumes: []PersistentVolumeConfig{
+				{ComposeName: "myapp-data", Name: "warpgate-myapp-data"},
+			},
 		},
 		{
 			name: "minimal source",
@@ -562,29 +647,36 @@ source:
 			wantSource:      true,
 			wantRepo:        "github.com/pangobit/myapp",
 			wantComposePath: "",
-			wantEnvCount:    0,
 		},
 		{
-			name: "source with environment",
+			name: "source with environment and multiple persistent volumes",
 			yaml: `image: ghcr.io/org/myapp
 source:
   repo: pangobit/app
+persistent_volumes:
+  - compose_name: data
+    name: warpgate-myapp-data
+  - compose_name: cache
+    name: warpgate-myapp-cache
 environment:
   KEY: val
 `,
-			wantSource:   true,
-			wantRepo:     "pangobit/app",
-			wantEnvCount: 1,
-			wantEnvKey:   "KEY",
-			wantEnvVal:   "val",
+			wantSource: true,
+			wantRepo:   "pangobit/app",
+			wantEnvironment: map[string]string{
+				"KEY": "val",
+			},
+			wantVolumes: []PersistentVolumeConfig{
+				{ComposeName: "data", Name: "warpgate-myapp-data"},
+				{ComposeName: "cache", Name: "warpgate-myapp-cache"},
+			},
 		},
 		{
 			name: "no source is valid",
 			yaml: `image: ghcr.io/org/myapp
 version: v1.0.0
 `,
-			wantSource:   false,
-			wantEnvCount: 0,
+			wantSource: false,
 		},
 	}
 
@@ -620,12 +712,20 @@ version: v1.0.0
 			if app.Source.ComposePath != tt.wantComposePath {
 				t.Errorf("Source.ComposePath = %q, want %q", app.Source.ComposePath, tt.wantComposePath)
 			}
-			if len(app.Environment) != tt.wantEnvCount {
-				t.Errorf("len(Environment) = %d, want %d", len(app.Environment), tt.wantEnvCount)
+			if len(app.Environment) != len(tt.wantEnvironment) {
+				t.Errorf("len(Environment) = %d, want %d", len(app.Environment), len(tt.wantEnvironment))
 			}
-			if tt.wantEnvKey != "" {
-				if app.Environment[tt.wantEnvKey] != tt.wantEnvVal {
-					t.Errorf("Environment[%q] = %q, want %q", tt.wantEnvKey, app.Environment[tt.wantEnvKey], tt.wantEnvVal)
+			if len(app.PersistentVolumes) != len(tt.wantVolumes) {
+				t.Errorf("len(PersistentVolumes) = %d, want %d", len(app.PersistentVolumes), len(tt.wantVolumes))
+			}
+			for key, want := range tt.wantEnvironment {
+				if app.Environment[key] != want {
+					t.Errorf("Environment[%q] = %q, want %q", key, app.Environment[key], want)
+				}
+			}
+			for i, want := range tt.wantVolumes {
+				if app.PersistentVolumes[i] != want {
+					t.Errorf("PersistentVolumes[%d] = %+v, want %+v", i, app.PersistentVolumes[i], want)
 				}
 			}
 		})
