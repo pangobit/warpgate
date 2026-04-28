@@ -260,11 +260,6 @@ type AppConfig struct {
 	Environment map[string]string `yaml:"environment,omitempty"`
 }
 
-// EffectiveComposeRef returns the configured compose source ref.
-func (a *AppConfig) EffectiveComposeRef() string {
-	return a.ComposeRef
-}
-
 // EffectiveReleaseServices returns the first-class services that make up a release.
 func (a *AppConfig) EffectiveReleaseServices() map[string]ReleaseServiceConfig {
 	services := make(map[string]ReleaseServiceConfig, len(a.Release.Services))
@@ -390,7 +385,7 @@ func ValidateApp(app *AppConfig) error {
 		return fmt.Errorf("app %s: release.services is required", app.Name)
 	}
 
-	if app.Source != nil && app.EffectiveComposeRef() == "" {
+	if app.Source != nil && app.ComposeRef == "" {
 		return fmt.Errorf("app %s: compose_ref is required when source is set", app.Name)
 	}
 

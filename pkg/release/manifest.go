@@ -58,7 +58,7 @@ type ServiceManifest struct {
 
 // Build creates a release manifest for an app and compose snapshot.
 func Build(app *config.AppConfig, composeContent []byte, now time.Time) *Manifest {
-	composeRev := app.EffectiveComposeRef()
+	composeRev := app.ComposeRef
 	if app.Source == nil {
 		composeRev = "sha256:" + hashBytes(composeContent)
 	}

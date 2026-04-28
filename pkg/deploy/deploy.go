@@ -143,9 +143,9 @@ func (d *Deployer) deployManifest(app *config.AppConfig, manifest *release.Manif
 		fmt.Println(override)
 		fmt.Printf("Targets: %v\n", targetNodes)
 		if app.Source != nil {
-			fmt.Printf("Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.EffectiveComposeRef(), app.Source.ComposePath)
+			fmt.Printf("Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.ComposeRef, app.Source.ComposePath)
 		}
-		services := manifestServices(manifest)
+		services := manifest.Services
 		for _, serviceName := range sortedManifestServiceNames(services) {
 			service := services[serviceName]
 			if service.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
@@ -212,8 +212,8 @@ func (d *Deployer) loadComposeContent(app *config.AppConfig) (string, []byte, er
 	composePath := d.Repo.AppComposePath(app.Name)
 
 	if app.Source != nil {
-		d.log.Infof("Fetching compose from %s@%s...", app.Source.Repo, app.EffectiveComposeRef())
-		composeContent, err := FetchComposeFromSource(app.Source, app.EffectiveComposeRef(), d.GitHubToken)
+		d.log.Infof("Fetching compose from %s@%s...", app.Source.Repo, app.ComposeRef)
+		composeContent, err := FetchComposeFromSource(app.Source, app.ComposeRef, d.GitHubToken)
 		if err != nil {
 			return "", nil, fmt.Errorf("failed to fetch remote compose: %w", err)
 		}
@@ -873,7 +873,7 @@ func releaseNeedsEnvFile(manifest *release.Manifest, secretsServer string) bool 
 
 func releaseEnvFileMap(manifest *release.Manifest, secretsServer string) map[string]bool {
 	envFiles := make(map[string]bool)
-	for serviceName, service := range manifestServices(manifest) {
+	for serviceName, service := range manifest.Services {
 		if len(service.Environment) > 0 {
 			envFiles[serviceName] = true
 		}
@@ -1031,7 +1031,7 @@ func (d *Deployer) uploadDeploymentFiles(fs deploymentFS, remoteDir, appDir stri
 }
 
 func (d *Deployer) writeReleaseEnvFile(writer fileWriter, remoteDir string, manifest *release.Manifest) (bool, error) {
-	services := manifestServices(manifest)
+	services := manifest.Services
 	envFiles := releaseEnvFileMap(manifest, d.Repo.Cluster.Secrets.Server)
 	if len(envFiles) == 0 {
 		return false, nil
@@ -1202,10 +1202,6 @@ func (d *Deployer) fetchServiceEnv(serviceName string, environment map[string]st
 	return secrets.FormatDotEnv(merged), merged, nil
 }
 
-func manifestServices(manifest *release.Manifest) map[string]release.ServiceManifest {
-	return manifest.Services
-}
-
 func sortedManifestServiceNames(services map[string]release.ServiceManifest) []string {
 	names := make([]string, 0, len(services))
 	for name := range services {
@@ -1229,7 +1225,7 @@ func serviceEnvFile(serviceName string) string {
 }
 
 func releaseEnvPaths(remoteDir string, manifest *release.Manifest) []string {
-	services := manifestServices(manifest)
+	services := manifest.Services
 	paths := []string{remoteDir + "/.env"}
 	for _, serviceName := range sortedManifestServiceNames(services) {
 		paths = append(paths, remoteDir+"/"+serviceEnvFile(serviceName))
