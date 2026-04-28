@@ -1,4 +1,7 @@
-image: traefik/whoami
-image_tag: v1.10.3
 targets: [node-1]
-port: 80
+release:
+  services:
+    hello:
+      image: traefik/whoami
+      image_tag: v1.10.3
+      port: 80

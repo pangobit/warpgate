@@ -13,18 +13,15 @@ func TestGenerateShadowOverride(t *testing.T) {
 		name          string
 		app           *config.AppConfig
 		version       string
+		hasEnvFile    bool
 		internalHosts []string
 		nodePrivateIP string
 		compose       string
 		check         func(t *testing.T, override OverrideFile, raw string)
 	}{
 		{
-			name: "sets traefik.enable=false on all services",
-			app: &config.AppConfig{
-				Name:    "client",
-				Image:   "ghcr.io/org/client",
-				Version: "v1.0.0",
-			},
+			name:    "sets traefik.enable=false on all services",
+			app:     releaseApp("client", "ghcr.io/org/client", "v1.0.0"),
 			version: "v2.0.0",
 			compose: `services:
   client:
@@ -45,12 +42,8 @@ func TestGenerateShadowOverride(t *testing.T) {
 			},
 		},
 		{
-			name: "sets image tag from shadow version",
-			app: &config.AppConfig{
-				Name:    "client",
-				Image:   "ghcr.io/org/client",
-				Version: "v1.0.0",
-			},
+			name:    "sets image tag from shadow version",
+			app:     releaseApp("client", "ghcr.io/org/client", "v1.0.0"),
 			version: "v2.0.0",
 			compose: `services:
   client:
@@ -63,12 +56,8 @@ func TestGenerateShadowOverride(t *testing.T) {
 			},
 		},
 		{
-			name: "does not set image on non-primary services",
-			app: &config.AppConfig{
-				Name:    "client",
-				Image:   "ghcr.io/org/client",
-				Version: "v1.0.0",
-			},
+			name:    "does not set image on non-primary services",
+			app:     releaseApp("client", "ghcr.io/org/client", "v1.0.0"),
 			version: "v2.0.0",
 			compose: `services:
   client:
@@ -85,12 +74,14 @@ func TestGenerateShadowOverride(t *testing.T) {
 		{
 			name: "adds shadow hostname to extra_hosts when internal expose set",
 			app: &config.AppConfig{
-				Name:    "client",
-				Image:   "ghcr.io/org/client",
-				Version: "v1.0.0",
-				Expose: &config.ExposeConfig{
-					Internal: &config.InternalExpose{Hostname: "client.internal"},
-				},
+				Name: "client",
+				Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+					"client": {
+						Image:  "ghcr.io/org/client",
+						Port:   8080,
+						Expose: &config.ExposeConfig{Internal: &config.InternalExpose{Hostname: "client.internal"}},
+					},
+				}},
 			},
 			version:       "v2.0.0",
 			internalHosts: []string{"client.internal", "auth.internal"},
@@ -117,12 +108,8 @@ func TestGenerateShadowOverride(t *testing.T) {
 			},
 		},
 		{
-			name: "no shadow hostname when no internal expose",
-			app: &config.AppConfig{
-				Name:    "worker",
-				Image:   "ghcr.io/org/worker",
-				Version: "v1.0.0",
-			},
+			name:          "no shadow hostname when no internal expose",
+			app:           releaseApp("worker", "ghcr.io/org/worker", "v1.0.0"),
 			version:       "v1.1.0",
 			internalHosts: []string{"worker.internal"},
 			nodePrivateIP: "100.64.0.10",
@@ -141,11 +128,8 @@ func TestGenerateShadowOverride(t *testing.T) {
 			},
 		},
 		{
-			name: "defaults to latest when version is empty",
-			app: &config.AppConfig{
-				Name:  "app",
-				Image: "ghcr.io/org/app",
-			},
+			name:    "defaults to latest when version is empty",
+			app:     releaseApp("app", "ghcr.io/org/app", ""),
 			version: "",
 			compose: `services:
   app:
@@ -160,9 +144,10 @@ func TestGenerateShadowOverride(t *testing.T) {
 		{
 			name: "does not inject persistent volume overrides into shadow deploys",
 			app: &config.AppConfig{
-				Name:    "probe",
-				Image:   "ghcr.io/org/probe",
-				Version: "v1.0.0",
+				Name: "probe",
+				Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+					"probe": {Image: "ghcr.io/org/probe", ImageTag: "v1.0.0"},
+				}},
 				PersistentVolumes: []config.PersistentVolumeConfig{
 					{ComposeName: "probe-data", Name: "warpgate-probe-data"},
 				},
@@ -186,11 +171,56 @@ volumes:
 				}
 			},
 		},
+		{
+			name: "release services get their own env_file when env file is available",
+			app: &config.AppConfig{
+				Name: "client",
+				Release: config.ReleaseConfig{
+					Services: map[string]config.ReleaseServiceConfig{
+						"client": {
+							Image: "ghcr.io/org/client",
+							Environment: map[string]string{
+								"LOG_LEVEL": "debug",
+							},
+						},
+						"admin": {
+							Image:         "ghcr.io/org/admin",
+							SecretsPrefix: "client/admin",
+						},
+					},
+				},
+			},
+			version:    "v2.0.0",
+			hasEnvFile: true,
+			compose: `services:
+  client:
+    image: ghcr.io/org/client
+  admin:
+    image: ghcr.io/org/admin
+  redis:
+    image: redis:7
+`,
+			check: func(t *testing.T, o OverrideFile, _ string) {
+				if len(o.Services["client"].EnvFile) != 1 || o.Services["client"].EnvFile[0] != ".env.client" {
+					t.Errorf("expected client env_file .env.client, got %v", o.Services["client"].EnvFile)
+				}
+				if len(o.Services["admin"].EnvFile) != 1 || o.Services["admin"].EnvFile[0] != ".env.admin" {
+					t.Errorf("expected admin env_file .env.admin, got %v", o.Services["admin"].EnvFile)
+				}
+				if len(o.Services["redis"].EnvFile) != 0 {
+					t.Errorf("redis should not get env_file, got %v", o.Services["redis"].EnvFile)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := GenerateShadowOverride(tt.app, tt.version, tt.internalHosts, tt.nodePrivateIP, tt.compose)
+			envFiles := map[string]bool{}
+			if tt.hasEnvFile {
+				envFiles = map[string]bool{"client": true, "admin": true}
+			}
+			raw, err := GenerateShadowOverrideWithEnvFiles(tt.app, tt.version, envFiles, tt.internalHosts, tt.nodePrivateIP, tt.compose)
 			if err != nil {
 				t.Fatalf("GenerateShadowOverride() error: %v", err)
 			}
@@ -206,11 +236,7 @@ volumes:
 }
 
 func TestGenerateShadowOverrideInvalidCompose(t *testing.T) {
-	app := &config.AppConfig{
-		Name:    "api",
-		Image:   "ghcr.io/org/api",
-		Version: "v1.0.0",
-	}
+	app := releaseApp("api", "ghcr.io/org/api", "v1.0.0")
 
 	_, err := GenerateShadowOverride(app, "v2.0.0", nil, "100.64.0.10", "not: valid: yaml: [")
 	if err == nil {
@@ -219,11 +245,7 @@ func TestGenerateShadowOverrideInvalidCompose(t *testing.T) {
 }
 
 func TestGenerateShadowOverrideFallsBackToAppName(t *testing.T) {
-	app := &config.AppConfig{
-		Name:    "api",
-		Image:   "ghcr.io/org/api",
-		Version: "v1.0.0",
-	}
+	app := releaseApp("api", "ghcr.io/org/api", "v1.0.0")
 
 	raw, err := GenerateShadowOverride(app, "v2.0.0", nil, "100.64.0.10", `services: {}`)
 	if err != nil {

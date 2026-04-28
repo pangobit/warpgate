@@ -54,16 +54,30 @@ func acmeChallenge(cfg config.ACMEConfig) string {
 // nodePrivateIP is the IP address containers use to resolve internal hostnames.
 // Traefik labels and network configuration are authored directly in each app's compose.yml.
 func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
-	return generateOverride(app, app.EffectiveImageRef(), needsReleaseEnvFile(app.Environment, app.SecretsPrefix), networking, internalHosts, nodePrivateIP, composeContent)
+	services := make(map[string]release.ServiceManifest, len(app.EffectiveReleaseServices()))
+	for serviceName, service := range app.EffectiveReleaseServices() {
+		services[serviceName] = release.ServiceManifest{
+			ImageRef:      service.EffectiveImageRef(),
+			ImageTag:      service.EffectiveImageTag(),
+			ImageDigest:   service.ImageDigest,
+			Environment:   service.Environment,
+			SecretsPrefix: service.SecretsPrefix,
+		}
+	}
+	manifest := &release.Manifest{
+		App:      app.Name,
+		Services: services,
+	}
+	return generateOverride(app, manifest, configEnvFiles(app), networking, internalHosts, nodePrivateIP, composeContent)
 }
 
-// GenerateReleaseOverrideWithEnvFile creates an override for a release and
-// explicit env file availability.
-func GenerateReleaseOverrideWithEnvFile(app *config.AppConfig, manifest *release.Manifest, hasEnvFile bool, networking *config.NetworkingConfig, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
-	return generateOverride(app, manifest.ImageRef, hasEnvFile, networking, internalHosts, nodePrivateIP, composeContent)
+// GenerateReleaseOverrideWithEnvFiles creates an override for a release and the
+// exact services that have env files available.
+func GenerateReleaseOverrideWithEnvFiles(app *config.AppConfig, manifest *release.Manifest, envFiles map[string]bool, networking *config.NetworkingConfig, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
+	return generateOverride(app, manifest, envFiles, networking, internalHosts, nodePrivateIP, composeContent)
 }
 
-func generateOverride(app *config.AppConfig, imageRef string, hasEnvFile bool, networking *config.NetworkingConfig, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
+func generateOverride(app *config.AppConfig, manifest *release.Manifest, envFiles map[string]bool, networking *config.NetworkingConfig, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
 	serviceNames, err := ParseComposeServices(composeContent)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse compose services: %w", err)
@@ -84,10 +98,10 @@ func generateOverride(app *config.AppConfig, imageRef string, hasEnvFile bool, n
 			ExtraHosts: extraHosts,
 		}
 
-		if svcName == app.Name {
-			svc.Image = imageRef
-			if hasEnvFile {
-				svc.EnvFile = []string{".env"}
+		if service, ok := manifestService(manifest, svcName); ok {
+			svc.Image = service.ImageRef
+			if envFiles[svcName] {
+				svc.EnvFile = []string{serviceEnvFile(svcName)}
 			}
 		}
 
@@ -112,8 +126,9 @@ func generateOverride(app *config.AppConfig, imageRef string, hasEnvFile bool, n
 	return string(yamlBytes), nil
 }
 
-func needsReleaseEnvFile(env map[string]string, secretsPrefix string) bool {
-	return len(env) > 0 || secretsPrefix != ""
+func manifestService(manifest *release.Manifest, serviceName string) (release.ServiceManifest, bool) {
+	service, ok := manifest.Services[serviceName]
+	return service, ok
 }
 
 // GenerateShadowOverride creates a docker-compose.shadow-override.yml that disables
@@ -121,6 +136,12 @@ func needsReleaseEnvFile(env map[string]string, secretsPrefix string) bool {
 // configures extra_hosts for internal service discovery. The shadow hostname
 // (shadow-{app}.internal) is added to extra_hosts for direct access over Tailscale.
 func GenerateShadowOverride(app *config.AppConfig, version string, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
+	return GenerateShadowOverrideWithEnvFiles(app, version, configEnvFiles(app), internalHosts, nodePrivateIP, composeContent)
+}
+
+// GenerateShadowOverrideWithEnvFiles creates a shadow override with exact service
+// env file availability.
+func GenerateShadowOverrideWithEnvFiles(app *config.AppConfig, version string, envFiles map[string]bool, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
 	if version == "" {
 		version = "latest"
 	}
@@ -137,8 +158,10 @@ func GenerateShadowOverride(app *config.AppConfig, version string, internalHosts
 	for _, host := range internalHosts {
 		extraHosts = append(extraHosts, host+":"+nodePrivateIP)
 	}
-	if ie := app.EffectiveExpose().Internal; ie != nil {
-		extraHosts = append(extraHosts, "shadow-"+ie.Hostname+":"+nodePrivateIP)
+	for _, service := range app.Release.Services {
+		if ie := service.EffectiveExpose().Internal; ie != nil {
+			extraHosts = append(extraHosts, "shadow-"+ie.Hostname+":"+nodePrivateIP)
+		}
 	}
 
 	labels := map[string]string{
@@ -146,13 +169,17 @@ func GenerateShadowOverride(app *config.AppConfig, version string, internalHosts
 	}
 
 	services := make(map[string]ServiceOverride)
+	releaseServices := app.EffectiveReleaseServices()
 	for _, svcName := range serviceNames {
 		svc := ServiceOverride{
 			ExtraHosts: extraHosts,
 			Labels:     labels,
 		}
-		if svcName == app.Name {
-			svc.Image = app.Image + ":" + version
+		if service, ok := releaseServices[svcName]; ok {
+			svc.Image = service.Image + ":" + version
+			if envFiles[svcName] {
+				svc.EnvFile = []string{serviceEnvFile(svcName)}
+			}
 		}
 		services[svcName] = svc
 	}
@@ -167,6 +194,24 @@ func GenerateShadowOverride(app *config.AppConfig, version string, internalHosts
 	}
 
 	return string(yamlBytes), nil
+}
+
+func serviceEnvFile(serviceName string) string {
+	return ".env." + serviceName
+}
+
+func configServiceNeedsEnvFile(service config.ReleaseServiceConfig) bool {
+	return len(service.Environment) > 0 || service.SecretsPrefix != ""
+}
+
+func configEnvFiles(app *config.AppConfig) map[string]bool {
+	envFiles := make(map[string]bool)
+	for serviceName, service := range app.EffectiveReleaseServices() {
+		if configServiceNeedsEnvFile(service) {
+			envFiles[serviceName] = true
+		}
+	}
+	return envFiles
 }
 
 // GenerateTraefikCompose creates the public Traefik service compose file for bootstrap.

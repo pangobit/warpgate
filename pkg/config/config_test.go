@@ -49,70 +49,88 @@ func TestGetTargetNodes(t *testing.T) {
 	}
 }
 
-func TestAppConfigEffectiveReleaseInputs(t *testing.T) {
+func TestReleaseServiceConfigEffectiveImageRef(t *testing.T) {
 	tests := []struct {
-		name           string
-		app            AppConfig
-		wantImageTag   string
-		wantComposeRef string
-		wantImageRef   string
+		name         string
+		service      ReleaseServiceConfig
+		wantImageTag string
+		wantImageRef string
 	}{
 		{
-			name: "new fields",
-			app: AppConfig{
-				Image:      "ghcr.io/org/app",
-				ImageTag:   "v2.0.0",
-				ComposeRef: "compose-main",
+			name: "image tag",
+			service: ReleaseServiceConfig{
+				Image:    "ghcr.io/org/app",
+				ImageTag: "v2.0.0",
 			},
-			wantImageTag:   "v2.0.0",
-			wantComposeRef: "compose-main",
-			wantImageRef:   "ghcr.io/org/app:v2.0.0",
+			wantImageTag: "v2.0.0",
+			wantImageRef: "ghcr.io/org/app:v2.0.0",
 		},
 		{
 			name: "digest image ref",
-			app: AppConfig{
+			service: ReleaseServiceConfig{
 				Image:       "ghcr.io/org/app",
 				ImageTag:    "v2.0.0",
 				ImageDigest: "sha256:abc123",
 			},
-			wantImageTag:   "v2.0.0",
-			wantComposeRef: "v2.0.0",
-			wantImageRef:   "ghcr.io/org/app@sha256:abc123",
-		},
-		{
-			name: "legacy version fallback",
-			app: AppConfig{
-				Image:   "ghcr.io/org/app",
-				Version: "v1.0.0",
-			},
-			wantImageTag:   "v1.0.0",
-			wantComposeRef: "v1.0.0",
-			wantImageRef:   "ghcr.io/org/app:v1.0.0",
+			wantImageTag: "v2.0.0",
+			wantImageRef: "ghcr.io/org/app@sha256:abc123",
 		},
 		{
 			name: "empty defaults to latest",
-			app: AppConfig{
+			service: ReleaseServiceConfig{
 				Image: "ghcr.io/org/app",
 			},
-			wantImageTag:   "latest",
-			wantComposeRef: "latest",
-			wantImageRef:   "ghcr.io/org/app:latest",
+			wantImageTag: "latest",
+			wantImageRef: "ghcr.io/org/app:latest",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.app.EffectiveImageTag(); got != tt.wantImageTag {
+			if got := tt.service.EffectiveImageTag(); got != tt.wantImageTag {
 				t.Errorf("EffectiveImageTag() = %q, want %q", got, tt.wantImageTag)
 			}
-			if got := tt.app.EffectiveComposeRef(); got != tt.wantComposeRef {
-				t.Errorf("EffectiveComposeRef() = %q, want %q", got, tt.wantComposeRef)
-			}
-			if got := tt.app.EffectiveImageRef(); got != tt.wantImageRef {
+			if got := tt.service.EffectiveImageRef(); got != tt.wantImageRef {
 				t.Errorf("EffectiveImageRef() = %q, want %q", got, tt.wantImageRef)
 			}
 		})
 	}
+}
+
+func TestAppConfigEffectiveReleaseServices(t *testing.T) {
+	t.Run("copies release services without reading top-level image fields", func(t *testing.T) {
+		app := &AppConfig{
+			Name:  "bundle",
+			Image: "ghcr.io/org/legacy",
+			Release: ReleaseConfig{
+				Services: map[string]ReleaseServiceConfig{
+					"api": {
+						Image:    "ghcr.io/org/api",
+						ImageTag: "v2.0.0",
+					},
+					"admin": {
+						Image:       "ghcr.io/org/admin",
+						ImageDigest: "sha256:admin",
+					},
+				},
+			},
+		}
+
+		services := app.EffectiveReleaseServices()
+		if len(services) != 2 {
+			t.Fatalf("services = %d, want 2", len(services))
+		}
+		if services["api"].EffectiveImageRef() != "ghcr.io/org/api:v2.0.0" {
+			t.Errorf("api image ref = %q", services["api"].EffectiveImageRef())
+		}
+		if services["admin"].EffectiveImageRef() != "ghcr.io/org/admin@sha256:admin" {
+			t.Errorf("admin image ref = %q", services["admin"].EffectiveImageRef())
+		}
+		services["api"] = ReleaseServiceConfig{Image: "mutated"}
+		if app.Release.Services["api"].Image != "ghcr.io/org/api" {
+			t.Errorf("EffectiveReleaseServices mutated app config: %q", app.Release.Services["api"].Image)
+		}
+	})
 }
 
 func TestClusterValidate(t *testing.T) {
@@ -167,6 +185,17 @@ func TestClusterValidate(t *testing.T) {
 	}
 }
 
+func validReleaseApp(name string) AppConfig {
+	return AppConfig{
+		Name: name,
+		Release: ReleaseConfig{
+			Services: map[string]ReleaseServiceConfig{
+				name: {Image: "ghcr.io/org/" + name},
+			},
+		},
+	}
+}
+
 func TestValidateApp(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -175,188 +204,219 @@ func TestValidateApp(t *testing.T) {
 	}{
 		{
 			name:    "missing name",
-			app:     AppConfig{Image: "img"},
+			app:     validReleaseApp(""),
 			wantErr: true,
 		},
 		{
 			name:    "name with shell injection",
-			app:     AppConfig{Name: "app; rm -rf /", Image: "img"},
+			app:     validReleaseApp("app; rm -rf /"),
 			wantErr: true,
 		},
 		{
 			name:    "name with spaces",
-			app:     AppConfig{Name: "my app", Image: "img"},
+			app:     validReleaseApp("my app"),
 			wantErr: true,
 		},
 		{
 			name:    "name with uppercase",
-			app:     AppConfig{Name: "MyApp", Image: "img"},
+			app:     validReleaseApp("MyApp"),
 			wantErr: true,
 		},
 		{
 			name:    "name starting with hyphen",
-			app:     AppConfig{Name: "-app", Image: "img"},
+			app:     validReleaseApp("-app"),
 			wantErr: true,
 		},
 		{
 			name:    "name ending with hyphen",
-			app:     AppConfig{Name: "app-", Image: "img"},
+			app:     validReleaseApp("app-"),
 			wantErr: true,
 		},
 		{
 			name:    "valid hyphenated name",
-			app:     AppConfig{Name: "my-app", Image: "img"},
+			app:     validReleaseApp("my-app"),
 			wantErr: false,
 		},
 		{
 			name:    "valid single char name",
-			app:     AppConfig{Name: "a", Image: "img"},
+			app:     validReleaseApp("a"),
 			wantErr: false,
 		},
 		{
-			name:    "missing image",
+			name:    "missing release services",
 			app:     AppConfig{Name: "app"},
 			wantErr: true,
 		},
 		{
-			name:    "valid app",
-			app:     AppConfig{Name: "app", Image: "ghcr.io/org/app"},
-			wantErr: false,
-		},
-		{
-			name: "expose.public with no domains",
-			app: AppConfig{
-				Name: "app", Image: "img", Port: 8080,
-				Expose: &ExposeConfig{Public: &PublicExpose{Domains: nil}},
-			},
-			wantErr: true,
-		},
-		{
-			name: "expose.public without port",
+			name: "top-level image is rejected",
 			app: AppConfig{
 				Name: "app", Image: "img",
-				Expose: &ExposeConfig{Public: &PublicExpose{Domains: []string{"a.com"}}},
+				Release: ReleaseConfig{Services: map[string]ReleaseServiceConfig{
+					"app": {Image: "ghcr.io/org/app"},
+				}},
 			},
 			wantErr: true,
 		},
 		{
-			name: "expose.private with zero port",
+			name: "release service missing image",
 			app: AppConfig{
-				Name: "app", Image: "img",
-				Expose: &ExposeConfig{Private: &PrivateExpose{Port: 0}},
+				Name:    "app",
+				Release: ReleaseConfig{Services: map[string]ReleaseServiceConfig{"app": {}}},
 			},
 			wantErr: true,
 		},
 		{
-			name: "expose.internal with empty hostname",
+			name: "release service expose.public with no domains",
 			app: AppConfig{
-				Name: "app", Image: "img", Port: 8080,
-				Expose: &ExposeConfig{Internal: &InternalExpose{Hostname: ""}},
+				Name: "app",
+				Release: ReleaseConfig{Services: map[string]ReleaseServiceConfig{
+					"app": {
+						Image:  "ghcr.io/org/app",
+						Port:   8080,
+						Expose: &ExposeConfig{Public: &PublicExpose{Domains: nil}},
+					},
+				}},
 			},
 			wantErr: true,
 		},
 		{
-			name: "expose.internal without port",
+			name: "release service expose.public without port",
 			app: AppConfig{
-				Name: "app", Image: "img",
-				Expose: &ExposeConfig{Internal: &InternalExpose{Hostname: "a.internal"}},
+				Name: "app",
+				Release: ReleaseConfig{Services: map[string]ReleaseServiceConfig{
+					"app": {
+						Image:  "ghcr.io/org/app",
+						Expose: &ExposeConfig{Public: &PublicExpose{Domains: []string{"a.com"}}},
+					},
+				}},
 			},
 			wantErr: true,
 		},
 		{
-			name: "valid full expose config",
+			name: "release service expose.private with zero port",
 			app: AppConfig{
-				Name: "app", Image: "img", Port: 8080,
-				Expose: &ExposeConfig{
-					Public:   &PublicExpose{Domains: []string{"a.com"}},
-					Private:  &PrivateExpose{Port: 8080},
-					Internal: &InternalExpose{Hostname: "a.internal"},
-				},
+				Name: "app",
+				Release: ReleaseConfig{Services: map[string]ReleaseServiceConfig{
+					"app": {
+						Image:  "ghcr.io/org/app",
+						Expose: &ExposeConfig{Private: &PrivateExpose{Port: 0}},
+					},
+				}},
 			},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
-			name:    "no expose is valid",
-			app:     AppConfig{Name: "app", Image: "img", Port: 8080},
+			name: "release service expose.internal with empty hostname",
+			app: AppConfig{
+				Name: "app",
+				Release: ReleaseConfig{Services: map[string]ReleaseServiceConfig{
+					"app": {
+						Image:  "ghcr.io/org/app",
+						Port:   8080,
+						Expose: &ExposeConfig{Internal: &InternalExpose{Hostname: ""}},
+					},
+				}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "release service expose.internal without port",
+			app: AppConfig{
+				Name: "app",
+				Release: ReleaseConfig{Services: map[string]ReleaseServiceConfig{
+					"app": {
+						Image:  "ghcr.io/org/app",
+						Expose: &ExposeConfig{Internal: &InternalExpose{Hostname: "a.internal"}},
+					},
+				}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid release service expose config",
+			app: AppConfig{
+				Name: "app",
+				Release: ReleaseConfig{Services: map[string]ReleaseServiceConfig{
+					"app": {
+						Image: "ghcr.io/org/app",
+						Port:  8080,
+						Expose: &ExposeConfig{
+							Public:   &PublicExpose{Domains: []string{"a.com"}},
+							Private:  &PrivateExpose{Port: 8080},
+							Internal: &InternalExpose{Hostname: "a.internal"},
+						},
+					},
+				}},
+			},
 			wantErr: false,
 		},
 		{
 			name: "persistent volumes valid",
-			app: AppConfig{
-				Name:  "app",
-				Image: "img",
-				PersistentVolumes: []PersistentVolumeConfig{
-					{ComposeName: "app-data", Name: "warpgate-app-data"},
-				},
-			},
+			app: func() AppConfig {
+				app := validReleaseApp("app")
+				app.PersistentVolumes = []PersistentVolumeConfig{{ComposeName: "app-data", Name: "warpgate-app-data"}}
+				return app
+			}(),
 			wantErr: false,
 		},
 		{
 			name: "persistent volume missing compose name",
-			app: AppConfig{
-				Name:  "app",
-				Image: "img",
-				PersistentVolumes: []PersistentVolumeConfig{
-					{Name: "warpgate-app-data"},
-				},
-			},
+			app: func() AppConfig {
+				app := validReleaseApp("app")
+				app.PersistentVolumes = []PersistentVolumeConfig{{Name: "warpgate-app-data"}}
+				return app
+			}(),
 			wantErr: true,
 		},
 		{
 			name: "persistent volume missing name",
-			app: AppConfig{
-				Name:  "app",
-				Image: "img",
-				PersistentVolumes: []PersistentVolumeConfig{
-					{ComposeName: "app-data"},
-				},
-			},
+			app: func() AppConfig {
+				app := validReleaseApp("app")
+				app.PersistentVolumes = []PersistentVolumeConfig{{ComposeName: "app-data"}}
+				return app
+			}(),
 			wantErr: true,
 		},
 		{
 			name: "persistent volume invalid compose name",
-			app: AppConfig{
-				Name:  "app",
-				Image: "img",
-				PersistentVolumes: []PersistentVolumeConfig{
-					{ComposeName: "app data", Name: "warpgate-app-data"},
-				},
-			},
+			app: func() AppConfig {
+				app := validReleaseApp("app")
+				app.PersistentVolumes = []PersistentVolumeConfig{{ComposeName: "app data", Name: "warpgate-app-data"}}
+				return app
+			}(),
 			wantErr: true,
 		},
 		{
 			name: "persistent volume invalid name",
-			app: AppConfig{
-				Name:  "app",
-				Image: "img",
-				PersistentVolumes: []PersistentVolumeConfig{
-					{ComposeName: "app-data", Name: "warpgate/app/data"},
-				},
-			},
+			app: func() AppConfig {
+				app := validReleaseApp("app")
+				app.PersistentVolumes = []PersistentVolumeConfig{{ComposeName: "app-data", Name: "warpgate/app/data"}}
+				return app
+			}(),
 			wantErr: true,
 		},
 		{
 			name: "persistent volume duplicate compose name",
-			app: AppConfig{
-				Name:  "app",
-				Image: "img",
-				PersistentVolumes: []PersistentVolumeConfig{
+			app: func() AppConfig {
+				app := validReleaseApp("app")
+				app.PersistentVolumes = []PersistentVolumeConfig{
 					{ComposeName: "app-data", Name: "warpgate-app-data-a"},
 					{ComposeName: "app-data", Name: "warpgate-app-data-b"},
-				},
-			},
+				}
+				return app
+			}(),
 			wantErr: true,
 		},
 		{
 			name: "persistent volume duplicate name",
-			app: AppConfig{
-				Name:  "app",
-				Image: "img",
-				PersistentVolumes: []PersistentVolumeConfig{
+			app: func() AppConfig {
+				app := validReleaseApp("app")
+				app.PersistentVolumes = []PersistentVolumeConfig{
 					{ComposeName: "app-data-a", Name: "warpgate-app-data"},
 					{ComposeName: "app-data-b", Name: "warpgate-app-data"},
-				},
-			},
+				}
+				return app
+			}(),
 			wantErr: true,
 		},
 	}
@@ -423,18 +483,22 @@ func TestLoadAppConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	yml := `image: ghcr.io/org/myapp
-version: v1.0.0
+	yml := `compose_ref: v1.0.0
 targets: [node-1]
-secrets_prefix: myapp/prod
-port: 8080
-expose:
-  public:
-    domains: [myapp.example.com]
-  private:
-    port: 8080
-  internal:
-    hostname: myapp.internal
+release:
+  services:
+    myapp:
+      image: ghcr.io/org/myapp
+      image_tag: v1.0.0
+      secrets_prefix: myapp/prod
+      port: 8080
+      expose:
+        public:
+          domains: [myapp.example.com]
+        private:
+          port: 8080
+        internal:
+          hostname: myapp.internal
 `
 	if err := os.WriteFile(filepath.Join(appDir, "app.yml"), []byte(yml), 0644); err != nil {
 		t.Fatal(err)
@@ -445,16 +509,20 @@ expose:
 		t.Fatalf("LoadAppConfig() error: %v", err)
 	}
 
-	if app.Image != "ghcr.io/org/myapp" {
-		t.Errorf("expected image ghcr.io/org/myapp, got %s", app.Image)
-	}
-	if app.Version != "v1.0.0" {
-		t.Errorf("expected version v1.0.0, got %s", app.Version)
+	if app.ComposeRef != "v1.0.0" {
+		t.Errorf("expected compose_ref v1.0.0, got %s", app.ComposeRef)
 	}
 	if len(app.Targets) != 1 || app.Targets[0] != "node-1" {
 		t.Errorf("unexpected targets: %v", app.Targets)
 	}
-	expose := app.EffectiveExpose()
+	service := app.Release.Services["myapp"]
+	if service.Image != "ghcr.io/org/myapp" {
+		t.Errorf("expected service image ghcr.io/org/myapp, got %s", service.Image)
+	}
+	if service.EffectiveImageTag() != "v1.0.0" {
+		t.Errorf("expected service image tag v1.0.0, got %s", service.EffectiveImageTag())
+	}
+	expose := service.EffectiveExpose()
 	if expose.Public == nil || len(expose.Public.Domains) != 1 || expose.Public.Domains[0] != "myapp.example.com" {
 		t.Errorf("unexpected public expose: %+v", expose.Public)
 	}
@@ -464,11 +532,11 @@ expose:
 	if expose.Internal == nil || expose.Internal.Hostname != "myapp.internal" {
 		t.Errorf("unexpected internal expose: %+v", expose.Internal)
 	}
-	if app.SecretsPrefix != "myapp/prod" {
-		t.Errorf("expected secrets_prefix myapp/prod, got %s", app.SecretsPrefix)
+	if service.SecretsPrefix != "myapp/prod" {
+		t.Errorf("expected secrets_prefix myapp/prod, got %s", service.SecretsPrefix)
 	}
-	if app.Port != 8080 {
-		t.Errorf("expected port 8080, got %d", app.Port)
+	if service.Port != 8080 {
+		t.Errorf("expected port 8080, got %d", service.Port)
 	}
 }
 
@@ -481,7 +549,7 @@ func TestDiscoverApps(t *testing.T) {
 		if err := os.MkdirAll(appDir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		yml := "image: ghcr.io/org/" + name + "\n"
+		yml := "release:\n  services:\n    " + name + ":\n      image: ghcr.io/org/" + name + "\n"
 		if err := os.WriteFile(filepath.Join(appDir, "app.yml"), []byte(yml), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -517,7 +585,7 @@ func TestLoadAppConfigWithKind(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	yml := "kind: warpgate/app\nimage: ghcr.io/org/myapp\n"
+	yml := "kind: warpgate/app\nrelease:\n  services:\n    myapp:\n      image: ghcr.io/org/myapp\n"
 	if err := os.WriteFile(filepath.Join(appDir, "app.yml"), []byte(yml), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -529,6 +597,10 @@ func TestLoadAppConfigWithKind(t *testing.T) {
 	if app.Kind != "warpgate/app" {
 		t.Errorf("expected kind %q, got %q", "warpgate/app", app.Kind)
 	}
+}
+
+func appYAML(prefix, name string) string {
+	return prefix + "release:\n  services:\n    " + name + ":\n      image: ghcr.io/org/" + name + "\n"
 }
 
 func TestDiscoverAppsKindFiltering(t *testing.T) {
@@ -546,23 +618,23 @@ func TestDiscoverAppsKindFiltering(t *testing.T) {
 		{
 			name: "correct kind accepted",
 			apps: []appFixture{
-				{"myapp", "kind: warpgate/app\nimage: ghcr.io/org/myapp\n"},
+				{"myapp", appYAML("kind: warpgate/app\n", "myapp")},
 			},
 			wantNames: []string{"myapp"},
 			wantKinds: []string{"warpgate/app"},
 		},
 		{
-			name: "no kind accepted for backwards compatibility",
+			name: "no kind accepted",
 			apps: []appFixture{
-				{"legacy", "image: ghcr.io/org/legacy\n"},
+				{"implicit-kind", appYAML("", "implicit-kind")},
 			},
-			wantNames: []string{"legacy"},
+			wantNames: []string{"implicit-kind"},
 			wantKinds: []string{""},
 		},
 		{
 			name: "explicit empty kind accepted",
 			apps: []appFixture{
-				{"empty-kind", "kind: \"\"\nimage: ghcr.io/org/empty\n"},
+				{"empty-kind", appYAML("kind: \"\"\n", "empty-kind")},
 			},
 			wantNames: []string{"empty-kind"},
 			wantKinds: []string{""},
@@ -570,7 +642,7 @@ func TestDiscoverAppsKindFiltering(t *testing.T) {
 		{
 			name: "foreign kind skipped",
 			apps: []appFixture{
-				{"helm-app", "kind: helm/chart\nimage: ghcr.io/org/helm\n"},
+				{"helm-app", appYAML("kind: helm/chart\n", "helm-app")},
 			},
 			wantNames: []string{},
 			wantKinds: []string{},
@@ -578,7 +650,7 @@ func TestDiscoverAppsKindFiltering(t *testing.T) {
 		{
 			name: "case sensitive comparison",
 			apps: []appFixture{
-				{"upper", "kind: WARPGATE/APP\nimage: ghcr.io/org/upper\n"},
+				{"upper", appYAML("kind: WARPGATE/APP\n", "upper")},
 			},
 			wantNames: []string{},
 			wantKinds: []string{},
@@ -586,19 +658,19 @@ func TestDiscoverAppsKindFiltering(t *testing.T) {
 		{
 			name: "trailing whitespace rejected",
 			apps: []appFixture{
-				{"ws-app", "kind: \"warpgate/app \"\nimage: ghcr.io/org/ws\n"},
+				{"ws-app", appYAML("kind: \"warpgate/app \"\n", "ws-app")},
 			},
 			wantNames: []string{},
 			wantKinds: []string{},
 		},
 		{
-			name: "mixed: keeps valid and legacy, skips foreign",
+			name: "mixed: keeps valid and implicit kind, skips foreign",
 			apps: []appFixture{
-				{"aaa-valid", "kind: warpgate/app\nimage: ghcr.io/org/valid\n"},
-				{"bbb-legacy", "image: ghcr.io/org/legacy\n"},
-				{"ccc-foreign", "kind: other/thing\nimage: ghcr.io/org/foreign\n"},
+				{"aaa-valid", appYAML("kind: warpgate/app\n", "aaa-valid")},
+				{"bbb-implicit", appYAML("", "bbb-implicit")},
+				{"ccc-foreign", appYAML("kind: other/thing\n", "ccc-foreign")},
 			},
-			wantNames: []string{"aaa-valid", "bbb-legacy"},
+			wantNames: []string{"aaa-valid", "bbb-implicit"},
 			wantKinds: []string{"warpgate/app", ""},
 		},
 	}
@@ -682,16 +754,20 @@ func TestLoadAppConfigWithSource(t *testing.T) {
 	}{
 		{
 			name: "full source and environment",
-			yaml: `image: ghcr.io/org/myapp
+			yaml: `compose_ref: main
 source:
   repo: github.com/pangobit/myapp
   compose_path: deploy/compose.yml
 persistent_volumes:
   - compose_name: myapp-data
     name: warpgate-myapp-data
-environment:
-  DOMAIN: example.com
-  AUTH_HOST: id.example.com
+release:
+  services:
+    myapp:
+      image: ghcr.io/org/myapp
+      environment:
+        DOMAIN: example.com
+        AUTH_HOST: id.example.com
 `,
 			wantSource:      true,
 			wantRepo:        "github.com/pangobit/myapp",
@@ -706,9 +782,13 @@ environment:
 		},
 		{
 			name: "minimal source",
-			yaml: `image: ghcr.io/org/myapp
+			yaml: `compose_ref: main
 source:
   repo: github.com/pangobit/myapp
+release:
+  services:
+    myapp:
+      image: ghcr.io/org/myapp
 `,
 			wantSource:      true,
 			wantRepo:        "github.com/pangobit/myapp",
@@ -716,7 +796,7 @@ source:
 		},
 		{
 			name: "source with environment and multiple persistent volumes",
-			yaml: `image: ghcr.io/org/myapp
+			yaml: `compose_ref: main
 source:
   repo: pangobit/app
 persistent_volumes:
@@ -724,8 +804,12 @@ persistent_volumes:
     name: warpgate-myapp-data
   - compose_name: cache
     name: warpgate-myapp-cache
-environment:
-  KEY: val
+release:
+  services:
+    myapp:
+      image: ghcr.io/org/myapp
+      environment:
+        KEY: val
 `,
 			wantSource: true,
 			wantRepo:   "pangobit/app",
@@ -739,8 +823,11 @@ environment:
 		},
 		{
 			name: "no source is valid",
-			yaml: `image: ghcr.io/org/myapp
-version: v1.0.0
+			yaml: `release:
+  services:
+    myapp:
+      image: ghcr.io/org/myapp
+      image_tag: v1.0.0
 `,
 			wantSource: false,
 		},
@@ -778,15 +865,16 @@ version: v1.0.0
 			if app.Source.ComposePath != tt.wantComposePath {
 				t.Errorf("Source.ComposePath = %q, want %q", app.Source.ComposePath, tt.wantComposePath)
 			}
-			if len(app.Environment) != len(tt.wantEnvironment) {
-				t.Errorf("len(Environment) = %d, want %d", len(app.Environment), len(tt.wantEnvironment))
+			service := app.Release.Services["myapp"]
+			if len(service.Environment) != len(tt.wantEnvironment) {
+				t.Errorf("len(service.Environment) = %d, want %d", len(service.Environment), len(tt.wantEnvironment))
 			}
 			if len(app.PersistentVolumes) != len(tt.wantVolumes) {
 				t.Errorf("len(PersistentVolumes) = %d, want %d", len(app.PersistentVolumes), len(tt.wantVolumes))
 			}
 			for key, want := range tt.wantEnvironment {
-				if app.Environment[key] != want {
-					t.Errorf("Environment[%q] = %q, want %q", key, app.Environment[key], want)
+				if service.Environment[key] != want {
+					t.Errorf("service.Environment[%q] = %q, want %q", key, service.Environment[key], want)
 				}
 			}
 			for i, want := range tt.wantVolumes {

@@ -12,15 +12,21 @@ import (
 
 func TestBuildReleaseManifestUsesDigestComposeAndEnvHash(t *testing.T) {
 	app := &config.AppConfig{
-		Name:        "api",
-		Image:       "ghcr.io/acme/api",
-		ImageTag:    "v1.2.3",
-		ImageDigest: "sha256:abc123",
-		Environment: map[string]string{
-			"LOG_LEVEL": "debug",
-			"APP_ENV":   "prod",
+		Name: "api",
+		Release: config.ReleaseConfig{
+			Services: map[string]config.ReleaseServiceConfig{
+				"api": {
+					Image:       "ghcr.io/acme/api",
+					ImageTag:    "v1.2.3",
+					ImageDigest: "sha256:abc123",
+					Environment: map[string]string{
+						"LOG_LEVEL": "debug",
+						"APP_ENV":   "prod",
+					},
+					SecretsPrefix: "api/prod",
+				},
+			},
 		},
-		SecretsPrefix: "api/prod",
 	}
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 
@@ -46,19 +52,31 @@ func TestBuildReleaseManifestUsesDigestComposeAndEnvHash(t *testing.T) {
 
 func TestBuildReleaseManifestChangesIDWhenEnvChanges(t *testing.T) {
 	base := &config.AppConfig{
-		Name:        "api",
-		Image:       "ghcr.io/acme/api",
-		ImageDigest: "sha256:abc123",
-		Environment: map[string]string{
-			"LOG_LEVEL": "info",
+		Name: "api",
+		Release: config.ReleaseConfig{
+			Services: map[string]config.ReleaseServiceConfig{
+				"api": {
+					Image:       "ghcr.io/acme/api",
+					ImageDigest: "sha256:abc123",
+					Environment: map[string]string{
+						"LOG_LEVEL": "info",
+					},
+				},
+			},
 		},
 	}
 	changed := &config.AppConfig{
-		Name:        "api",
-		Image:       "ghcr.io/acme/api",
-		ImageDigest: "sha256:abc123",
-		Environment: map[string]string{
-			"LOG_LEVEL": "debug",
+		Name: "api",
+		Release: config.ReleaseConfig{
+			Services: map[string]config.ReleaseServiceConfig{
+				"api": {
+					Image:       "ghcr.io/acme/api",
+					ImageDigest: "sha256:abc123",
+					Environment: map[string]string{
+						"LOG_LEVEL": "debug",
+					},
+				},
+			},
 		},
 	}
 
@@ -67,6 +85,109 @@ func TestBuildReleaseManifestChangesIDWhenEnvChanges(t *testing.T) {
 
 	if first.ID == second.ID {
 		t.Fatal("expected env change to produce a different release ID")
+	}
+}
+
+func TestBuildReleaseManifestUsesDifferentComposeRefs(t *testing.T) {
+	composeRefs := []string{
+		"main",
+		"v1.2.3",
+		"f1ef18bd8dc67dd582ed1c947c11c772a66f8419",
+		"sha256:0a1b2c3d4e5f",
+	}
+
+	for _, composeRef := range composeRefs {
+		t.Run(composeRef, func(t *testing.T) {
+			app := releaseManifestApp("bundle", composeRef)
+
+			first := Build(app, nil, time.Time{})
+			second := Build(app, nil, time.Time{})
+
+			if first.ID == "" {
+				t.Fatal("expected release ID")
+			}
+			if first.ID != second.ID {
+				t.Fatalf("release ID is not deterministic for compose ref %q: %q != %q", composeRef, first.ID, second.ID)
+			}
+			if first.ComposeRev != composeRef {
+				t.Errorf("ComposeRev = %q, want %q", first.ComposeRev, composeRef)
+			}
+		})
+	}
+}
+
+func TestBuildReleaseManifestChangesIDWhenComposeRefChanges(t *testing.T) {
+	first := Build(releaseManifestApp("bundle", "main"), nil, time.Time{})
+	second := Build(releaseManifestApp("bundle", "f1ef18bd8dc67dd582ed1c947c11c772a66f8419"), nil, time.Time{})
+
+	if first.ID == second.ID {
+		t.Fatal("expected compose_ref change to produce a different release ID")
+	}
+}
+
+func TestBuildReleaseManifestCapturesConfiguredServices(t *testing.T) {
+	app := &config.AppConfig{
+		Name:       "bundle",
+		ComposeRef: "main",
+		Release: config.ReleaseConfig{
+			Services: map[string]config.ReleaseServiceConfig{
+				"api": {
+					Image:       "ghcr.io/acme/api",
+					ImageDigest: "sha256:api",
+					Environment: map[string]string{
+						"LOG_LEVEL": "info",
+					},
+				},
+				"admin": {
+					Image:         "ghcr.io/acme/admin",
+					ImageTag:      "v1.2.3",
+					SecretsPrefix: "admin/prod",
+				},
+			},
+		},
+		Source: &config.SourceConfig{Repo: "github.com/acme/app"},
+	}
+
+	manifest := Build(app, nil, time.Time{})
+
+	if manifest.ComposeRev != "main" {
+		t.Errorf("ComposeRev = %q, want main", manifest.ComposeRev)
+	}
+	if len(manifest.Services) != 2 {
+		t.Fatalf("services = %d, want 2", len(manifest.Services))
+	}
+	if manifest.Services["api"].ImageRef != "ghcr.io/acme/api@sha256:api" {
+		t.Errorf("api ImageRef = %q", manifest.Services["api"].ImageRef)
+	}
+	if manifest.Services["admin"].ImageRef != "ghcr.io/acme/admin:v1.2.3" {
+		t.Errorf("admin ImageRef = %q", manifest.Services["admin"].ImageRef)
+	}
+	if manifest.Services["admin"].SecretsPrefix != "admin/prod" {
+		t.Errorf("admin SecretsPrefix = %q", manifest.Services["admin"].SecretsPrefix)
+	}
+}
+
+func releaseManifestApp(name, composeRef string) *config.AppConfig {
+	return &config.AppConfig{
+		Name:       name,
+		ComposeRef: composeRef,
+		Release: config.ReleaseConfig{
+			Services: map[string]config.ReleaseServiceConfig{
+				"api": {
+					Image:       "ghcr.io/acme/api",
+					ImageDigest: "sha256:api",
+					Environment: map[string]string{
+						"LOG_LEVEL": "info",
+					},
+				},
+				"admin": {
+					Image:         "ghcr.io/acme/admin",
+					ImageTag:      "v1.2.3",
+					SecretsPrefix: "admin/prod",
+				},
+			},
+		},
+		Source: &config.SourceConfig{Repo: "github.com/acme/app"},
 	}
 }
 

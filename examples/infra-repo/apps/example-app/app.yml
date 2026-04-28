@@ -1,14 +1,16 @@
 kind: warpgate/app
-image: ghcr.io/org/example-app
-image_tag: v1.0.0
 targets: [node-1]
-secrets_prefix: example-app/prod
-port: 8080
-environment:
-  LOG_LEVEL: info
-
-expose:
-  public:
-    domains: [app.example.com]
-  private:
-    port: 8080
+release:
+  services:
+    example-app:
+      image: ghcr.io/org/example-app
+      image_tag: v1.0.0
+      secrets_prefix: example-app/prod
+      port: 8080
+      environment:
+        LOG_LEVEL: info
+      expose:
+        public:
+          domains: [app.example.com]
+        private:
+          port: 8080

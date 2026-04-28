@@ -8,6 +8,7 @@ import (
 
 	"github.com/pangobit/warpgate/pkg/compose"
 	"github.com/pangobit/warpgate/pkg/config"
+	"github.com/pangobit/warpgate/pkg/release"
 )
 
 const shadowSlot = "shadow"
@@ -53,8 +54,9 @@ func (d *Deployer) ShadowDeploy(appName, version string) error {
 
 	internalHosts := d.Repo.InternalHosts()
 	targetNodes := app.GetTargetNodes(d.Repo.Cluster.Nodes)
+	manifest := release.Build(app, composeContent, time.Now())
 
-	d.log.Infof("Deploying shadow %s:%s to nodes: %v", app.Image, version, targetNodes)
+	d.log.Infof("Deploying shadow %s:%s to nodes: %v", appName, version, targetNodes)
 
 	for i, nodeID := range targetNodes {
 		node := d.Repo.Cluster.GetNode(nodeID)
@@ -65,19 +67,23 @@ func (d *Deployer) ShadowDeploy(appName, version string) error {
 
 		d.log.Infof("[%d/%d] Deploying shadow to node %s...", i+1, len(targetNodes), nodeID)
 
-		override, err := compose.GenerateShadowOverride(app, version, internalHosts, node.PrivateIP, string(composeContent))
+		envFiles := releaseEnvFileMap(manifest, d.Repo.Cluster.Secrets.Server)
+		override, err := compose.GenerateShadowOverrideWithEnvFiles(app, version, envFiles, internalHosts, node.PrivateIP, string(composeContent))
 		if err != nil {
 			return fmt.Errorf("failed to generate shadow override for node %s: %w", nodeID, err)
 		}
 
-		if err := d.deployShadowToNode(app, node, appDir, composeContent, override, version); err != nil {
+		if err := d.deployShadowToNode(app, manifest, node, appDir, composeContent, override, version); err != nil {
 			return fmt.Errorf("shadow deploy to node %s failed: %w", nodeID, err)
 		}
 	}
 
-	if app.EffectiveExpose().Internal != nil {
-		if err := d.updateShadowInternalRoutes(app); err != nil {
-			d.log.Warnf("Failed to update shadow internal routes: %v", err)
+	for _, serviceName := range sortedReleaseServiceConfigKeys(app.Release.Services) {
+		service := app.Release.Services[serviceName]
+		if service.EffectiveExpose().Internal != nil {
+			if err := d.updateReleaseServiceShadowInternalRoutes(app, serviceName, service); err != nil {
+				d.log.Warnf("Failed to update shadow internal routes for service %s: %v", serviceName, err)
+			}
 		}
 	}
 
@@ -117,7 +123,7 @@ func (d *Deployer) validateShadowPreconditions(app *config.AppConfig) error {
 }
 
 // deployShadowToNode deploys shadow containers to a single node.
-func (d *Deployer) deployShadowToNode(app *config.AppConfig, node *config.NodeConfig, appDir string, composeContent []byte, override string, version string) error {
+func (d *Deployer) deployShadowToNode(app *config.AppConfig, manifest *release.Manifest, node *config.NodeConfig, appDir string, composeContent []byte, override string, version string) error {
 	client, err := d.connect(node)
 	if err != nil {
 		return err
@@ -150,17 +156,9 @@ func (d *Deployer) deployShadowToNode(app *config.AppConfig, node *config.NodeCo
 		return fmt.Errorf("failed to write shadow override: %w", err)
 	}
 
-	hasEnvFile := false
-	if needsEnvFile(app, d.Repo.Cluster.Secrets.Server) {
-		envContent, fetchErr := d.fetchSecrets(app)
-		if fetchErr != nil {
-			return fmt.Errorf("failed to fetch secrets: %w", fetchErr)
-		}
-		envPath := remoteDir + "/.env"
-		if err := client.WriteFileSecret(envPath, envContent); err != nil {
-			return fmt.Errorf("failed to write .env: %w", err)
-		}
-		hasEnvFile = true
+	hasEnvFile, err := d.writeReleaseEnvFile(client, remoteDir, manifest)
+	if err != nil {
+		return err
 	}
 
 	reg := d.Repo.Cluster.Registry
@@ -207,7 +205,7 @@ func (d *Deployer) deployShadowToNode(app *config.AppConfig, node *config.NodeCo
 	}
 
 	if hasEnvFile {
-		if _, _, err := client.RunCommand("rm -f " + remoteDir + "/.env"); err != nil {
+		if _, _, err := client.RunCommand("rm -f " + strings.Join(releaseEnvPaths(remoteDir, manifest), " ")); err != nil {
 			return fmt.Errorf("failed to remove .env file: %w", err)
 		}
 	}
@@ -354,9 +352,9 @@ func (d *Deployer) cleanupShadow(appName string) {
 	}
 }
 
-// updateShadowInternalRoutes writes the shadow Traefik dynamic config to all nodes.
-func (d *Deployer) updateShadowInternalRoutes(app *config.AppConfig) error {
-	routeYAML, err := GenerateShadowInternalRoute(app, d.Repo.Cluster)
+// updateReleaseServiceShadowInternalRoutes writes the shadow Traefik dynamic config to all nodes.
+func (d *Deployer) updateReleaseServiceShadowInternalRoutes(app *config.AppConfig, serviceName string, service config.ReleaseServiceConfig) error {
+	routeYAML, err := GenerateReleaseServiceShadowInternalRoute(app, serviceName, service, d.Repo.Cluster)
 	if err != nil {
 		return err
 	}
@@ -364,8 +362,8 @@ func (d *Deployer) updateShadowInternalRoutes(app *config.AppConfig) error {
 		return nil
 	}
 
-	remotePath := "/opt/warpgate/traefik/dynamic/" + app.Name + "-shadow.yml"
-	d.log.Infof("Updating shadow internal route for shadow-%s across all nodes...", app.EffectiveExpose().Internal.Hostname)
+	remotePath := "/opt/warpgate/traefik/dynamic/" + app.Name + "-" + serviceName + "-shadow.yml"
+	d.log.Infof("Updating shadow internal route for service %s.%s across all nodes...", app.Name, serviceName)
 
 	for _, node := range d.Repo.Cluster.Nodes {
 		client, err := d.connect(&node)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -267,18 +268,20 @@ secrets:
 		}
 
 		appConfig := `kind: warpgate/app
-image: ghcr.io/org/example-app
-image_tag: latest
-secrets_prefix: example-app/prod
-port: 8080
-environment:
-  LOG_LEVEL: info
-
-expose:
-  public:
-    domains: [example-app.example.com]
-  private:
-    port: 8080
+release:
+  services:
+    example-app:
+      image: ghcr.io/org/example-app
+      image_tag: latest
+      secrets_prefix: example-app/prod
+      port: 8080
+      environment:
+        LOG_LEVEL: info
+      expose:
+        public:
+          domains: [example-app.example.com]
+        private:
+          port: 8080
 `
 		if err := os.WriteFile(filepath.Join(exampleDir, "app.yml"), []byte(appConfig), 0644); err != nil {
 			return fmt.Errorf("failed to create app.yml: %w", err)
@@ -339,7 +342,7 @@ Examples:
 			if !deployDryRun {
 				fmt.Printf("Will deploy %d app(s):\n", len(repo.Apps))
 				for _, app := range repo.Apps {
-					fmt.Printf("  - %s (%s)\n", app.Name, app.EffectiveImageTag())
+					fmt.Printf("  - %s (%d service(s))\n", app.Name, len(app.Release.Services))
 				}
 				fmt.Print("Continue? [y/N] ")
 				var answer string
@@ -397,9 +400,18 @@ apps/<app-name>/releases/ and latest.json is updated to the same release.`,
 		}
 
 		fmt.Printf("Release: %s\n", manifest.ID)
-		fmt.Printf("Image: %s\n", manifest.ImageRef)
 		fmt.Printf("Compose: %s\n", manifest.ComposeRev)
 		fmt.Printf("Env: %s\n", manifest.EnvHash)
+		serviceNames := make([]string, 0, len(manifest.Services))
+		for serviceName := range manifest.Services {
+			serviceNames = append(serviceNames, serviceName)
+		}
+		sort.Strings(serviceNames)
+		fmt.Println("Services:")
+		for _, serviceName := range serviceNames {
+			service := manifest.Services[serviceName]
+			fmt.Printf("  - %s: %s (env: %s)\n", serviceName, service.ImageRef, service.EnvHash)
+		}
 		return nil
 	},
 }
@@ -475,14 +487,23 @@ func showClusterStatus() error {
 
 	fmt.Printf("\nApps: %d\n\n", len(repo.Apps))
 	for _, app := range repo.Apps {
-		fmt.Printf("  %s (%s)\n", app.Name, app.EffectiveImageRef())
+		fmt.Printf("  %s\n", app.Name)
 		fmt.Printf("    Targets: %v\n", app.GetTargetNodes(repo.Cluster.Nodes))
-		expose := app.EffectiveExpose()
-		if expose.Public != nil && len(expose.Public.Domains) > 0 {
-			fmt.Printf("    Domains: %v\n", expose.Public.Domains)
+		serviceNames := make([]string, 0, len(app.EffectiveReleaseServices()))
+		for serviceName := range app.EffectiveReleaseServices() {
+			serviceNames = append(serviceNames, serviceName)
 		}
-		if app.SecretsPrefix != "" {
-			fmt.Printf("    Secrets: %s\n", app.SecretsPrefix)
+		sort.Strings(serviceNames)
+		for _, serviceName := range serviceNames {
+			service := app.EffectiveReleaseServices()[serviceName]
+			fmt.Printf("    Service %s: %s\n", serviceName, service.EffectiveImageRef())
+			expose := service.EffectiveExpose()
+			if expose.Public != nil && len(expose.Public.Domains) > 0 {
+				fmt.Printf("      Domains: %v\n", expose.Public.Domains)
+			}
+			if service.SecretsPrefix != "" {
+				fmt.Printf("      Secrets: %s\n", service.SecretsPrefix)
+			}
 		}
 	}
 

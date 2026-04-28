@@ -138,6 +138,54 @@ type SidecarConfig struct {
 	Expose *ExposeConfig `yaml:"expose,omitempty"`
 }
 
+// ReleaseConfig declares the services that participate in a Warpgate release.
+type ReleaseConfig struct {
+	// Services maps Docker Compose service names to release-owned inputs.
+	Services map[string]ReleaseServiceConfig `yaml:"services,omitempty"`
+}
+
+// ReleaseServiceConfig declares release-owned inputs for one Compose service.
+type ReleaseServiceConfig struct {
+	// Image is the Docker image reference without tag or digest.
+	Image string `yaml:"image"`
+	// ImageTag is the Docker image tag used when ImageDigest is empty.
+	ImageTag string `yaml:"image_tag,omitempty"`
+	// ImageDigest is the immutable Docker image digest for release creation.
+	ImageDigest string `yaml:"image_digest,omitempty"`
+	// SecretsPrefix is the secretsauce prefix for this service.
+	SecretsPrefix string `yaml:"secrets_prefix,omitempty"`
+	// Port is the container port used for service-level routing metadata.
+	Port int `yaml:"port,omitempty"`
+	// Expose declares how the service is reachable at each visibility tier.
+	Expose *ExposeConfig `yaml:"expose,omitempty"`
+	// Environment provides non-secret environment variables for this service.
+	Environment map[string]string `yaml:"environment,omitempty"`
+}
+
+// EffectiveImageTag returns the configured image tag.
+func (s ReleaseServiceConfig) EffectiveImageTag() string {
+	if s.ImageTag != "" {
+		return s.ImageTag
+	}
+	return "latest"
+}
+
+// EffectiveImageRef returns an immutable digest reference when configured, otherwise a tag reference.
+func (s ReleaseServiceConfig) EffectiveImageRef() string {
+	if s.ImageDigest != "" {
+		return s.Image + "@" + s.ImageDigest
+	}
+	return s.Image + ":" + s.EffectiveImageTag()
+}
+
+// EffectiveExpose returns the service's expose config, or a zero value if nil.
+func (s ReleaseServiceConfig) EffectiveExpose() ExposeConfig {
+	if s.Expose != nil {
+		return *s.Expose
+	}
+	return ExposeConfig{}
+}
+
 // EffectiveExpose returns the sidecar's expose config, or a zero value if nil.
 func (s *SidecarConfig) EffectiveExpose() ExposeConfig {
 	if s.Expose != nil {
@@ -179,74 +227,46 @@ type AppConfig struct {
 	Kind string `yaml:"kind,omitempty"`
 	// Name is derived from the directory name, not from YAML.
 	Name string `yaml:"-"`
-	// Image is the Docker image reference (without tag).
+	// Image is no longer used; declare release.services.<name>.image instead.
 	Image string `yaml:"image"`
-	// Version is the legacy image tag and compose ref, defaults to "latest".
+	// Version is no longer used; declare compose_ref or release service image tags instead.
 	Version string `yaml:"version,omitempty"`
-	// ImageTag is the Docker image tag used when ImageDigest is empty.
+	// ImageTag is no longer used; declare release.services.<name>.image_tag instead.
 	ImageTag string `yaml:"image_tag,omitempty"`
-	// ImageDigest is the immutable Docker image digest for release creation.
+	// ImageDigest is no longer used; declare release.services.<name>.image_digest instead.
 	ImageDigest string `yaml:"image_digest,omitempty"`
 	// ComposeRef is the source reference for the compose file when Source is set.
 	ComposeRef string `yaml:"compose_ref,omitempty"`
 	// Targets is the list of node IDs to deploy to. Empty means all nodes.
 	Targets []string `yaml:"targets,omitempty"`
-	// SecretsPrefix is the secretsauce prefix for secret injection.
+	// SecretsPrefix is no longer used; declare release.services.<name>.secrets_prefix instead.
 	SecretsPrefix string `yaml:"secrets_prefix,omitempty"`
-	// Port is the container port Traefik routes to.
+	// Port is no longer used; declare release.services.<name>.port instead.
 	Port int `yaml:"port,omitempty"`
 	// Strategy is the deploy strategy: "blue-green" (default) or "recreate".
 	Strategy DeployStrategy `yaml:"strategy,omitempty"`
-	// Expose declares how the app is reachable at each visibility tier.
+	// Expose is no longer used; declare release.services.<name>.expose instead.
 	Expose *ExposeConfig `yaml:"expose,omitempty"`
-	// Sidecars maps compose service names to their routing configuration.
+	// Sidecars is no longer used; declare each service under release.services instead.
 	Sidecars map[string]SidecarConfig `yaml:"sidecars,omitempty"`
+	// Release declares first-class services that are bundled into one release.
+	Release ReleaseConfig `yaml:"release,omitempty"`
 	// Source specifies a remote GitHub repo to fetch compose from. If set, compose.yml
 	// is not expected locally and will be fetched at deploy time.
 	Source *SourceConfig `yaml:"source,omitempty"`
 	// PersistentVolumes remaps compose volume keys to stable Docker volume names.
 	PersistentVolumes []PersistentVolumeConfig `yaml:"persistent_volumes,omitempty"`
-	// Environment provides non-secret environment variables that are merged with secrets
-	// and written to the .env file at deploy time. Secrets take precedence on collision.
+	// Environment is no longer used; declare release.services.<name>.environment instead.
 	Environment map[string]string `yaml:"environment,omitempty"`
 }
 
-// EffectiveImageTag returns the configured image tag with legacy version fallback.
-func (a *AppConfig) EffectiveImageTag() string {
-	if a.ImageTag != "" {
-		return a.ImageTag
+// EffectiveReleaseServices returns the first-class services that make up a release.
+func (a *AppConfig) EffectiveReleaseServices() map[string]ReleaseServiceConfig {
+	services := make(map[string]ReleaseServiceConfig, len(a.Release.Services))
+	for name, service := range a.Release.Services {
+		services[name] = service
 	}
-	if a.Version != "" {
-		return a.Version
-	}
-	return "latest"
-}
-
-// EffectiveComposeRef returns the configured compose source ref with legacy version fallback.
-func (a *AppConfig) EffectiveComposeRef() string {
-	if a.ComposeRef != "" {
-		return a.ComposeRef
-	}
-	if a.Version != "" {
-		return a.Version
-	}
-	return a.EffectiveImageTag()
-}
-
-// EffectiveImageRef returns an immutable digest reference when configured, otherwise a tag reference.
-func (a *AppConfig) EffectiveImageRef() string {
-	if a.ImageDigest != "" {
-		return a.Image + "@" + a.ImageDigest
-	}
-	return a.Image + ":" + a.EffectiveImageTag()
-}
-
-// EffectiveExpose returns the app's expose config, or a zero value if nil.
-func (a *AppConfig) EffectiveExpose() ExposeConfig {
-	if a.Expose != nil {
-		return *a.Expose
-	}
-	return ExposeConfig{}
+	return services
 }
 
 // LoadClusterConfig reads and parses a cluster.yml file with environment variable expansion.
@@ -357,11 +377,15 @@ func ValidateApp(app *AppConfig) error {
 	if !validAppName.MatchString(app.Name) {
 		return fmt.Errorf("app name %q is invalid: must be lowercase alphanumeric and hyphens only", app.Name)
 	}
-	if app.Image == "" {
-		return fmt.Errorf("app %s: image is required", app.Name)
+	if app.Image != "" || app.Version != "" || app.ImageTag != "" || app.ImageDigest != "" || app.SecretsPrefix != "" || app.Port != 0 || app.Expose != nil || len(app.Environment) > 0 || len(app.Sidecars) > 0 {
+		return fmt.Errorf("app %s: top-level image, version, image_tag, image_digest, secrets_prefix, port, expose, environment, and sidecars are no longer supported; use release.services", app.Name)
 	}
 
-	if app.Source != nil && app.EffectiveComposeRef() == "" {
+	if len(app.Release.Services) == 0 {
+		return fmt.Errorf("app %s: release.services is required", app.Name)
+	}
+
+	if app.Source != nil && app.ComposeRef == "" {
 		return fmt.Errorf("app %s: compose_ref is required when source is set", app.Name)
 	}
 
@@ -370,6 +394,35 @@ func ValidateApp(app *AppConfig) error {
 		// valid
 	default:
 		return fmt.Errorf("app %s: invalid strategy %q (must be \"blue-green\" or \"recreate\")", app.Name, app.Strategy)
+	}
+
+	for serviceName, service := range app.Release.Services {
+		if !validVolumeName.MatchString(serviceName) {
+			return fmt.Errorf("app %s: release.services %q is invalid", app.Name, serviceName)
+		}
+		if service.Image == "" {
+			return fmt.Errorf("app %s: release.services.%s.image is required", app.Name, serviceName)
+		}
+		expose := service.EffectiveExpose()
+		if expose.Public != nil {
+			if len(expose.Public.Domains) == 0 {
+				return fmt.Errorf("app %s: release.services.%s.expose.public requires at least one domain", app.Name, serviceName)
+			}
+			if service.Port == 0 {
+				return fmt.Errorf("app %s: release.services.%s.expose.public requires port to be set", app.Name, serviceName)
+			}
+		}
+		if expose.Private != nil && expose.Private.Port <= 0 {
+			return fmt.Errorf("app %s: release.services.%s.expose.private requires a port", app.Name, serviceName)
+		}
+		if expose.Internal != nil {
+			if expose.Internal.Hostname == "" {
+				return fmt.Errorf("app %s: release.services.%s.expose.internal requires hostname", app.Name, serviceName)
+			}
+			if service.Port == 0 {
+				return fmt.Errorf("app %s: release.services.%s.expose.internal requires port to be set", app.Name, serviceName)
+			}
+		}
 	}
 
 	seenComposeNames := make(map[string]struct{}, len(app.PersistentVolumes))
@@ -395,29 +448,6 @@ func ValidateApp(app *AppConfig) error {
 		}
 		seenComposeNames[volume.ComposeName] = struct{}{}
 		seenVolumeNames[volume.Name] = struct{}{}
-	}
-
-	expose := app.EffectiveExpose()
-	if expose.Public != nil {
-		if len(expose.Public.Domains) == 0 {
-			return fmt.Errorf("app %s: expose.public requires at least one domain", app.Name)
-		}
-		if app.Port == 0 {
-			return fmt.Errorf("app %s: expose.public requires port to be set", app.Name)
-		}
-	}
-	if expose.Private != nil {
-		if expose.Private.Port <= 0 {
-			return fmt.Errorf("app %s: expose.private requires a port", app.Name)
-		}
-	}
-	if expose.Internal != nil {
-		if expose.Internal.Hostname == "" {
-			return fmt.Errorf("app %s: expose.internal requires a hostname", app.Name)
-		}
-		if app.Port == 0 {
-			return fmt.Errorf("app %s: expose.internal requires port to be set", app.Name)
-		}
 	}
 
 	return nil

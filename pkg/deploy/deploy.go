@@ -17,15 +17,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func sortedKeys(m map[string]config.SidecarConfig) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 const remoteAppsDir = "/opt/warpgate/apps"
 
 // Deployer orchestrates application deployments to remote nodes.
@@ -69,10 +60,7 @@ func (d *Deployer) Deploy(appName, version string) error {
 	}
 
 	if version != "" {
-		app.ImageTag = version
-		if app.Source != nil && app.ComposeRef == "" {
-			app.ComposeRef = version
-		}
+		return fmt.Errorf("positional version deploys are no longer supported; create or deploy a release instead")
 	}
 
 	appDir, composeContent, err := d.loadComposeContent(app)
@@ -146,8 +134,8 @@ func (d *Deployer) deployManifest(app *config.AppConfig, manifest *release.Manif
 				break
 			}
 		}
-		hasEnvFile := releaseNeedsEnvFile(manifest, d.Repo.Cluster.Secrets.Server)
-		override, err := compose.GenerateReleaseOverrideWithEnvFile(app, manifest, hasEnvFile, &d.Repo.Cluster.Networking, internalHosts, dryRunIP, string(composeContent))
+		envFiles := releaseEnvFileMap(manifest, d.Repo.Cluster.Secrets.Server)
+		override, err := compose.GenerateReleaseOverrideWithEnvFiles(app, manifest, envFiles, &d.Repo.Cluster.Networking, internalHosts, dryRunIP, string(composeContent))
 		if err != nil {
 			return fmt.Errorf("failed to generate override: %w", err)
 		}
@@ -155,14 +143,17 @@ func (d *Deployer) deployManifest(app *config.AppConfig, manifest *release.Manif
 		fmt.Println(override)
 		fmt.Printf("Targets: %v\n", targetNodes)
 		if app.Source != nil {
-			fmt.Printf("Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.EffectiveComposeRef(), app.Source.ComposePath)
+			fmt.Printf("Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.ComposeRef, app.Source.ComposePath)
 		}
-		needsSecrets := manifest.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != ""
-		if needsSecrets {
-			fmt.Printf("Secrets: fetch from %s (prefix: %s) → .env file\n", d.Repo.Cluster.Secrets.Server, manifest.SecretsPrefix)
-		}
-		if len(manifest.Environment) > 0 {
-			fmt.Printf("Environment: %d variable(s) from release → .env file\n", len(manifest.Environment))
+		services := manifest.Services
+		for _, serviceName := range sortedManifestServiceNames(services) {
+			service := services[serviceName]
+			if service.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
+				fmt.Printf("Secrets: %s fetch from %s (prefix: %s) → %s\n", serviceName, d.Repo.Cluster.Secrets.Server, service.SecretsPrefix, serviceEnvFile(serviceName))
+			}
+			if len(service.Environment) > 0 {
+				fmt.Printf("Environment: %s has %d variable(s) from release → %s\n", serviceName, len(service.Environment), serviceEnvFile(serviceName))
+			}
 		}
 		if app.Strategy == config.StrategyRecreate {
 			fmt.Printf("Each node: pull -> stop old -> start new -> health check\n")
@@ -182,8 +173,8 @@ func (d *Deployer) deployManifest(app *config.AppConfig, manifest *release.Manif
 
 		d.log.Infof("[%d/%d] Deploying to node %s...", i+1, len(targetNodes), nodeID)
 
-		hasEnvFile := releaseNeedsEnvFile(manifest, d.Repo.Cluster.Secrets.Server)
-		override, err := compose.GenerateReleaseOverrideWithEnvFile(app, manifest, hasEnvFile, &d.Repo.Cluster.Networking, internalHosts, node.PrivateIP, string(composeContent))
+		envFiles := releaseEnvFileMap(manifest, d.Repo.Cluster.Secrets.Server)
+		override, err := compose.GenerateReleaseOverrideWithEnvFiles(app, manifest, envFiles, &d.Repo.Cluster.Networking, internalHosts, node.PrivateIP, string(composeContent))
 		if err != nil {
 			return fmt.Errorf("failed to generate override for node %s: %w", nodeID, err)
 		}
@@ -199,17 +190,11 @@ func (d *Deployer) deployManifest(app *config.AppConfig, manifest *release.Manif
 		deployed = append(deployed, nodeID)
 	}
 
-	if app.EffectiveExpose().Internal != nil {
-		if err := d.updateInternalRoutes(app); err != nil {
-			d.log.Warnf("Failed to update internal routes: %v", err)
-		}
-	}
-
-	for _, sidecarName := range sortedKeys(app.Sidecars) {
-		sidecar := app.Sidecars[sidecarName]
-		if sidecar.EffectiveExpose().Internal != nil {
-			if err := d.updateSidecarInternalRoutes(app, sidecarName, sidecar); err != nil {
-				d.log.Warnf("Failed to update internal routes for sidecar %s: %v", sidecarName, err)
+	for _, serviceName := range sortedReleaseServiceConfigKeys(app.Release.Services) {
+		service := app.Release.Services[serviceName]
+		if service.EffectiveExpose().Internal != nil {
+			if err := d.updateReleaseServiceInternalRoutes(app, serviceName, service); err != nil {
+				d.log.Warnf("Failed to update internal routes for service %s: %v", serviceName, err)
 			}
 		}
 	}
@@ -227,8 +212,8 @@ func (d *Deployer) loadComposeContent(app *config.AppConfig) (string, []byte, er
 	composePath := d.Repo.AppComposePath(app.Name)
 
 	if app.Source != nil {
-		d.log.Infof("Fetching compose from %s@%s...", app.Source.Repo, app.EffectiveComposeRef())
-		composeContent, err := FetchComposeFromSource(app.Source, app.EffectiveComposeRef(), d.GitHubToken)
+		d.log.Infof("Fetching compose from %s@%s...", app.Source.Repo, app.ComposeRef)
+		composeContent, err := FetchComposeFromSource(app.Source, app.ComposeRef, d.GitHubToken)
 		if err != nil {
 			return "", nil, fmt.Errorf("failed to fetch remote compose: %w", err)
 		}
@@ -284,7 +269,7 @@ func (d *Deployer) deployToNode(app *config.AppConfig, manifest *release.Manifes
 	}
 
 	if hasEnvFile {
-		if _, _, err := client.RunCommand("rm -f " + remoteDir + "/.env"); err != nil {
+		if _, _, err := client.RunCommand("rm -f " + strings.Join(releaseEnvPaths(remoteDir, manifest), " ")); err != nil {
 			return fmt.Errorf("failed to remove .env file: %w", err)
 		}
 	}
@@ -604,8 +589,8 @@ type AppNodeStatus struct {
 	Slot string
 	// State is the deployment state: "healthy", "running", "unhealthy", "not deployed".
 	State string
-	// Sidecars holds per-container status for sidecar services.
-	Sidecars []ContainerStatus
+	// Services holds per-container status for release services.
+	Services []ContainerStatus
 	// Error is set if the status could not be determined.
 	Error string
 	// ShadowVersion is the shadow deployment version, if any.
@@ -664,7 +649,7 @@ func (d *Deployer) ClusterStatus() (*ClusterStatusResult, error) {
 			}
 
 			status.State = ParseContainerHealth(stdout)
-			status.Sidecars = parseSidecarStatuses(stdout, app.Sidecars)
+			status.Services = parseReleaseServiceStatuses(stdout, app.Release.Services)
 
 			// Populate shadow status if a shadow is deployed.
 			if state.ShadowVersion != "" {
@@ -721,10 +706,10 @@ func ParseContainerHealth(psOutput string) string {
 	return "running"
 }
 
-// parseSidecarStatuses extracts per-container status for sidecar services
+// parseReleaseServiceStatuses extracts per-container status for release services
 // from docker compose ps output. Each line has format: "service\tname\tstatus".
-func parseSidecarStatuses(psOutput string, sidecars map[string]config.SidecarConfig) []ContainerStatus {
-	if len(sidecars) == 0 {
+func parseReleaseServiceStatuses(psOutput string, services map[string]config.ReleaseServiceConfig) []ContainerStatus {
+	if len(services) == 0 {
 		return nil
 	}
 
@@ -739,7 +724,7 @@ func parseSidecarStatuses(psOutput string, sidecars map[string]config.SidecarCon
 			continue
 		}
 		service, name, statusStr := parts[0], parts[1], parts[2]
-		if _, ok := sidecars[service]; !ok {
+		if _, ok := services[service]; !ok {
 			continue
 		}
 		state := "running"
@@ -808,8 +793,8 @@ func (d *Deployer) updateInternalProxy(app *config.AppConfig) error {
 	return nil
 }
 
-func (d *Deployer) updateSidecarInternalRoutes(app *config.AppConfig, sidecarName string, sidecar config.SidecarConfig) error {
-	routeYAML, err := GenerateSidecarInternalRoute(app, sidecarName, sidecar, d.Repo.Cluster)
+func (d *Deployer) updateReleaseServiceInternalRoutes(app *config.AppConfig, serviceName string, service config.ReleaseServiceConfig) error {
+	routeYAML, err := GenerateReleaseServiceInternalRoute(app, serviceName, service, d.Repo.Cluster)
 	if err != nil {
 		return err
 	}
@@ -817,48 +802,20 @@ func (d *Deployer) updateSidecarInternalRoutes(app *config.AppConfig, sidecarNam
 		return nil
 	}
 
-	remotePath := "/opt/warpgate/traefik/dynamic/" + app.Name + "-" + sidecarName + ".yml"
-	d.log.Infof("Updating internal route for sidecar %s.%s across all nodes...", app.Name, sidecarName)
+	remotePath := "/opt/warpgate/traefik/dynamic/" + app.Name + "-" + serviceName + ".yml"
+	d.log.Infof("Updating internal route for service %s.%s across all nodes...", app.Name, serviceName)
 
 	for _, node := range d.Repo.Cluster.Nodes {
 		client, err := d.connect(&node)
 		if err != nil {
-			d.log.Warnf("Failed to connect to %s for sidecar route update: %v", node.ID, err)
+			d.log.Warnf("Failed to connect to %s for service route update: %v", node.ID, err)
 			continue
 		}
 		if err := client.WriteFile(remotePath, routeYAML); err != nil {
-			d.log.Warnf("Failed to write sidecar route to %s: %v", node.ID, err)
+			d.log.Warnf("Failed to write service route to %s: %v", node.ID, err)
 		}
 		client.Close()
 	}
-	return nil
-}
-
-func (d *Deployer) updateInternalRoutes(app *config.AppConfig) error {
-	routeYAML, err := GenerateInternalRoute(app, d.Repo.Cluster)
-	if err != nil {
-		return err
-	}
-	if routeYAML == "" {
-		return nil
-	}
-
-	remotePath := "/opt/warpgate/traefik/dynamic/" + app.Name + ".yml"
-	d.log.Infof("Updating internal route for %s across all nodes...", app.EffectiveExpose().Internal.Hostname)
-
-	for _, node := range d.Repo.Cluster.Nodes {
-		client, err := d.connect(&node)
-		if err != nil {
-			d.log.Warnf("Failed to connect to %s for internal route update: %v", node.ID, err)
-			continue
-		}
-
-		if err := client.WriteFile(remotePath, routeYAML); err != nil {
-			d.log.Warnf("Failed to write internal route to %s: %v", node.ID, err)
-		}
-		client.Close()
-	}
-
 	return nil
 }
 
@@ -910,20 +867,21 @@ func (d *Deployer) connect(node *config.NodeConfig) (*ssh.Client, error) {
 	return client, nil
 }
 
-// needsEnvFile reports whether the app requires a .env file on the remote node.
-// This is true when the app has environment variables, fetchable secrets, or both.
-func needsEnvFile(app *config.AppConfig, secretsServer string) bool {
-	if len(app.Environment) > 0 {
-		return true
-	}
-	return app.SecretsPrefix != "" && secretsServer != ""
+func releaseNeedsEnvFile(manifest *release.Manifest, secretsServer string) bool {
+	return len(releaseEnvFileMap(manifest, secretsServer)) > 0
 }
 
-func releaseNeedsEnvFile(manifest *release.Manifest, secretsServer string) bool {
-	if len(manifest.Environment) > 0 {
-		return true
+func releaseEnvFileMap(manifest *release.Manifest, secretsServer string) map[string]bool {
+	envFiles := make(map[string]bool)
+	for serviceName, service := range manifest.Services {
+		if len(service.Environment) > 0 {
+			envFiles[serviceName] = true
+		}
+		if service.SecretsPrefix != "" && secretsServer != "" {
+			envFiles[serviceName] = true
+		}
 	}
-	return manifest.SecretsPrefix != "" && secretsServer != ""
+	return envFiles
 }
 
 func (d *Deployer) composeUpCommand(app *config.AppConfig, projectFlag, composeFiles string, hasEnvFile bool) string {
@@ -1072,28 +1030,36 @@ func (d *Deployer) uploadDeploymentFiles(fs deploymentFS, remoteDir, appDir stri
 	return nil
 }
 
-func (d *Deployer) writeEnvFile(writer fileWriter, remoteDir string, app *config.AppConfig) (bool, error) {
-	if !needsEnvFile(app, d.Repo.Cluster.Secrets.Server) {
+func (d *Deployer) writeReleaseEnvFile(writer fileWriter, remoteDir string, manifest *release.Manifest) (bool, error) {
+	services := manifest.Services
+	envFiles := releaseEnvFileMap(manifest, d.Repo.Cluster.Secrets.Server)
+	if len(envFiles) == 0 {
 		return false, nil
 	}
 
-	envContent, err := d.fetchSecrets(app)
-	if err != nil {
-		return false, fmt.Errorf("failed to fetch secrets: %w", err)
+	mergedProjectEnv := make(map[string]string)
+	for _, serviceName := range sortedManifestServiceNames(services) {
+		if !envFiles[serviceName] {
+			continue
+		}
+		service := services[serviceName]
+		envContent, mergedEnv, err := d.fetchServiceEnv(serviceName, service.Environment, service.SecretsPrefix)
+		if err != nil {
+			return false, err
+		}
+		for key, value := range mergedEnv {
+			mergedProjectEnv[key] = value
+		}
+		envPath := remoteDir + "/" + serviceEnvFile(serviceName)
+		if err := writer.WriteFileSecret(envPath, envContent); err != nil {
+			return false, fmt.Errorf("failed to write %s: %w", serviceEnvFile(serviceName), err)
+		}
 	}
-	envPath := remoteDir + "/.env"
-	if err := writer.WriteFileSecret(envPath, envContent); err != nil {
+
+	if err := writer.WriteFileSecret(remoteDir+"/.env", secrets.FormatDotEnv(mergedProjectEnv)); err != nil {
 		return false, fmt.Errorf("failed to write .env: %w", err)
 	}
 	return true, nil
-}
-
-func (d *Deployer) writeReleaseEnvFile(writer fileWriter, remoteDir string, manifest *release.Manifest) (bool, error) {
-	app := &config.AppConfig{
-		Environment:   manifest.Environment,
-		SecretsPrefix: manifest.SecretsPrefix,
-	}
-	return d.writeEnvFile(writer, remoteDir, app)
 }
 
 func (d *Deployer) loginRegistry(runner stdinRunner) error {
@@ -1219,21 +1185,52 @@ func (d *Deployer) saveDeployState(client *ssh.Client, remoteDir string, app *co
 	}
 }
 
-func (d *Deployer) fetchSecrets(app *config.AppConfig) (string, error) {
+func (d *Deployer) fetchServiceEnv(serviceName string, environment map[string]string, secretsPrefix string) (string, map[string]string, error) {
 	var secretEnv map[string]string
-	if app.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
+	if secretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
 		client := secrets.NewClient(d.Repo.Cluster.Secrets.Server)
-		d.log.Infof("Fetching secrets for prefix %s...", app.SecretsPrefix)
+		d.log.Infof("Fetching secrets for service %s prefix %s...", serviceName, secretsPrefix)
 		var err error
-		secretEnv, err = client.FetchEnv(app.SecretsPrefix)
+		secretEnv, err = client.FetchEnv(secretsPrefix)
 		if err != nil {
-			return "", err
+			return "", nil, fmt.Errorf("failed to fetch secrets for service %s: %w", serviceName, err)
 		}
-		d.log.Infof("Fetched %d secret(s)", len(secretEnv))
+		d.log.Infof("Fetched %d secret(s) for service %s", len(secretEnv), serviceName)
 	}
 
-	merged := mergeEnvironment(app.Environment, secretEnv)
-	return secrets.FormatDotEnv(merged), nil
+	merged := mergeEnvironment(environment, secretEnv)
+	return secrets.FormatDotEnv(merged), merged, nil
+}
+
+func sortedManifestServiceNames(services map[string]release.ServiceManifest) []string {
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func sortedReleaseServiceConfigKeys(services map[string]config.ReleaseServiceConfig) []string {
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func serviceEnvFile(serviceName string) string {
+	return ".env." + serviceName
+}
+
+func releaseEnvPaths(remoteDir string, manifest *release.Manifest) []string {
+	services := manifest.Services
+	paths := []string{remoteDir + "/.env"}
+	for _, serviceName := range sortedManifestServiceNames(services) {
+		paths = append(paths, remoteDir+"/"+serviceEnvFile(serviceName))
+	}
+	return paths
 }
 
 // mergeEnvironment combines app-level environment variables with secrets.

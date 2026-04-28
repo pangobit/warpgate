@@ -218,7 +218,7 @@ func (m *DashboardModel) rebuildAppsTable() {
 
 		rows = append(rows, table.Row{app.App, version, slot, styleState(state), app.NodeID})
 
-		for _, sc := range app.Sidecars {
+		for _, sc := range app.Services {
 			rows = append(rows, table.Row{
 				dashDimStyle.Render("└ " + sc.Service), "", "", styleState(sc.State), "",
 			})
@@ -329,10 +329,10 @@ func tableWidth(cols []table.Column) int {
 var (
 	statusDot = "●"
 
-	dashTitleStyle     = lipgloss.NewStyle().Bold(true)
-	dashHeaderStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#04B575"))
-	dashDimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#606060"))
-	dashErrorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4672"))
+	dashTitleStyle  = lipgloss.NewStyle().Bold(true)
+	dashHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#04B575"))
+	dashDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#606060"))
+	dashErrorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4672"))
 
 	dashHealthyStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
 	dashRunningStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700"))

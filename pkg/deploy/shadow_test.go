@@ -9,7 +9,7 @@ import (
 	"github.com/pangobit/warpgate/pkg/config"
 )
 
-func TestGenerateShadowInternalRoute(t *testing.T) {
+func TestGenerateReleaseServiceShadowInternalRoute(t *testing.T) {
 	tests := []struct {
 		name    string
 		app     *config.AppConfig
@@ -18,15 +18,7 @@ func TestGenerateShadowInternalRoute(t *testing.T) {
 	}{
 		{
 			name: "generates shadow hostname and backends for target nodes",
-			app: &config.AppConfig{
-				Name:    "auth",
-				Image:   "ghcr.io/org/auth",
-				Port:    8085,
-				Targets: []string{"node-1", "node-2"},
-				Expose: &config.ExposeConfig{
-					Internal: &config.InternalExpose{Hostname: "auth.internal"},
-				},
-			},
+			app:  internalRouteApp([]string{"node-1", "node-2"}, 8085, "auth.internal"),
 			cluster: &config.ClusterConfig{
 				Nodes: []config.NodeConfig{
 					{ID: "node-1", Host: "10.0.0.1", PrivateIP: "100.95.115.81"},
@@ -51,9 +43,10 @@ func TestGenerateShadowInternalRoute(t *testing.T) {
 		{
 			name: "returns empty when app has no internal expose",
 			app: &config.AppConfig{
-				Name:  "worker",
-				Image: "ghcr.io/org/worker",
-				Port:  8080,
+				Name: "worker",
+				Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+					"worker": {Image: "ghcr.io/org/worker", Port: 8080},
+				}},
 			},
 			cluster: &config.ClusterConfig{
 				Nodes: []config.NodeConfig{
@@ -70,10 +63,12 @@ func TestGenerateShadowInternalRoute(t *testing.T) {
 			name: "returns empty when port is zero",
 			app: &config.AppConfig{
 				Name: "auth",
-				Port: 0,
-				Expose: &config.ExposeConfig{
-					Internal: &config.InternalExpose{Hostname: "auth.internal"},
-				},
+				Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+					"auth": {
+						Image:  "ghcr.io/org/auth",
+						Expose: &config.ExposeConfig{Internal: &config.InternalExpose{Hostname: "auth.internal"}},
+					},
+				}},
 			},
 			cluster: &config.ClusterConfig{
 				Nodes: []config.NodeConfig{
@@ -88,15 +83,7 @@ func TestGenerateShadowInternalRoute(t *testing.T) {
 		},
 		{
 			name: "skips nodes without private IP",
-			app: &config.AppConfig{
-				Name:    "auth",
-				Image:   "ghcr.io/org/auth",
-				Port:    8085,
-				Targets: []string{"node-1", "node-2"},
-				Expose: &config.ExposeConfig{
-					Internal: &config.InternalExpose{Hostname: "auth.internal"},
-				},
-			},
+			app:  internalRouteApp([]string{"node-1", "node-2"}, 8085, "auth.internal"),
 			cluster: &config.ClusterConfig{
 				Nodes: []config.NodeConfig{
 					{ID: "node-1", Host: "10.0.0.1", PrivateIP: "100.95.115.81"},
@@ -114,15 +101,7 @@ func TestGenerateShadowInternalRoute(t *testing.T) {
 		},
 		{
 			name: "returns empty when all nodes lack private IP",
-			app: &config.AppConfig{
-				Name:    "auth",
-				Image:   "ghcr.io/org/auth",
-				Port:    8085,
-				Targets: []string{"node-1"},
-				Expose: &config.ExposeConfig{
-					Internal: &config.InternalExpose{Hostname: "auth.internal"},
-				},
-			},
+			app:  internalRouteApp([]string{"node-1"}, 8085, "auth.internal"),
 			cluster: &config.ClusterConfig{
 				Nodes: []config.NodeConfig{
 					{ID: "node-1", Host: "10.0.0.1"},
@@ -138,9 +117,10 @@ func TestGenerateShadowInternalRoute(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			output, err := GenerateShadowInternalRoute(tt.app, tt.cluster)
+			service := tt.app.Release.Services[tt.app.Name]
+			output, err := GenerateReleaseServiceShadowInternalRoute(tt.app, tt.app.Name, service, tt.cluster)
 			if err != nil {
-				t.Fatalf("GenerateShadowInternalRoute() error: %v", err)
+				t.Fatalf("GenerateReleaseServiceShadowInternalRoute() error: %v", err)
 			}
 			tt.check(t, output)
 		})
