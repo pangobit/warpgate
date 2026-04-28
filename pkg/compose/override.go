@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/pangobit/warpgate/pkg/config"
+	"github.com/pangobit/warpgate/pkg/release"
 	"gopkg.in/yaml.v3"
 )
 
@@ -19,8 +20,10 @@ type OverrideFile struct {
 
 // ServiceOverride holds the fields injected by warpgate into a compose override.
 type ServiceOverride struct {
-	// Image is the full image reference with tag.
+	// Image is the full image reference with tag or digest.
 	Image string `yaml:"image,omitempty"`
+	// EnvFile lists environment files injected at deploy time.
+	EnvFile []string `yaml:"env_file,omitempty"`
 	// ExtraHosts maps internal hostnames to the node's private IP for service discovery.
 	ExtraHosts []string `yaml:"extra_hosts,omitempty"`
 	// Labels sets Docker container labels (used by shadow overrides to disable public Traefik).
@@ -46,16 +49,21 @@ func acmeChallenge(cfg config.ACMEConfig) string {
 	return strings.ToLower(cfg.Challenge)
 }
 
-// GenerateOverride creates a docker-compose.override.yml that injects the image tag
-// and extra_hosts for internal service discovery. nodePrivateIP is the IP address
-// containers use to resolve internal hostnames. Traefik labels and network
-// configuration are authored directly in each app's compose.yml.
+// GenerateOverride creates a docker-compose.override.yml that injects the image
+// reference, env file reference, and extra_hosts for internal service discovery.
+// nodePrivateIP is the IP address containers use to resolve internal hostnames.
+// Traefik labels and network configuration are authored directly in each app's compose.yml.
 func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
-	version := app.Version
-	if version == "" {
-		version = "latest"
-	}
+	return generateOverride(app, app.EffectiveImageRef(), needsReleaseEnvFile(app.Environment, app.SecretsPrefix), networking, internalHosts, nodePrivateIP, composeContent)
+}
 
+// GenerateReleaseOverrideWithEnvFile creates an override for a release and
+// explicit env file availability.
+func GenerateReleaseOverrideWithEnvFile(app *config.AppConfig, manifest *release.Manifest, hasEnvFile bool, networking *config.NetworkingConfig, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
+	return generateOverride(app, manifest.ImageRef, hasEnvFile, networking, internalHosts, nodePrivateIP, composeContent)
+}
+
+func generateOverride(app *config.AppConfig, imageRef string, hasEnvFile bool, networking *config.NetworkingConfig, internalHosts []string, nodePrivateIP string, composeContent string) (string, error) {
 	serviceNames, err := ParseComposeServices(composeContent)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse compose services: %w", err)
@@ -77,7 +85,10 @@ func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig
 		}
 
 		if svcName == app.Name {
-			svc.Image = app.Image + ":" + version
+			svc.Image = imageRef
+			if hasEnvFile {
+				svc.EnvFile = []string{".env"}
+			}
 		}
 
 		services[svcName] = svc
@@ -99,6 +110,10 @@ func GenerateOverride(app *config.AppConfig, networking *config.NetworkingConfig
 	}
 
 	return string(yamlBytes), nil
+}
+
+func needsReleaseEnvFile(env map[string]string, secretsPrefix string) bool {
+	return len(env) > 0 || secretsPrefix != ""
 }
 
 // GenerateShadowOverride creates a docker-compose.shadow-override.yml that disables

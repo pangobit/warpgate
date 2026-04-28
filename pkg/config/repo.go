@@ -149,3 +149,8 @@ func (r *RepoConfig) AppDir(appName string) string {
 func (r *RepoConfig) AppComposePath(appName string) string {
 	return filepath.Join(r.Root, "apps", appName, "compose.yml")
 }
+
+// AppReleasesDir returns the absolute path to an app's release manifest directory.
+func (r *RepoConfig) AppReleasesDir(appName string) string {
+	return filepath.Join(r.Root, "apps", appName, "releases")
+}

@@ -51,6 +51,48 @@ func TestGenerateOverride(t *testing.T) {
 			},
 		},
 		{
+			name: "image digest overrides tag",
+			app: &config.AppConfig{
+				Name:        "api",
+				Image:       "ghcr.io/org/api",
+				ImageTag:    "v2.0.0",
+				ImageDigest: "sha256:abc123",
+			},
+			compose: `services:
+  api:
+    image: ghcr.io/org/api
+`,
+			check: func(t *testing.T, o OverrideFile, _ string) {
+				if o.Services["api"].Image != "ghcr.io/org/api@sha256:abc123" {
+					t.Errorf("expected digest image ref, got %s", o.Services["api"].Image)
+				}
+			},
+		},
+		{
+			name: "main service gets env_file when app has environment",
+			app: &config.AppConfig{
+				Name:  "api",
+				Image: "ghcr.io/org/api",
+				Environment: map[string]string{
+					"LOG_LEVEL": "debug",
+				},
+			},
+			compose: `services:
+  api:
+    image: ghcr.io/org/api
+  worker:
+    image: ghcr.io/org/worker
+`,
+			check: func(t *testing.T, o OverrideFile, _ string) {
+				if len(o.Services["api"].EnvFile) != 1 || o.Services["api"].EnvFile[0] != ".env" {
+					t.Errorf("expected api env_file .env, got %v", o.Services["api"].EnvFile)
+				}
+				if len(o.Services["worker"].EnvFile) != 0 {
+					t.Errorf("worker should not get env_file, got %v", o.Services["worker"].EnvFile)
+				}
+			},
+		},
+		{
 			name: "extra_hosts from internal hosts",
 			app: &config.AppConfig{
 				Name:    "auth",

@@ -9,6 +9,14 @@ import (
 type DeployState struct {
 	// App is the application name.
 	App string `json:"app"`
+	// CurrentRelease is the currently deployed release ID.
+	CurrentRelease string `json:"current_release,omitempty"`
+	// PreviousRelease is the previously deployed release ID for rollback.
+	PreviousRelease string `json:"previous_release,omitempty"`
+	// CurrentReleaseInputs captures the tuple that produced the current release.
+	CurrentReleaseInputs ReleaseInputs `json:"current_release_inputs,omitempty"`
+	// PreviousReleaseInputs captures the tuple that produced the previous release.
+	PreviousReleaseInputs ReleaseInputs `json:"previous_release_inputs,omitempty"`
 	// CurrentVersion is the currently deployed image tag.
 	CurrentVersion string `json:"current_version"`
 	// PreviousVersion is the previously deployed image tag (for rollback).
@@ -22,6 +30,16 @@ type DeployState struct {
 	ShadowVersion string `json:"shadow_version,omitempty"`
 	// ShadowDeployedAt is the timestamp of the shadow deployment.
 	ShadowDeployedAt *time.Time `json:"shadow_deployed_at,omitempty"`
+}
+
+// ReleaseInputs identifies the release construction inputs recorded in deploy state.
+type ReleaseInputs struct {
+	// ImageRef is the image reference used by the release.
+	ImageRef string `json:"image_ref,omitempty"`
+	// ComposeRev identifies the compose shape used by the release.
+	ComposeRev string `json:"compose_rev,omitempty"`
+	// EnvHash identifies the environment layer used by the release.
+	EnvHash string `json:"env_hash,omitempty"`
 }
 
 // InactiveSlot returns the slot that is not currently active.

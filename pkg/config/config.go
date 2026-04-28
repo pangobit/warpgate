@@ -158,9 +158,6 @@ const (
 )
 
 // SourceConfig defines a remote source for the compose file.
-// The git reference used to fetch the compose file comes from AppConfig.Version,
-// not from this struct — version is the single source of truth for both the
-// image tag and the git ref.
 type SourceConfig struct {
 	// Repo is the GitHub repository (e.g., "github.com/owner/repo").
 	Repo string `yaml:"repo"`
@@ -184,8 +181,14 @@ type AppConfig struct {
 	Name string `yaml:"-"`
 	// Image is the Docker image reference (without tag).
 	Image string `yaml:"image"`
-	// Version is the image tag, defaults to "latest".
+	// Version is the legacy image tag and compose ref, defaults to "latest".
 	Version string `yaml:"version,omitempty"`
+	// ImageTag is the Docker image tag used when ImageDigest is empty.
+	ImageTag string `yaml:"image_tag,omitempty"`
+	// ImageDigest is the immutable Docker image digest for release creation.
+	ImageDigest string `yaml:"image_digest,omitempty"`
+	// ComposeRef is the source reference for the compose file when Source is set.
+	ComposeRef string `yaml:"compose_ref,omitempty"`
 	// Targets is the list of node IDs to deploy to. Empty means all nodes.
 	Targets []string `yaml:"targets,omitempty"`
 	// SecretsPrefix is the secretsauce prefix for secret injection.
@@ -206,6 +209,36 @@ type AppConfig struct {
 	// Environment provides non-secret environment variables that are merged with secrets
 	// and written to the .env file at deploy time. Secrets take precedence on collision.
 	Environment map[string]string `yaml:"environment,omitempty"`
+}
+
+// EffectiveImageTag returns the configured image tag with legacy version fallback.
+func (a *AppConfig) EffectiveImageTag() string {
+	if a.ImageTag != "" {
+		return a.ImageTag
+	}
+	if a.Version != "" {
+		return a.Version
+	}
+	return "latest"
+}
+
+// EffectiveComposeRef returns the configured compose source ref with legacy version fallback.
+func (a *AppConfig) EffectiveComposeRef() string {
+	if a.ComposeRef != "" {
+		return a.ComposeRef
+	}
+	if a.Version != "" {
+		return a.Version
+	}
+	return a.EffectiveImageTag()
+}
+
+// EffectiveImageRef returns an immutable digest reference when configured, otherwise a tag reference.
+func (a *AppConfig) EffectiveImageRef() string {
+	if a.ImageDigest != "" {
+		return a.Image + "@" + a.ImageDigest
+	}
+	return a.Image + ":" + a.EffectiveImageTag()
 }
 
 // EffectiveExpose returns the app's expose config, or a zero value if nil.
@@ -328,8 +361,8 @@ func ValidateApp(app *AppConfig) error {
 		return fmt.Errorf("app %s: image is required", app.Name)
 	}
 
-	if app.Source != nil && app.Version == "" {
-		return fmt.Errorf("app %s: version is required when source is set (used as git ref for fetching compose)", app.Name)
+	if app.Source != nil && app.EffectiveComposeRef() == "" {
+		return fmt.Errorf("app %s: compose_ref is required when source is set", app.Name)
 	}
 
 	switch app.Strategy {

@@ -58,6 +58,7 @@ var (
 	deployTailscaleSSH bool
 	deploySSHKey       string
 	deployUser         string
+	deployReleaseID    string
 )
 
 // Remove flags
@@ -122,6 +123,7 @@ func Setup() {
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "Path to cluster.yml config file")
 
 	rootCmd.AddCommand(initCmd)
+	rootCmd.AddCommand(releaseCmd)
 	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(dashboardCmd)
@@ -145,6 +147,7 @@ func Setup() {
 	deployCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
 	deployCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
 	deployCmd.Flags().StringVar(&deployUser, "user", "", "SSH user (defaults to current user)")
+	deployCmd.Flags().StringVar(&deployReleaseID, "release", "", "Release ID to deploy, or latest")
 
 	statusCmd.Flags().BoolVar(&deployTailscaleSSH, "tailscale-ssh", false, "Use Tailscale SSH")
 	statusCmd.Flags().StringVar(&deploySSHKey, "ssh-key", "", "Path to SSH private key")
@@ -265,9 +268,11 @@ secrets:
 
 		appConfig := `kind: warpgate/app
 image: ghcr.io/org/example-app
-version: latest
+image_tag: latest
 secrets_prefix: example-app/prod
 port: 8080
+environment:
+  LOG_LEVEL: info
 
 expose:
   public:
@@ -285,8 +290,6 @@ expose:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    environment:
-      LOG_LEVEL: info
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
       interval: 10s
@@ -324,6 +327,9 @@ Examples:
 	Args: cobra.MaximumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if deployAll {
+			if deployReleaseID != "" {
+				return fmt.Errorf("--release cannot be used with --all")
+			}
 			if len(args) > 0 {
 				return fmt.Errorf("--all does not accept app-name arguments")
 			}
@@ -333,11 +339,7 @@ Examples:
 			if !deployDryRun {
 				fmt.Printf("Will deploy %d app(s):\n", len(repo.Apps))
 				for _, app := range repo.Apps {
-					version := app.Version
-					if version == "" {
-						version = "latest"
-					}
-					fmt.Printf("  - %s (%s)\n", app.Name, version)
+					fmt.Printf("  - %s (%s)\n", app.Name, app.EffectiveImageTag())
 				}
 				fmt.Print("Continue? [y/N] ")
 				var answer string
@@ -371,7 +373,34 @@ Examples:
 		d.User = deployUser
 		d.GitHubToken = os.Getenv("GITHUB_TOKEN")
 
+		if deployReleaseID != "" {
+			return d.DeployRelease(appName, deployReleaseID)
+		}
 		return d.Deploy(appName, version)
+	},
+}
+
+var releaseCmd = &cobra.Command{
+	Use:   "release <app-name>",
+	Short: "Create a release manifest for an application",
+	Long: `Create a release manifest by snapshotting the app image reference,
+compose revision, and environment layer. The manifest is written under
+apps/<app-name>/releases/ and latest.json is updated to the same release.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		d := deploy.NewDeployer(repo, "")
+		d.GitHubToken = os.Getenv("GITHUB_TOKEN")
+
+		manifest, err := d.CreateRelease(args[0])
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Release: %s\n", manifest.ID)
+		fmt.Printf("Image: %s\n", manifest.ImageRef)
+		fmt.Printf("Compose: %s\n", manifest.ComposeRev)
+		fmt.Printf("Env: %s\n", manifest.EnvHash)
+		return nil
 	},
 }
 
@@ -446,11 +475,7 @@ func showClusterStatus() error {
 
 	fmt.Printf("\nApps: %d\n\n", len(repo.Apps))
 	for _, app := range repo.Apps {
-		version := app.Version
-		if version == "" {
-			version = "latest"
-		}
-		fmt.Printf("  %s (%s:%s)\n", app.Name, app.Image, version)
+		fmt.Printf("  %s (%s)\n", app.Name, app.EffectiveImageRef())
 		fmt.Printf("    Targets: %v\n", app.GetTargetNodes(repo.Cluster.Nodes))
 		expose := app.EffectiveExpose()
 		if expose.Public != nil && len(expose.Public.Domains) > 0 {
