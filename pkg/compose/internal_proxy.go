@@ -24,17 +24,20 @@ type InternalProxyConfig struct {
 
 // CollectInternalEntrypoints scans all apps targeting a node and returns the
 // entrypoints needed for the internal proxy. Always includes the base "internal"
-// entrypoint on port 8080 for cross-node routing. Only creates per-app/sidecar
+// entrypoint on port 8080 for cross-node routing. Only creates per-service
 // entrypoints when expose.private is explicitly configured.
 func CollectInternalEntrypoints(apps []*config.AppConfig) map[string]int {
 	eps := map[string]int{"internal": 8080}
 	for _, app := range apps {
-		if pe := app.EffectiveExpose().Private; pe != nil && !reservedInternalProxyPorts[pe.Port] {
-			eps[app.Name+"-port-internal"] = pe.Port
-		}
-		for name, sidecar := range app.Sidecars {
-			if pe := sidecar.EffectiveExpose().Private; pe != nil {
+		for name, service := range app.Release.Services {
+			if pe := service.EffectiveExpose().Private; pe != nil {
+				if reservedInternalProxyPorts[pe.Port] {
+					continue
+				}
 				epName := app.Name + "-" + name + "-internal"
+				if name == app.Name {
+					epName = app.Name + "-port-internal"
+				}
 				eps[epName] = pe.Port
 			}
 		}

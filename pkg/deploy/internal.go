@@ -41,59 +41,52 @@ type internalServer struct {
 	URL string `yaml:"url"`
 }
 
-// GenerateInternalRoute creates a Traefik dynamic file config for cross-node
-// routing of an internal service. It lists all target nodes' private IPs as
-// backends for the service's internal hostname.
-func GenerateInternalRoute(app *config.AppConfig, cluster *config.ClusterConfig) (string, error) {
-	ie := app.EffectiveExpose().Internal
-	if ie == nil || app.Port == 0 {
+// GenerateReleaseServiceInternalRoute creates a Traefik dynamic file config for
+// cross-node routing of a first-class release service.
+func GenerateReleaseServiceInternalRoute(app *config.AppConfig, serviceName string, service config.ReleaseServiceConfig, cluster *config.ClusterConfig) (string, error) {
+	ie := service.EffectiveExpose().Internal
+	if ie == nil || service.Port == 0 {
 		return "", nil
 	}
 
+	entrypointName := app.Name + "-" + serviceName + "-internal"
+	if serviceName == app.Name {
+		entrypointName = app.Name + "-internal"
+	}
+	entrypoint := entrypointName
+	if serviceName == app.Name {
+		entrypoint = "internal"
+	}
 	return generateInternalRouteConfig(
-		app.Name+"-internal",
+		entrypointName,
 		ie.Hostname,
-		"internal",
-		app.Port,
+		entrypoint,
+		service.Port,
 		app.GetTargetNodes(cluster.Nodes),
 		cluster,
 	)
 }
 
-// GenerateSidecarInternalRoute creates a Traefik dynamic file config for cross-node
-// routing of a sidecar's internal hostname.
-func GenerateSidecarInternalRoute(app *config.AppConfig, sidecarName string, sidecar config.SidecarConfig, cluster *config.ClusterConfig) (string, error) {
-	ie := sidecar.EffectiveExpose().Internal
-	if ie == nil || sidecar.Port == 0 {
-		return "", nil
-	}
-
-	entrypointName := app.Name + "-" + sidecarName + "-internal"
-	return generateInternalRouteConfig(
-		entrypointName,
-		ie.Hostname,
-		entrypointName,
-		sidecar.Port,
-		app.GetTargetNodes(cluster.Nodes),
-		cluster,
-	)
-}
-
-// GenerateShadowInternalRoute creates a Traefik dynamic file config for the
-// shadow version of an internal service. The shadow hostname uses the
-// "shadow-{app}.internal" convention.
-func GenerateShadowInternalRoute(app *config.AppConfig, cluster *config.ClusterConfig) (string, error) {
-	ie := app.EffectiveExpose().Internal
-	if ie == nil || app.Port == 0 {
+// GenerateReleaseServiceShadowInternalRoute creates a Traefik dynamic file
+// config for the shadow version of a first-class release service.
+func GenerateReleaseServiceShadowInternalRoute(app *config.AppConfig, serviceName string, service config.ReleaseServiceConfig, cluster *config.ClusterConfig) (string, error) {
+	ie := service.EffectiveExpose().Internal
+	if ie == nil || service.Port == 0 {
 		return "", nil
 	}
 
 	shadowHostname := "shadow-" + ie.Hostname
+	entrypointName := app.Name + "-" + serviceName + "-shadow-internal"
+	entrypoint := app.Name + "-" + serviceName + "-internal"
+	if serviceName == app.Name {
+		entrypointName = app.Name + "-shadow-internal"
+		entrypoint = "internal"
+	}
 	return generateInternalRouteConfig(
-		app.Name+"-shadow-internal",
+		entrypointName,
 		shadowHostname,
-		"internal",
-		app.Port,
+		entrypoint,
+		service.Port,
 		app.GetTargetNodes(cluster.Nodes),
 		cluster,
 	)

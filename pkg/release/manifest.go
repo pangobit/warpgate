@@ -34,8 +34,26 @@ type Manifest struct {
 	Environment map[string]string `json:"environment,omitempty"`
 	// SecretsPrefix identifies the secret reference namespace for this release.
 	SecretsPrefix string `json:"secrets_prefix,omitempty"`
+	// Services holds per-service release inputs.
+	Services map[string]ServiceManifest `json:"services,omitempty"`
 	// CreatedAt is the time the release manifest was created.
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// ServiceManifest captures immutable release inputs for one Compose service.
+type ServiceManifest struct {
+	// ImageRef is the image reference used in the generated compose override.
+	ImageRef string `json:"image_ref"`
+	// ImageTag is the mutable tag captured when the release was created.
+	ImageTag string `json:"image_tag,omitempty"`
+	// ImageDigest is the immutable digest captured when configured.
+	ImageDigest string `json:"image_digest,omitempty"`
+	// EnvHash identifies the environment layer captured by this service release.
+	EnvHash string `json:"env_hash"`
+	// Environment holds non-secret environment values written to the service env file.
+	Environment map[string]string `json:"environment,omitempty"`
+	// SecretsPrefix identifies the secret reference namespace for this service.
+	SecretsPrefix string `json:"secrets_prefix,omitempty"`
 }
 
 // Build creates a release manifest for an app and compose snapshot.
@@ -45,19 +63,22 @@ func Build(app *config.AppConfig, composeContent []byte, now time.Time) *Manifes
 		composeRev = "sha256:" + hashBytes(composeContent)
 	}
 
-	envHash := hashEnvironment(app.Environment, app.SecretsPrefix)
+	services := buildServices(app.EffectiveReleaseServices())
+	envHash := combinedEnvHash(services)
+	primary := primaryService(app.Name, services)
 	manifest := &Manifest{
 		App:           app.Name,
-		ImageRef:      app.EffectiveImageRef(),
-		ImageTag:      app.EffectiveImageTag(),
-		ImageDigest:   app.ImageDigest,
+		ImageRef:      primary.ImageRef,
+		ImageTag:      primary.ImageTag,
+		ImageDigest:   primary.ImageDigest,
 		ComposeRev:    composeRev,
 		EnvHash:       envHash,
-		Environment:   cloneEnvironment(app.Environment),
-		SecretsPrefix: app.SecretsPrefix,
+		Environment:   cloneEnvironment(primary.Environment),
+		SecretsPrefix: primary.SecretsPrefix,
+		Services:      services,
 		CreatedAt:     now.UTC(),
 	}
-	manifest.ID = releaseID(manifest.ImageRef, manifest.ComposeRev, manifest.EnvHash)
+	manifest.ID = releaseID(manifest.ComposeRev, manifest.Services)
 	return manifest
 }
 
@@ -103,9 +124,16 @@ func Load(dir, id string) (*Manifest, error) {
 	return &manifest, nil
 }
 
-func releaseID(imageRef, composeRev, envHash string) string {
-	input := imageRef + "\n" + composeRev + "\n" + envHash
-	return hashBytes([]byte(input))[:16]
+func releaseID(composeRev string, services map[string]ServiceManifest) string {
+	var data []byte
+	data = append(data, "compose_rev="+composeRev+"\n"...)
+	for _, name := range sortedServiceNames(services) {
+		service := services[name]
+		data = append(data, "service="+name+"\n"...)
+		data = append(data, "image_ref="+service.ImageRef+"\n"...)
+		data = append(data, "env_hash="+service.EnvHash+"\n"...)
+	}
+	return hashBytes(data)[:16]
 }
 
 func hashBytes(data []byte) string {
@@ -129,6 +157,52 @@ func hashEnvironment(env map[string]string, secretsPrefix string) string {
 		data = append(data, '\n')
 	}
 	return "sha256:" + hashBytes(data)
+}
+
+func buildServices(services map[string]config.ReleaseServiceConfig) map[string]ServiceManifest {
+	manifestServices := make(map[string]ServiceManifest, len(services))
+	for name, service := range services {
+		manifestServices[name] = ServiceManifest{
+			ImageRef:      service.EffectiveImageRef(),
+			ImageTag:      service.EffectiveImageTag(),
+			ImageDigest:   service.ImageDigest,
+			EnvHash:       hashEnvironment(service.Environment, service.SecretsPrefix),
+			Environment:   cloneEnvironment(service.Environment),
+			SecretsPrefix: service.SecretsPrefix,
+		}
+	}
+	return manifestServices
+}
+
+func combinedEnvHash(services map[string]ServiceManifest) string {
+	var data []byte
+	for _, name := range sortedServiceNames(services) {
+		data = append(data, name...)
+		data = append(data, '=')
+		data = append(data, services[name].EnvHash...)
+		data = append(data, '\n')
+	}
+	return "sha256:" + hashBytes(data)
+}
+
+func primaryService(appName string, services map[string]ServiceManifest) ServiceManifest {
+	if service, ok := services[appName]; ok {
+		return service
+	}
+	names := sortedServiceNames(services)
+	if len(names) == 0 {
+		return ServiceManifest{}
+	}
+	return services[names[0]]
+}
+
+func sortedServiceNames(services map[string]ServiceManifest) []string {
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func cloneEnvironment(env map[string]string) map[string]string {

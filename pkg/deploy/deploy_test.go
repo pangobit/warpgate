@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/pangobit/warpgate/pkg/config"
+	"github.com/pangobit/warpgate/pkg/release"
 )
 
 func TestDeployAllNoApps(t *testing.T) {
@@ -37,62 +38,52 @@ func TestRemoveAllNoApps(t *testing.T) {
 	}
 }
 
-func TestNeedsEnvFile(t *testing.T) {
+func TestReleaseEnvFileMap(t *testing.T) {
 	tests := []struct {
 		name          string
-		secretsPrefix string
+		manifest      *release.Manifest
 		secretsServer string
-		environment   map[string]string
-		want          bool
+		want          map[string]bool
 	}{
 		{
-			name:          "secrets only",
-			secretsPrefix: "app/",
+			name: "selects service with fetchable secrets",
+			manifest: &release.Manifest{Services: map[string]release.ServiceManifest{
+				"api": {SecretsPrefix: "app/"},
+			}},
 			secretsServer: "https://secrets.example.com",
-			want:          true,
+			want:          map[string]bool{"api": true},
 		},
 		{
-			name:        "environment only",
-			environment: map[string]string{"KEY": "val"},
-			want:        true,
+			name: "selects service with environment",
+			manifest: &release.Manifest{Services: map[string]release.ServiceManifest{
+				"api": {Environment: map[string]string{"KEY": "val"}},
+			}},
+			want: map[string]bool{"api": true},
 		},
 		{
-			name:          "both secrets and environment",
-			secretsPrefix: "app/",
+			name: "does not select secrets without server",
+			manifest: &release.Manifest{Services: map[string]release.ServiceManifest{
+				"api": {SecretsPrefix: "app/"},
+			}},
+			want: map[string]bool{},
+		},
+		{
+			name: "selects only services with env inputs",
+			manifest: &release.Manifest{Services: map[string]release.ServiceManifest{
+				"api":    {Environment: map[string]string{"KEY": "val"}},
+				"admin":  {SecretsPrefix: "admin/"},
+				"worker": {},
+			}},
 			secretsServer: "https://secrets.example.com",
-			environment:   map[string]string{"KEY": "val"},
-			want:          true,
-		},
-		{
-			name: "neither",
-			want: false,
-		},
-		{
-			name:        "empty environment map",
-			environment: map[string]string{},
-			want:        false,
-		},
-		{
-			name:          "secrets prefix without server",
-			secretsPrefix: "app/",
-			want:          false,
-		},
-		{
-			name:          "secrets server without prefix",
-			secretsServer: "https://secrets.example.com",
-			want:          false,
+			want:          map[string]bool{"api": true, "admin": true},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			app := &config.AppConfig{
-				SecretsPrefix: tt.secretsPrefix,
-				Environment:   tt.environment,
-			}
-			got := needsEnvFile(app, tt.secretsServer)
-			if got != tt.want {
-				t.Errorf("needsEnvFile() = %v, want %v", got, tt.want)
+			got := releaseEnvFileMap(tt.manifest, tt.secretsServer)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("releaseEnvFileMap() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -540,51 +531,43 @@ func TestUploadExtraFiles(t *testing.T) {
 	}
 }
 
-func TestWriteEnvFile(t *testing.T) {
+func TestWriteReleaseEnvFileWritesPerServiceAndProjectEnv(t *testing.T) {
 	d := NewDeployer(&config.RepoConfig{
 		Cluster: &config.ClusterConfig{Project: "test"},
 	}, "")
-
-	tests := []struct {
-		name       string
-		app        *config.AppConfig
-		wantWrote  bool
-		wantSecret string
-	}{
-		{
-			name: "environment writes env file",
-			app: &config.AppConfig{
-				Environment: map[string]string{"DOMAIN": "example.com"},
+	manifest := &release.Manifest{
+		App: "api",
+		Services: map[string]release.ServiceManifest{
+			"api": {
+				Environment: map[string]string{
+					"DOMAIN": "example.com",
+				},
 			},
-			wantWrote:  true,
-			wantSecret: "/remote/.env=DOMAIN=example.com\n",
-		},
-		{
-			name: "no environment and no secrets skips env file",
-			app:  &config.AppConfig{},
+			"admin": {
+				Environment: map[string]string{
+					"ADMIN_DOMAIN": "admin.example.com",
+				},
+			},
+			"worker": {},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			writer := &fakeRemote{}
-			got, err := d.writeEnvFile(writer, "/remote", tt.app)
-			if err != nil {
-				t.Fatalf("writeEnvFile() error = %v", err)
-			}
-			if got != tt.wantWrote {
-				t.Fatalf("writeEnvFile() = %v, want %v", got, tt.wantWrote)
-			}
-			if tt.wantSecret == "" {
-				if len(writer.secretWrites) != 0 {
-					t.Fatalf("writeEnvFile() wrote unexpected secret files: %v", writer.secretWrites)
-				}
-				return
-			}
-			if !reflect.DeepEqual(writer.secretWrites, []string{tt.wantSecret}) {
-				t.Errorf("writeEnvFile() secret writes = %v, want %v", writer.secretWrites, []string{tt.wantSecret})
-			}
-		})
+	writer := &fakeRemote{}
+	got, err := d.writeReleaseEnvFile(writer, "/remote", manifest)
+	if err != nil {
+		t.Fatalf("writeReleaseEnvFile() error = %v", err)
+	}
+	if !got {
+		t.Fatal("writeReleaseEnvFile() = false, want true")
+	}
+
+	want := []string{
+		"/remote/.env.admin=ADMIN_DOMAIN=admin.example.com\n",
+		"/remote/.env.api=DOMAIN=example.com\n",
+		"/remote/.env=ADMIN_DOMAIN=admin.example.com\nDOMAIN=example.com\n",
+	}
+	if !reflect.DeepEqual(writer.secretWrites, want) {
+		t.Errorf("secret writes = %v, want %v", writer.secretWrites, want)
 	}
 }
 
@@ -632,33 +615,6 @@ func TestLoginRegistry(t *testing.T) {
 				t.Errorf("loginRegistry() stdin = %v, want %v", runner.stdinPayloads, tt.wantStdin)
 			}
 		})
-	}
-}
-
-func TestFetchSecretsEnvironmentOnly(t *testing.T) {
-	d := NewDeployer(&config.RepoConfig{
-		Cluster: &config.ClusterConfig{Project: "test"},
-	}, "")
-
-	app := &config.AppConfig{
-		Environment: map[string]string{
-			"DOMAIN":    "example.com",
-			"LOG_LEVEL": "info",
-		},
-	}
-
-	got, err := d.fetchSecrets(app)
-	if err != nil {
-		t.Fatalf("fetchSecrets() error = %v", err)
-	}
-	if got == "" {
-		t.Fatal("fetchSecrets() returned empty string, want .env content")
-	}
-	if !strings.Contains(got, "DOMAIN=example.com") {
-		t.Errorf("fetchSecrets() missing DOMAIN, got:\n%s", got)
-	}
-	if !strings.Contains(got, "LOG_LEVEL=info") {
-		t.Errorf("fetchSecrets() missing LOG_LEVEL, got:\n%s", got)
 	}
 }
 

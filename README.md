@@ -188,40 +188,41 @@ Example:
 
 ```yaml
 kind: warpgate/app
-image: ghcr.io/acme/api
-image_tag: v1.2.3
-image_digest: sha256:...
 compose_ref: main
 targets: [node-1]
-secrets_prefix: api/prod
-port: 8080
 strategy: blue-green
 
-expose:
-  public:
-    domains: [api.example.com]
-  private:
-    port: 8080
-  internal:
-    hostname: api.internal
+release:
+  services:
+    api:
+      image: ghcr.io/acme/api
+      image_tag: v1.2.3
+      image_digest: sha256:...
+      secrets_prefix: api/prod
+      port: 8080
+      expose:
+        public:
+          domains: [api.example.com]
+      environment:
+        LOG_LEVEL: info
+        APP_ENV: production
 
-environment:
-  LOG_LEVEL: info
-  APP_ENV: production
+    admin:
+      image: ghcr.io/acme/api-admin
+      image_tag: v1.2.3
+      image_digest: sha256:...
+      secrets_prefix: api-admin/prod
+      port: 8081
+      expose:
+        private:
+          port: 8081
 
 persistent_volumes:
   - compose_name: api-data
     name: warpgate-api-data
-
-sidecars:
-  admin:
-    port: 8081
-    expose:
-      private:
-        port: 8081
 ```
 
-`version` is still accepted as a compatibility alias for older app configs. New configs should use `image_tag` for the build tag, `image_digest` when the image is pinned immutably, and `compose_ref` for remote compose sources.
+Release-owned deploy inputs must be declared under `release.services`. The compose file remains the topology source; Warpgate only overlays service images and generated env files for declared release services.
 
 Create and deploy a release:
 
@@ -233,27 +234,30 @@ warpgate deploy api --release latest --tailscale-ssh
 Fields:
 
 - `kind` is optional. If set, it must be `warpgate/app`.
-- `image` is required.
-- `image_tag` defaults to `latest` if omitted.
-- `image_digest` pins the image immutably when set.
+- `release.services.<name>.image` is required for each first-class release service.
+- `release.services.<name>.image_tag` defaults to `latest` if omitted.
+- `release.services.<name>.image_digest` pins that service image immutably when set.
 - `compose_ref` identifies the remote compose source revision when `source` is set.
 - `targets` defaults to all nodes if omitted.
-- `secrets_prefix` tells Warpgate which SecretSauce keys to fetch.
-- `port` is the container port used for app-level routing metadata.
+- `release.services.<name>.secrets_prefix` tells Warpgate which SecretSauce keys to fetch for that service.
+- `release.services.<name>.port` is the container port used for service-level routing metadata.
 - `strategy` may be `blue-green` or `recreate`.
 - `persistent_volumes` remaps compose volume keys to stable Docker volume names managed by Warpgate.
-- `environment` adds non-secret key/value pairs to the generated `.env` file during deploy.
+- `release.services.<name>.environment` adds non-secret key/value pairs to that service's generated env file during deploy.
 - `source` can be used instead of a local `compose.yml` to fetch a compose file from GitHub.
 
 `source` example:
 
 ```yaml
-image: ghcr.io/acme/worker
-image_tag: v2.0.0
 compose_ref: main
 source:
   repo: github.com/acme/deploy-definitions
   compose_path: services/worker/compose.yml
+release:
+  services:
+    worker:
+      image: ghcr.io/acme/worker
+      image_tag: v2.0.0
 ```
 
 Current validation rules to keep in mind:
@@ -284,9 +288,9 @@ Deploy-time behavior:
 
 - If `app.yml` has a local `compose.yml`, Warpgate uploads it to the target node.
 - If `app.yml` uses `source`, Warpgate fetches the compose file from GitHub instead.
-- Warpgate writes a `docker-compose.override.yml` that injects the release image reference, an `env_file` reference for release env, and `extra_hosts` entries for internal hostnames.
+- Warpgate writes a `docker-compose.override.yml` that injects each release service's image reference, per-service `env_file` reference, and `extra_hosts` entries for internal hostnames.
 - If `persistent_volumes` is set, Warpgate also injects top-level `volumes:` name overrides so named volumes stay stable across blue/green slot changes.
-- If `environment` or `secrets_prefix` is set, Warpgate writes a temporary `.env` file, references it from the generated override, and passes `--env-file .env` to `docker compose`.
+- If any release service has `environment` or `secrets_prefix`, Warpgate writes `.env.<service>` files for containers and a merged temporary `.env` for Compose interpolation.
 
 Health checks matter:
 
@@ -309,16 +313,22 @@ For stateful apps that use SQLite or another single-writer local store, pair `re
 Example:
 
 ```yaml
-image: ghcr.io/acme/web
-port: 8080
 strategy: recreate
+release:
+  services:
+    web:
+      image: ghcr.io/acme/web
+      port: 8080
 ```
 
 Named volume example:
 
 ```yaml
-image: ghcr.io/acme/worker
 strategy: recreate
+release:
+  services:
+    worker:
+      image: ghcr.io/acme/worker
 
 persistent_volumes:
   - compose_name: worker-data
@@ -403,18 +413,22 @@ Warpgate integrates with SecretSauce when `cluster.yml` includes a `secrets.serv
 
 Deploy behavior:
 
-1. Warpgate fetches keys under `secrets_prefix`.
-2. Warpgate merges those keys with `environment` from `app.yml`.
+1. Warpgate fetches keys under each release service's `secrets_prefix`.
+2. Warpgate merges those keys with that service's `environment`.
 3. Secrets override `environment` values on name collisions.
-4. The merged values are written to a temporary `.env` file on the target node.
+4. The merged values are written to temporary `.env.<service>` files on the target node.
+5. A merged `.env` is also written for Docker Compose interpolation in labels and other topology fields.
 
 Example:
 
 ```yaml
-image: ghcr.io/acme/api
-secrets_prefix: api/prod
-environment:
-  LOG_LEVEL: info
+release:
+  services:
+    api:
+      image: ghcr.io/acme/api
+      secrets_prefix: api/prod
+      environment:
+        LOG_LEVEL: info
 ```
 
 ```yaml

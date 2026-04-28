@@ -64,88 +64,90 @@ func TestParseContainerHealth(t *testing.T) {
 	}
 }
 
-func TestParseSidecarStatuses(t *testing.T) {
-	sidecars := map[string]config.SidecarConfig{
-		"redis":      {Port: 6379},
-		"litestream": {Port: 0},
+func TestParseReleaseServiceStatuses(t *testing.T) {
+	services := map[string]config.ReleaseServiceConfig{
+		"api":   {Image: "ghcr.io/org/api"},
+		"admin": {Image: "ghcr.io/org/admin"},
 	}
 
 	tests := []struct {
 		name     string
 		psOutput string
-		sidecars map[string]config.SidecarConfig
+		services map[string]config.ReleaseServiceConfig
 		want     []ContainerStatus
 	}{
 		{
-			name:     "no sidecars configured",
+			name:     "no services configured",
 			psOutput: "app\tauth-blue-app-1\tUp 2 minutes (healthy)",
-			sidecars: nil,
+			services: nil,
 			want:     nil,
 		},
 		{
 			name:     "empty output",
 			psOutput: "",
-			sidecars: sidecars,
+			services: services,
 			want:     nil,
 		},
 		{
-			name:     "only main service",
-			psOutput: "auth\tauth-blue-auth-1\tUp 2 minutes (healthy)",
-			sidecars: sidecars,
-			want:     nil,
-		},
-		{
-			name:     "sidecar healthy",
-			psOutput: "auth\tauth-blue-auth-1\tUp 2 minutes (healthy)\nredis\tauth-blue-redis-1\tUp 2 minutes (healthy)",
-			sidecars: sidecars,
+			name:     "service healthy",
+			psOutput: "api\tapp-blue-api-1\tUp 2 minutes (healthy)",
+			services: services,
 			want: []ContainerStatus{
-				{Service: "redis", Name: "auth-blue-redis-1", State: "healthy"},
+				{Service: "api", Name: "app-blue-api-1", State: "healthy"},
 			},
 		},
 		{
-			name:     "sidecar unhealthy",
-			psOutput: "auth\tauth-blue-auth-1\tUp 2 minutes (healthy)\nredis\tauth-blue-redis-1\tUp 30 seconds (unhealthy)",
-			sidecars: sidecars,
+			name:     "service unhealthy",
+			psOutput: "api\tapp-blue-api-1\tUp 30 seconds (unhealthy)",
+			services: services,
 			want: []ContainerStatus{
-				{Service: "redis", Name: "auth-blue-redis-1", State: "unhealthy"},
+				{Service: "api", Name: "app-blue-api-1", State: "unhealthy"},
 			},
 		},
 		{
-			name:     "sidecar running without healthcheck",
-			psOutput: "auth\tauth-blue-auth-1\tUp 2 minutes (healthy)\nlitestream\tauth-blue-litestream-1\tUp 2 minutes",
-			sidecars: sidecars,
+			name:     "service running without healthcheck",
+			psOutput: "admin\tapp-blue-admin-1\tUp 2 minutes",
+			services: services,
 			want: []ContainerStatus{
-				{Service: "litestream", Name: "auth-blue-litestream-1", State: "running"},
+				{Service: "admin", Name: "app-blue-admin-1", State: "running"},
 			},
 		},
 		{
-			name:     "multiple sidecars",
-			psOutput: "auth\tauth-blue-auth-1\tUp 2 minutes (healthy)\nredis\tauth-blue-redis-1\tUp 2 minutes (healthy)\nlitestream\tauth-blue-litestream-1\tUp 2 minutes",
-			sidecars: sidecars,
+			name:     "multiple services",
+			psOutput: "api\tapp-blue-api-1\tUp 2 minutes (healthy)\nadmin\tapp-blue-admin-1\tUp 2 minutes",
+			services: services,
 			want: []ContainerStatus{
-				{Service: "redis", Name: "auth-blue-redis-1", State: "healthy"},
-				{Service: "litestream", Name: "auth-blue-litestream-1", State: "running"},
+				{Service: "api", Name: "app-blue-api-1", State: "healthy"},
+				{Service: "admin", Name: "app-blue-admin-1", State: "running"},
+			},
+		},
+		{
+			name:     "undeclared compose service ignored",
+			psOutput: "api\tapp-blue-api-1\tUp 2 minutes (healthy)\nredis\tapp-blue-redis-1\tUp 2 minutes",
+			services: services,
+			want: []ContainerStatus{
+				{Service: "api", Name: "app-blue-api-1", State: "healthy"},
 			},
 		},
 		{
 			name:     "malformed line ignored",
-			psOutput: "bad-line-no-tabs\nredis\tauth-blue-redis-1\tUp 2 minutes (healthy)",
-			sidecars: sidecars,
+			psOutput: "bad-line-no-tabs\napi\tapp-blue-api-1\tUp 2 minutes (healthy)",
+			services: services,
 			want: []ContainerStatus{
-				{Service: "redis", Name: "auth-blue-redis-1", State: "healthy"},
+				{Service: "api", Name: "app-blue-api-1", State: "healthy"},
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseSidecarStatuses(tt.psOutput, tt.sidecars)
+			got := parseReleaseServiceStatuses(tt.psOutput, tt.services)
 			if len(got) != len(tt.want) {
-				t.Fatalf("parseSidecarStatuses() returned %d items, want %d: %+v", len(got), len(tt.want), got)
+				t.Fatalf("parseReleaseServiceStatuses() returned %d items, want %d: %+v", len(got), len(tt.want), got)
 			}
 			for i, want := range tt.want {
 				if got[i] != want {
-					t.Errorf("parseSidecarStatuses()[%d] = %+v, want %+v", i, got[i], want)
+					t.Errorf("parseReleaseServiceStatuses()[%d] = %+v, want %+v", i, got[i], want)
 				}
 			}
 		})

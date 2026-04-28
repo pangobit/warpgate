@@ -7,16 +7,28 @@ import (
 	"github.com/pangobit/warpgate/pkg/config"
 )
 
-func TestGenerateInternalRoute(t *testing.T) {
+func internalRouteApp(targets []string, port int, hostname string) *config.AppConfig {
 	app := &config.AppConfig{
 		Name:    "auth",
-		Image:   "ghcr.io/org/auth",
-		Port:    8085,
-		Targets: []string{"node-1", "node-2"},
-		Expose: &config.ExposeConfig{
-			Internal: &config.InternalExpose{Hostname: "auth.internal"},
+		Targets: targets,
+		Release: config.ReleaseConfig{
+			Services: map[string]config.ReleaseServiceConfig{
+				"auth": {
+					Image: "ghcr.io/org/auth",
+					Port:  port,
+					Expose: &config.ExposeConfig{
+						Internal: &config.InternalExpose{Hostname: hostname},
+					},
+				},
+			},
 		},
 	}
+	return app
+}
+
+func TestGenerateReleaseServiceInternalRoute(t *testing.T) {
+	app := internalRouteApp([]string{"node-1", "node-2"}, 8085, "auth.internal")
+	service := app.Release.Services["auth"]
 
 	cluster := &config.ClusterConfig{
 		Nodes: []config.NodeConfig{
@@ -26,9 +38,9 @@ func TestGenerateInternalRoute(t *testing.T) {
 		},
 	}
 
-	output, err := GenerateInternalRoute(app, cluster)
+	output, err := GenerateReleaseServiceInternalRoute(app, "auth", service, cluster)
 	if err != nil {
-		t.Fatalf("GenerateInternalRoute() error: %v", err)
+		t.Fatalf("GenerateReleaseServiceInternalRoute() error: %v", err)
 	}
 
 	if !strings.Contains(output, "auth.internal") {
@@ -48,12 +60,14 @@ func TestGenerateInternalRoute(t *testing.T) {
 	}
 }
 
-func TestGenerateInternalRouteNoInternal(t *testing.T) {
+func TestGenerateReleaseServiceInternalRouteNoInternal(t *testing.T) {
 	app := &config.AppConfig{
-		Name:  "worker",
-		Image: "ghcr.io/org/worker",
-		Port:  8080,
+		Name: "worker",
+		Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+			"worker": {Image: "ghcr.io/org/worker", Port: 8080},
+		}},
 	}
+	service := app.Release.Services["worker"]
 
 	cluster := &config.ClusterConfig{
 		Nodes: []config.NodeConfig{
@@ -61,9 +75,9 @@ func TestGenerateInternalRouteNoInternal(t *testing.T) {
 		},
 	}
 
-	output, err := GenerateInternalRoute(app, cluster)
+	output, err := GenerateReleaseServiceInternalRoute(app, "worker", service, cluster)
 	if err != nil {
-		t.Fatalf("GenerateInternalRoute() error: %v", err)
+		t.Fatalf("GenerateReleaseServiceInternalRoute() error: %v", err)
 	}
 
 	if output != "" {
@@ -71,15 +85,9 @@ func TestGenerateInternalRouteNoInternal(t *testing.T) {
 	}
 }
 
-func TestGenerateInternalRouteAllNodes(t *testing.T) {
-	app := &config.AppConfig{
-		Name:  "auth",
-		Image: "ghcr.io/org/auth",
-		Port:  8085,
-		Expose: &config.ExposeConfig{
-			Internal: &config.InternalExpose{Hostname: "auth.internal"},
-		},
-	}
+func TestGenerateReleaseServiceInternalRouteAllNodes(t *testing.T) {
+	app := internalRouteApp(nil, 8085, "auth.internal")
+	service := app.Release.Services["auth"]
 
 	cluster := &config.ClusterConfig{
 		Nodes: []config.NodeConfig{
@@ -88,9 +96,9 @@ func TestGenerateInternalRouteAllNodes(t *testing.T) {
 		},
 	}
 
-	output, err := GenerateInternalRoute(app, cluster)
+	output, err := GenerateReleaseServiceInternalRoute(app, "auth", service, cluster)
 	if err != nil {
-		t.Fatalf("GenerateInternalRoute() error: %v", err)
+		t.Fatalf("GenerateReleaseServiceInternalRoute() error: %v", err)
 	}
 
 	if !strings.Contains(output, "100.95.115.81") {
@@ -101,16 +109,9 @@ func TestGenerateInternalRouteAllNodes(t *testing.T) {
 	}
 }
 
-func TestGenerateInternalRouteSkipsNoPrivateIP(t *testing.T) {
-	app := &config.AppConfig{
-		Name:    "auth",
-		Image:   "ghcr.io/org/auth",
-		Port:    8085,
-		Targets: []string{"node-1", "node-2"},
-		Expose: &config.ExposeConfig{
-			Internal: &config.InternalExpose{Hostname: "auth.internal"},
-		},
-	}
+func TestGenerateReleaseServiceInternalRouteSkipsNoPrivateIP(t *testing.T) {
+	app := internalRouteApp([]string{"node-1", "node-2"}, 8085, "auth.internal")
+	service := app.Release.Services["auth"]
 
 	cluster := &config.ClusterConfig{
 		Nodes: []config.NodeConfig{
@@ -119,9 +120,9 @@ func TestGenerateInternalRouteSkipsNoPrivateIP(t *testing.T) {
 		},
 	}
 
-	output, err := GenerateInternalRoute(app, cluster)
+	output, err := GenerateReleaseServiceInternalRoute(app, "auth", service, cluster)
 	if err != nil {
-		t.Fatalf("GenerateInternalRoute() error: %v", err)
+		t.Fatalf("GenerateReleaseServiceInternalRoute() error: %v", err)
 	}
 
 	if !strings.Contains(output, "100.95.115.81") {

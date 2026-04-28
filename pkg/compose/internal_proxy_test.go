@@ -19,14 +19,16 @@ func TestCollectInternalEntrypoints(t *testing.T) {
 			want: map[string]int{"internal": 8080},
 		},
 		{
-			name: "app with expose.private",
+			name: "primary release service with expose.private",
 			apps: []*config.AppConfig{
 				{
 					Name: "auth",
-					Port: 8085,
-					Expose: &config.ExposeConfig{
-						Private: &config.PrivateExpose{Port: 8085},
-					},
+					Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+						"auth": {
+							Image:  "ghcr.io/org/auth",
+							Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 8085}},
+						},
+					}},
 				},
 			},
 			want: map[string]int{
@@ -35,31 +37,29 @@ func TestCollectInternalEntrypoints(t *testing.T) {
 			},
 		},
 		{
-			name: "app without expose.private is skipped",
+			name: "release service without expose.private is skipped",
 			apps: []*config.AppConfig{
-				{Name: "auth", Port: 8085},
+				releaseApp("auth", "ghcr.io/org/auth", ""),
 			},
 			want: map[string]int{
 				"internal": 8080,
 			},
 		},
 		{
-			name: "app with sidecar expose.private",
+			name: "bundle services with expose.private",
 			apps: []*config.AppConfig{
 				{
 					Name: "brighter-platform",
-					Port: 8083,
-					Expose: &config.ExposeConfig{
-						Private: &config.PrivateExpose{Port: 8083},
-					},
-					Sidecars: map[string]config.SidecarConfig{
-						"admin": {
-							Port: 8087,
-							Expose: &config.ExposeConfig{
-								Private: &config.PrivateExpose{Port: 8087},
-							},
+					Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+						"brighter-platform": {
+							Image:  "ghcr.io/org/brighter",
+							Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 8083}},
 						},
-					},
+						"admin": {
+							Image:  "ghcr.io/org/admin",
+							Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 8087}},
+						},
+					}},
 				},
 			},
 			want: map[string]int{
@@ -69,37 +69,64 @@ func TestCollectInternalEntrypoints(t *testing.T) {
 			},
 		},
 		{
-			name: "multiple apps with sidecars",
+			name: "app with release service expose.private",
 			apps: []*config.AppConfig{
 				{
-					Name: "platform",
-					Port: 8083,
-					Expose: &config.ExposeConfig{
-						Private: &config.PrivateExpose{Port: 8083},
-					},
-					Sidecars: map[string]config.SidecarConfig{
-						"admin": {
-							Port: 8087,
-							Expose: &config.ExposeConfig{
-								Private: &config.PrivateExpose{Port: 8087},
+					Name: "brighter-platform",
+					Release: config.ReleaseConfig{
+						Services: map[string]config.ReleaseServiceConfig{
+							"brighter-platform": {
+								Image: "ghcr.io/org/client",
+								Port:  8083,
+								Expose: &config.ExposeConfig{
+									Private: &config.PrivateExpose{Port: 8083},
+								},
+							},
+							"admin": {
+								Image: "ghcr.io/org/admin",
+								Port:  8087,
+								Expose: &config.ExposeConfig{
+									Private: &config.PrivateExpose{Port: 8087},
+								},
 							},
 						},
 					},
 				},
+			},
+			want: map[string]int{
+				"brighter-platform-port-internal":  8083,
+				"brighter-platform-admin-internal": 8087,
+				"internal":                         8080,
+			},
+		},
+		{
+			name: "multiple apps with bundle services",
+			apps: []*config.AppConfig{
+				{
+					Name: "platform",
+					Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+						"platform": {
+							Image:  "ghcr.io/org/platform",
+							Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 8083}},
+						},
+						"admin": {
+							Image:  "ghcr.io/org/admin",
+							Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 8087}},
+						},
+					}},
+				},
 				{
 					Name: "auth",
-					Port: 8085,
-					Expose: &config.ExposeConfig{
-						Private: &config.PrivateExpose{Port: 8085},
-					},
-					Sidecars: map[string]config.SidecarConfig{
-						"metrics": {
-							Port: 9090,
-							Expose: &config.ExposeConfig{
-								Private: &config.PrivateExpose{Port: 9090},
-							},
+					Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+						"auth": {
+							Image:  "ghcr.io/org/auth",
+							Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 8085}},
 						},
-					},
+						"metrics": {
+							Image:  "ghcr.io/org/metrics",
+							Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 9090}},
+						},
+					}},
 				},
 			},
 			want: map[string]int{
@@ -111,22 +138,20 @@ func TestCollectInternalEntrypoints(t *testing.T) {
 			},
 		},
 		{
-			name: "sidecar without expose is skipped",
+			name: "release service without private expose is skipped",
 			apps: []*config.AppConfig{
 				{
 					Name: "app",
-					Port: 8081,
-					Expose: &config.ExposeConfig{
-						Private: &config.PrivateExpose{Port: 8081},
-					},
-					Sidecars: map[string]config.SidecarConfig{
-						"worker": {
-							Port: 9000,
-							Expose: &config.ExposeConfig{
-								Internal: &config.InternalExpose{Hostname: "worker.internal"},
-							},
+					Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+						"app": {
+							Image:  "ghcr.io/org/app",
+							Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 8081}},
 						},
-					},
+						"worker": {
+							Image:  "ghcr.io/org/worker",
+							Expose: &config.ExposeConfig{Internal: &config.InternalExpose{Hostname: "worker.internal"}},
+						},
+					}},
 				},
 			},
 			want: map[string]int{
@@ -139,31 +164,27 @@ func TestCollectInternalEntrypoints(t *testing.T) {
 			apps: []*config.AppConfig{
 				{
 					Name: "pangobit",
-					Port: 80,
-					Expose: &config.ExposeConfig{
-						Private: &config.PrivateExpose{Port: 80},
-					},
+					Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+						"pangobit": {Image: "ghcr.io/org/pangobit", Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 80}}},
+					}},
 				},
 				{
 					Name: "gateway",
-					Port: 443,
-					Expose: &config.ExposeConfig{
-						Private: &config.PrivateExpose{Port: 443},
-					},
+					Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+						"gateway": {Image: "ghcr.io/org/gateway", Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 443}}},
+					}},
 				},
 				{
 					Name: "api",
-					Port: 8080,
-					Expose: &config.ExposeConfig{
-						Private: &config.PrivateExpose{Port: 8080},
-					},
+					Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+						"api": {Image: "ghcr.io/org/api", Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 8080}}},
+					}},
 				},
 				{
 					Name: "auth",
-					Port: 8085,
-					Expose: &config.ExposeConfig{
-						Private: &config.PrivateExpose{Port: 8085},
-					},
+					Release: config.ReleaseConfig{Services: map[string]config.ReleaseServiceConfig{
+						"auth": {Image: "ghcr.io/org/auth", Expose: &config.ExposeConfig{Private: &config.PrivateExpose{Port: 8085}}},
+					}},
 				},
 			},
 			want: map[string]int{
