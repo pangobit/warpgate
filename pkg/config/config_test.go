@@ -49,6 +49,72 @@ func TestGetTargetNodes(t *testing.T) {
 	}
 }
 
+func TestAppConfigEffectiveReleaseInputs(t *testing.T) {
+	tests := []struct {
+		name           string
+		app            AppConfig
+		wantImageTag   string
+		wantComposeRef string
+		wantImageRef   string
+	}{
+		{
+			name: "new fields",
+			app: AppConfig{
+				Image:      "ghcr.io/org/app",
+				ImageTag:   "v2.0.0",
+				ComposeRef: "compose-main",
+			},
+			wantImageTag:   "v2.0.0",
+			wantComposeRef: "compose-main",
+			wantImageRef:   "ghcr.io/org/app:v2.0.0",
+		},
+		{
+			name: "digest image ref",
+			app: AppConfig{
+				Image:       "ghcr.io/org/app",
+				ImageTag:    "v2.0.0",
+				ImageDigest: "sha256:abc123",
+			},
+			wantImageTag:   "v2.0.0",
+			wantComposeRef: "v2.0.0",
+			wantImageRef:   "ghcr.io/org/app@sha256:abc123",
+		},
+		{
+			name: "legacy version fallback",
+			app: AppConfig{
+				Image:   "ghcr.io/org/app",
+				Version: "v1.0.0",
+			},
+			wantImageTag:   "v1.0.0",
+			wantComposeRef: "v1.0.0",
+			wantImageRef:   "ghcr.io/org/app:v1.0.0",
+		},
+		{
+			name: "empty defaults to latest",
+			app: AppConfig{
+				Image: "ghcr.io/org/app",
+			},
+			wantImageTag:   "latest",
+			wantComposeRef: "latest",
+			wantImageRef:   "ghcr.io/org/app:latest",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.app.EffectiveImageTag(); got != tt.wantImageTag {
+				t.Errorf("EffectiveImageTag() = %q, want %q", got, tt.wantImageTag)
+			}
+			if got := tt.app.EffectiveComposeRef(); got != tt.wantComposeRef {
+				t.Errorf("EffectiveComposeRef() = %q, want %q", got, tt.wantComposeRef)
+			}
+			if got := tt.app.EffectiveImageRef(); got != tt.wantImageRef {
+				t.Errorf("EffectiveImageRef() = %q, want %q", got, tt.wantImageRef)
+			}
+		})
+	}
+}
+
 func TestClusterValidate(t *testing.T) {
 	tests := []struct {
 		name    string

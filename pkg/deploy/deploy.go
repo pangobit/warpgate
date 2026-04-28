@@ -11,6 +11,7 @@ import (
 
 	"github.com/pangobit/warpgate/pkg/compose"
 	"github.com/pangobit/warpgate/pkg/config"
+	"github.com/pangobit/warpgate/pkg/release"
 	"github.com/pangobit/warpgate/pkg/secrets"
 	"github.com/pangobit/warpgate/pkg/ssh"
 	"github.com/sirupsen/logrus"
@@ -68,35 +69,68 @@ func (d *Deployer) Deploy(appName, version string) error {
 	}
 
 	if version != "" {
-		app.Version = version
-	}
-
-	appDir := d.Repo.AppDir(appName)
-	composePath := d.Repo.AppComposePath(appName)
-
-	var composeContent []byte
-	var err error
-	if app.Source != nil {
-		d.log.Infof("Fetching compose from %s@%s...", app.Source.Repo, app.Version)
-		composeContent, err = FetchComposeFromSource(app.Source, app.Version, d.GitHubToken)
-		if err != nil {
-			return fmt.Errorf("failed to fetch remote compose: %w", err)
-		}
-		appDir = ""
-	} else {
-		if _, err = os.Stat(composePath); os.IsNotExist(err) {
-			return fmt.Errorf("compose.yml not found for app '%s' at %s", appName, composePath)
-		}
-		composeContent, err = os.ReadFile(composePath)
-		if err != nil {
-			return fmt.Errorf("failed to read compose.yml: %w", err)
+		app.ImageTag = version
+		if app.Source != nil && app.ComposeRef == "" {
+			app.ComposeRef = version
 		}
 	}
 
+	appDir, composeContent, err := d.loadComposeContent(app)
+	if err != nil {
+		return err
+	}
+
+	manifest := release.Build(app, composeContent, time.Now())
+	return d.deployManifest(app, manifest, appDir, composeContent)
+}
+
+// DeployRelease deploys a persisted release manifest by ID or "latest".
+func (d *Deployer) DeployRelease(appName, releaseID string) error {
+	app := d.Repo.GetApp(appName)
+	if app == nil {
+		return fmt.Errorf("app '%s' not found", appName)
+	}
+
+	manifest, err := release.Load(d.Repo.AppReleasesDir(appName), releaseID)
+	if err != nil {
+		return err
+	}
+	if manifest.App != app.Name {
+		return fmt.Errorf("release %s belongs to app %s, not %s", manifest.ID, manifest.App, app.Name)
+	}
+
+	appDir, composeContent, err := d.loadComposeContent(app)
+	if err != nil {
+		return err
+	}
+
+	return d.deployManifest(app, manifest, appDir, composeContent)
+}
+
+// CreateRelease snapshots the current deploy inputs and writes a release manifest.
+func (d *Deployer) CreateRelease(appName string) (*release.Manifest, error) {
+	app := d.Repo.GetApp(appName)
+	if app == nil {
+		return nil, fmt.Errorf("app '%s' not found", appName)
+	}
+
+	_, composeContent, err := d.loadComposeContent(app)
+	if err != nil {
+		return nil, err
+	}
+
+	manifest := release.Build(app, composeContent, time.Now())
+	if err := release.Save(d.Repo.AppReleasesDir(appName), manifest); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+func (d *Deployer) deployManifest(app *config.AppConfig, manifest *release.Manifest, appDir string, composeContent []byte) error {
 	internalHosts := d.Repo.InternalHosts()
 
 	targetNodes := app.GetTargetNodes(d.Repo.Cluster.Nodes)
-	d.log.Infof("Deploying %s:%s to nodes: %v", app.Image, app.Version, targetNodes)
+	d.log.Infof("Deploying %s release %s to nodes: %v", app.Name, manifest.ID, targetNodes)
 
 	if d.DryRun {
 		if app.Strategy == config.StrategyRecreate {
@@ -112,7 +146,8 @@ func (d *Deployer) Deploy(appName, version string) error {
 				break
 			}
 		}
-		override, err := compose.GenerateOverride(app, &d.Repo.Cluster.Networking, internalHosts, dryRunIP, string(composeContent))
+		hasEnvFile := releaseNeedsEnvFile(manifest, d.Repo.Cluster.Secrets.Server)
+		override, err := compose.GenerateReleaseOverrideWithEnvFile(app, manifest, hasEnvFile, &d.Repo.Cluster.Networking, internalHosts, dryRunIP, string(composeContent))
 		if err != nil {
 			return fmt.Errorf("failed to generate override: %w", err)
 		}
@@ -120,14 +155,14 @@ func (d *Deployer) Deploy(appName, version string) error {
 		fmt.Println(override)
 		fmt.Printf("Targets: %v\n", targetNodes)
 		if app.Source != nil {
-			fmt.Printf("Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.Version, app.Source.ComposePath)
+			fmt.Printf("Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.EffectiveComposeRef(), app.Source.ComposePath)
 		}
-		needsSecrets := app.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != ""
+		needsSecrets := manifest.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != ""
 		if needsSecrets {
-			fmt.Printf("Secrets: fetch from %s (prefix: %s) → .env file\n", d.Repo.Cluster.Secrets.Server, app.SecretsPrefix)
+			fmt.Printf("Secrets: fetch from %s (prefix: %s) → .env file\n", d.Repo.Cluster.Secrets.Server, manifest.SecretsPrefix)
 		}
-		if len(app.Environment) > 0 {
-			fmt.Printf("Environment: %d variable(s) from app.yml → .env file\n", len(app.Environment))
+		if len(manifest.Environment) > 0 {
+			fmt.Printf("Environment: %d variable(s) from release → .env file\n", len(manifest.Environment))
 		}
 		if app.Strategy == config.StrategyRecreate {
 			fmt.Printf("Each node: pull -> stop old -> start new -> health check\n")
@@ -147,12 +182,13 @@ func (d *Deployer) Deploy(appName, version string) error {
 
 		d.log.Infof("[%d/%d] Deploying to node %s...", i+1, len(targetNodes), nodeID)
 
-		override, err := compose.GenerateOverride(app, &d.Repo.Cluster.Networking, internalHosts, node.PrivateIP, string(composeContent))
+		hasEnvFile := releaseNeedsEnvFile(manifest, d.Repo.Cluster.Secrets.Server)
+		override, err := compose.GenerateReleaseOverrideWithEnvFile(app, manifest, hasEnvFile, &d.Repo.Cluster.Networking, internalHosts, node.PrivateIP, string(composeContent))
 		if err != nil {
 			return fmt.Errorf("failed to generate override for node %s: %w", nodeID, err)
 		}
 
-		if err := d.deployToNode(app, node, appDir, composeContent, override); err != nil {
+		if err := d.deployToNode(app, manifest, node, appDir, composeContent, override); err != nil {
 			d.log.Warnf("Deploy to node %s failed: %v", nodeID, err)
 			if len(deployed) > 0 {
 				d.log.Warnf("Nodes already updated: %v", deployed)
@@ -182,11 +218,34 @@ func (d *Deployer) Deploy(appName, version string) error {
 		d.log.Warnf("Failed to update internal proxy: %v", err)
 	}
 
-	d.log.Infof("Deploy complete: %s:%s across %d node(s)", app.Name, app.Version, len(deployed))
+	d.log.Infof("Deploy complete: %s release %s across %d node(s)", app.Name, manifest.ID, len(deployed))
 	return nil
 }
 
-func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, appDir string, composeContent []byte, override string) error {
+func (d *Deployer) loadComposeContent(app *config.AppConfig) (string, []byte, error) {
+	appDir := d.Repo.AppDir(app.Name)
+	composePath := d.Repo.AppComposePath(app.Name)
+
+	if app.Source != nil {
+		d.log.Infof("Fetching compose from %s@%s...", app.Source.Repo, app.EffectiveComposeRef())
+		composeContent, err := FetchComposeFromSource(app.Source, app.EffectiveComposeRef(), d.GitHubToken)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to fetch remote compose: %w", err)
+		}
+		return "", composeContent, nil
+	}
+
+	if _, err := os.Stat(composePath); os.IsNotExist(err) {
+		return "", nil, fmt.Errorf("compose.yml not found for app '%s' at %s", app.Name, composePath)
+	}
+	composeContent, err := os.ReadFile(composePath)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read compose.yml: %w", err)
+	}
+	return appDir, composeContent, nil
+}
+
+func (d *Deployer) deployToNode(app *config.AppConfig, manifest *release.Manifest, node *config.NodeConfig, appDir string, composeContent []byte, override string) error {
 	client, err := d.connect(node)
 	if err != nil {
 		return err
@@ -209,7 +268,7 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 		return err
 	}
 
-	hasEnvFile, err := d.writeEnvFile(client, remoteDir, app)
+	hasEnvFile, err := d.writeReleaseEnvFile(client, remoteDir, manifest)
 	if err != nil {
 		return err
 	}
@@ -230,12 +289,12 @@ func (d *Deployer) deployToNode(app *config.AppConfig, node *config.NodeConfig, 
 		}
 	}
 
-	d.saveDeployState(client, remoteDir, app, currentState, result.ActiveSlot)
+	d.saveDeployState(client, remoteDir, app, manifest, currentState, result.ActiveSlot)
 
 	if result.ActiveSlot == "" {
-		d.log.Infof("Node %s: %s:%s deployed", node.ID, app.Name, app.Version)
+		d.log.Infof("Node %s: %s release %s deployed", node.ID, app.Name, manifest.ID)
 	} else {
-		d.log.Infof("Node %s: %s slot active, %s:%s deployed", node.ID, result.ActiveSlot, app.Name, app.Version)
+		d.log.Infof("Node %s: %s slot active, %s release %s deployed", node.ID, result.ActiveSlot, app.Name, manifest.ID)
 	}
 	return nil
 }
@@ -265,10 +324,14 @@ func (d *Deployer) Rollback(appName string) error {
 	state := d.readState(client, remoteDir)
 	client.Close()
 
-	if state.PreviousVersion == "" {
-		return fmt.Errorf("no previous version found for %s", appName)
+	if state.PreviousRelease != "" {
+		d.log.Infof("Rolling back %s from release %s to %s", appName, state.CurrentRelease, state.PreviousRelease)
+		return d.DeployRelease(appName, state.PreviousRelease)
 	}
 
+	if state.PreviousVersion == "" {
+		return fmt.Errorf("no previous release found for %s", appName)
+	}
 	d.log.Infof("Rolling back %s from %s to %s", appName, state.CurrentVersion, state.PreviousVersion)
 	return d.Deploy(appName, state.PreviousVersion)
 }
@@ -856,6 +919,13 @@ func needsEnvFile(app *config.AppConfig, secretsServer string) bool {
 	return app.SecretsPrefix != "" && secretsServer != ""
 }
 
+func releaseNeedsEnvFile(manifest *release.Manifest, secretsServer string) bool {
+	if len(manifest.Environment) > 0 {
+		return true
+	}
+	return manifest.SecretsPrefix != "" && secretsServer != ""
+}
+
 func (d *Deployer) composeUpCommand(app *config.AppConfig, projectFlag, composeFiles string, hasEnvFile bool) string {
 	base := "docker compose " + projectFlag + " " + composeFiles
 	if hasEnvFile {
@@ -1018,6 +1088,14 @@ func (d *Deployer) writeEnvFile(writer fileWriter, remoteDir string, app *config
 	return true, nil
 }
 
+func (d *Deployer) writeReleaseEnvFile(writer fileWriter, remoteDir string, manifest *release.Manifest) (bool, error) {
+	app := &config.AppConfig{
+		Environment:   manifest.Environment,
+		SecretsPrefix: manifest.SecretsPrefix,
+	}
+	return d.writeEnvFile(writer, remoteDir, app)
+}
+
 func (d *Deployer) loginRegistry(runner stdinRunner) error {
 	reg := d.Repo.Cluster.Registry
 	if reg.Username == "" && d.Repo.Cluster.Secrets.Server != "" {
@@ -1115,13 +1193,21 @@ func (d *Deployer) stopProject(runner commandRunner, remoteDir, projectFlag, com
 	}
 }
 
-func (d *Deployer) saveDeployState(client *ssh.Client, remoteDir string, app *config.AppConfig, currentState *DeployState, activeSlot string) {
+func (d *Deployer) saveDeployState(client *ssh.Client, remoteDir string, app *config.AppConfig, manifest *release.Manifest, currentState *DeployState, activeSlot string) {
 	newState := &DeployState{
 		App:             app.Name,
-		CurrentVersion:  app.Version,
-		PreviousVersion: currentState.CurrentVersion,
-		ActiveSlot:      activeSlot,
-		DeployedAt:      time.Now(),
+		CurrentRelease:  manifest.ID,
+		PreviousRelease: currentState.CurrentRelease,
+		CurrentReleaseInputs: ReleaseInputs{
+			ImageRef:   manifest.ImageRef,
+			ComposeRev: manifest.ComposeRev,
+			EnvHash:    manifest.EnvHash,
+		},
+		PreviousReleaseInputs: currentState.CurrentReleaseInputs,
+		CurrentVersion:        manifest.ImageTag,
+		PreviousVersion:       currentState.CurrentVersion,
+		ActiveSlot:            activeSlot,
+		DeployedAt:            time.Now(),
 	}
 	stateJSON, err := newState.Marshal()
 	if err != nil {

@@ -189,7 +189,9 @@ Example:
 ```yaml
 kind: warpgate/app
 image: ghcr.io/acme/api
-version: v1.2.3
+image_tag: v1.2.3
+image_digest: sha256:...
+compose_ref: main
 targets: [node-1]
 secrets_prefix: api/prod
 port: 8080
@@ -219,11 +221,22 @@ sidecars:
         port: 8081
 ```
 
+`version` is still accepted as a compatibility alias for older app configs. New configs should use `image_tag` for the build tag, `image_digest` when the image is pinned immutably, and `compose_ref` for remote compose sources.
+
+Create and deploy a release:
+
+```bash
+warpgate release api
+warpgate deploy api --release latest --tailscale-ssh
+```
+
 Fields:
 
 - `kind` is optional. If set, it must be `warpgate/app`.
 - `image` is required.
-- `version` defaults to `latest` if omitted.
+- `image_tag` defaults to `latest` if omitted.
+- `image_digest` pins the image immutably when set.
+- `compose_ref` identifies the remote compose source revision when `source` is set.
 - `targets` defaults to all nodes if omitted.
 - `secrets_prefix` tells Warpgate which SecretSauce keys to fetch.
 - `port` is the container port used for app-level routing metadata.
@@ -236,10 +249,10 @@ Fields:
 
 ```yaml
 image: ghcr.io/acme/worker
-version: v2.0.0
+image_tag: v2.0.0
+compose_ref: main
 source:
   repo: github.com/acme/deploy-definitions
-  ref: main
   compose_path: services/worker/compose.yml
 ```
 
@@ -260,9 +273,6 @@ services:
   api:
     image: ghcr.io/acme/api
     restart: unless-stopped
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      LOG_LEVEL: ${LOG_LEVEL}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
       interval: 10s
@@ -274,9 +284,9 @@ Deploy-time behavior:
 
 - If `app.yml` has a local `compose.yml`, Warpgate uploads it to the target node.
 - If `app.yml` uses `source`, Warpgate fetches the compose file from GitHub instead.
-- Warpgate writes a `docker-compose.override.yml` that currently injects the tagged image for the main service and `extra_hosts` entries for internal hostnames.
+- Warpgate writes a `docker-compose.override.yml` that injects the release image reference, an `env_file` reference for release env, and `extra_hosts` entries for internal hostnames.
 - If `persistent_volumes` is set, Warpgate also injects top-level `volumes:` name overrides so named volumes stay stable across blue/green slot changes.
-- If `environment` or `secrets_prefix` is set, Warpgate writes a temporary `.env` file and passes `--env-file .env` to `docker compose`.
+- If `environment` or `secrets_prefix` is set, Warpgate writes a temporary `.env` file, references it from the generated override, and passes `--env-file .env` to `docker compose`.
 
 Health checks matter:
 
@@ -410,9 +420,8 @@ environment:
 ```yaml
 services:
   api:
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      LOG_LEVEL: ${LOG_LEVEL}
+    image: ghcr.io/acme/api
+    restart: unless-stopped
 ```
 
 Registry credentials can also be read from SecretSauce if they were stored during bootstrap.

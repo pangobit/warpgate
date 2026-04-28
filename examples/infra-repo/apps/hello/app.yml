@@ -1,4 +1,4 @@
 image: traefik/whoami
-version: v1.10.3
+image_tag: v1.10.3
 targets: [node-1]
 port: 80
