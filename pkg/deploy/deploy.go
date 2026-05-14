@@ -249,6 +249,15 @@ func (d *Deployer) deployToNode(app *config.AppConfig, manifest *release.Manifes
 	defer releaseLock(client, remoteDir, d.log)
 
 	currentState := d.readState(client, remoteDir)
+	restorePlan := recreateRestorePlan{}
+	if app.Strategy == config.StrategyRecreate {
+		var err error
+		restorePlan, err = d.prepareRecreateRestore(client, remoteDir, app, currentState)
+		if err != nil {
+			return err
+		}
+	}
+
 	if err := d.uploadDeploymentFiles(client, remoteDir, appDir, composeContent, override); err != nil {
 		return err
 	}
@@ -265,12 +274,12 @@ func (d *Deployer) deployToNode(app *config.AppConfig, manifest *release.Manifes
 	composeFiles := "-f compose.yml -f docker-compose.override.yml"
 	result, err := d.deployWithStrategy(client, remoteDir, app, currentState, composeFiles, hasEnvFile, WaitForHealthy)
 	if err != nil {
-		return err
+		return d.recoverFailedRecreateDeployment(client, remoteDir, app, restorePlan, composeFiles, hasEnvFile, err, WaitForHealthy)
 	}
 
 	if hasEnvFile {
-		if _, _, err := client.RunCommand("rm -f " + strings.Join(releaseEnvPaths(remoteDir, manifest), " ")); err != nil {
-			return fmt.Errorf("failed to remove .env file: %w", err)
+		if err := removeReleaseEnvFiles(client, remoteDir, manifest); err != nil {
+			return err
 		}
 	}
 
@@ -897,6 +906,11 @@ type commandRunner interface {
 	RunCommand(cmd string) (string, string, error)
 }
 
+type deploymentRunner interface {
+	commandRunner
+	fileWriter
+}
+
 type stdinRunner interface {
 	RunCommandStdin(cmd, stdinData string) (string, string, error)
 }
@@ -925,6 +939,26 @@ type deployPlan struct {
 
 type deployResult struct {
 	ActiveSlot string
+}
+
+type deploymentFileSnapshot struct {
+	compose     string
+	override    string
+	hasCompose  bool
+	hasOverride bool
+}
+
+func (s deploymentFileSnapshot) complete() bool {
+	return s.hasCompose && s.hasOverride
+}
+
+type recreateRestorePlan struct {
+	files    deploymentFileSnapshot
+	manifest *release.Manifest
+}
+
+func (p recreateRestorePlan) canRestore() bool {
+	return p.files.complete()
 }
 
 func makeDeployPlan(appName string, strategy config.DeployStrategy, state *DeployState) deployPlan {
@@ -1030,6 +1064,82 @@ func (d *Deployer) uploadDeploymentFiles(fs deploymentFS, remoteDir, appDir stri
 	return nil
 }
 
+func (d *Deployer) prepareRecreateRestore(runner commandRunner, remoteDir string, app *config.AppConfig, state *DeployState) (recreateRestorePlan, error) {
+	files, err := captureDeploymentFiles(runner, remoteDir)
+	if err != nil {
+		return recreateRestorePlan{}, fmt.Errorf("prepare recreate restore: %w", err)
+	}
+
+	hasRecordedDeployment := state != nil && (state.CurrentRelease != "" || state.CurrentVersion != "")
+	if hasRecordedDeployment && !files.complete() {
+		return recreateRestorePlan{}, fmt.Errorf("cannot prepare recreate restore for %s: previous compose files are missing", app.Name)
+	}
+
+	plan := recreateRestorePlan{
+		files: files,
+	}
+	if state == nil || state.CurrentRelease == "" {
+		return plan, nil
+	}
+
+	manifest, err := release.Load(d.Repo.AppReleasesDir(app.Name), state.CurrentRelease)
+	if err != nil {
+		return recreateRestorePlan{}, fmt.Errorf("cannot prepare recreate restore for %s release %s: %w", app.Name, state.CurrentRelease, err)
+	}
+	if manifest.App != "" && manifest.App != app.Name {
+		return recreateRestorePlan{}, fmt.Errorf("cannot prepare recreate restore for %s: release %s belongs to app %s", app.Name, state.CurrentRelease, manifest.App)
+	}
+	plan.manifest = manifest
+	return plan, nil
+}
+
+func captureDeploymentFiles(runner commandRunner, remoteDir string) (deploymentFileSnapshot, error) {
+	composeContent, hasCompose, err := readRemoteTextFile(runner, remoteDir+"/compose.yml")
+	if err != nil {
+		return deploymentFileSnapshot{}, fmt.Errorf("read previous compose.yml: %w", err)
+	}
+
+	overrideContent, hasOverride, err := readRemoteTextFile(runner, remoteDir+"/docker-compose.override.yml")
+	if err != nil {
+		return deploymentFileSnapshot{}, fmt.Errorf("read previous docker-compose.override.yml: %w", err)
+	}
+
+	return deploymentFileSnapshot{
+		compose:     composeContent,
+		override:    overrideContent,
+		hasCompose:  hasCompose,
+		hasOverride: hasOverride,
+	}, nil
+}
+
+func readRemoteTextFile(runner commandRunner, path string) (string, bool, error) {
+	stdout, stderr, err := runner.RunCommand(readRemoteTextFileCommand(path))
+	if err != nil {
+		if stderr != "" {
+			return "", false, fmt.Errorf("%w\n%s", err, stderr)
+		}
+		return "", false, err
+	}
+
+	present, content, ok := strings.Cut(stdout, "\n")
+	if !ok {
+		return "", false, fmt.Errorf("unexpected read response for %s", path)
+	}
+	switch present {
+	case "1":
+		return content, true, nil
+	case "0":
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("unexpected read response for %s", path)
+	}
+}
+
+func readRemoteTextFileCommand(path string) string {
+	quotedPath := shellQuote(path)
+	return fmt.Sprintf("if [ -f %s ]; then printf '1\\n'; cat %s; else printf '0\\n'; fi", quotedPath, quotedPath)
+}
+
 func (d *Deployer) writeReleaseEnvFile(writer fileWriter, remoteDir string, manifest *release.Manifest) (bool, error) {
 	services := manifest.Services
 	envFiles := releaseEnvFileMap(manifest, d.Repo.Cluster.Secrets.Server)
@@ -1091,6 +1201,52 @@ func (d *Deployer) deployWithStrategy(runner commandRunner, remoteDir string, ap
 		return d.runRecreateDeployment(runner, remoteDir, app, composeFiles, hasEnvFile, plan, waitForHealth)
 	}
 	return d.runBlueGreenDeployment(runner, remoteDir, app, composeFiles, hasEnvFile, plan, waitForHealth)
+}
+
+func (d *Deployer) recoverFailedRecreateDeployment(runner deploymentRunner, remoteDir string, app *config.AppConfig, restorePlan recreateRestorePlan, composeFiles string, hasEnvFile bool, deployErr error, waitForHealth healthWaitFunc) error {
+	if deployErr == nil {
+		return nil
+	}
+	if app.Strategy != config.StrategyRecreate || !restorePlan.canRestore() {
+		return deployErr
+	}
+
+	if restoreErr := d.restorePreviousRecreateDeployment(runner, remoteDir, app, restorePlan, composeFiles, hasEnvFile, waitForHealth); restoreErr != nil {
+		return fmt.Errorf("%w; restore previous deployment failed: %v", deployErr, restoreErr)
+	}
+	return fmt.Errorf("%w; previous deployment restored", deployErr)
+}
+
+func (d *Deployer) restorePreviousRecreateDeployment(runner deploymentRunner, remoteDir string, app *config.AppConfig, restorePlan recreateRestorePlan, composeFiles string, fallbackHasEnvFile bool, waitForHealth healthWaitFunc) error {
+	d.log.Warnf("Restoring previous deployment for %s...", app.Name)
+	if err := runner.WriteFile(remoteDir+"/compose.yml", restorePlan.files.compose); err != nil {
+		return fmt.Errorf("restore compose.yml: %w", err)
+	}
+	if err := runner.WriteFile(remoteDir+"/docker-compose.override.yml", restorePlan.files.override); err != nil {
+		return fmt.Errorf("restore docker-compose.override.yml: %w", err)
+	}
+
+	hasEnvFile := fallbackHasEnvFile
+	if restorePlan.manifest != nil {
+		var err error
+		hasEnvFile, err = d.writeReleaseEnvFile(runner, remoteDir, restorePlan.manifest)
+		if err != nil {
+			return fmt.Errorf("write previous release env files: %w", err)
+		}
+	}
+
+	projectFlag := deploymentProjectFlag(app.Name, config.StrategyRecreate, "")
+	if err := d.startAndVerifyProject(runner, remoteDir, app, projectFlag, composeFiles, hasEnvFile, "previous "+app.Name, waitForHealth); err != nil {
+		return fmt.Errorf("restart previous deployment: %w", err)
+	}
+
+	if restorePlan.manifest != nil && hasEnvFile {
+		if err := removeReleaseEnvFiles(runner, remoteDir, restorePlan.manifest); err != nil {
+			d.log.Warnf("Failed to remove restored env files: %v", err)
+		}
+	}
+	d.log.Warnf("Restored previous deployment for %s", app.Name)
+	return nil
 }
 
 func (d *Deployer) runRecreateDeployment(runner commandRunner, remoteDir string, app *config.AppConfig, composeFiles string, hasEnvFile bool, plan deployPlan, waitForHealth healthWaitFunc) (deployResult, error) {
@@ -1231,6 +1387,13 @@ func releaseEnvPaths(remoteDir string, manifest *release.Manifest) []string {
 		paths = append(paths, remoteDir+"/"+serviceEnvFile(serviceName))
 	}
 	return paths
+}
+
+func removeReleaseEnvFiles(runner commandRunner, remoteDir string, manifest *release.Manifest) error {
+	if _, _, err := runner.RunCommand("rm -f " + strings.Join(releaseEnvPaths(remoteDir, manifest), " ")); err != nil {
+		return fmt.Errorf("failed to remove .env file: %w", err)
+	}
+	return nil
 }
 
 // mergeEnvironment combines app-level environment variables with secrets.

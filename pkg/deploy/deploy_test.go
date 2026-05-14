@@ -1,7 +1,10 @@
 package deploy
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -473,6 +476,144 @@ func TestDeployWithStrategy(t *testing.T) {
 	}
 }
 
+func TestPrepareRecreateRestoreLoadsPreviousReleaseAndFiles(t *testing.T) {
+	root := t.TempDir()
+	previousManifest := &release.Manifest{
+		ID:  "old-release",
+		App: "probe",
+		Services: map[string]release.ServiceManifest{
+			"probe": {
+				ImageRef: "ghcr.io/example/probe:v1",
+			},
+		},
+	}
+	if err := release.Save(filepath.Join(root, "apps", "probe", "releases"), previousManifest); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	d := NewDeployer(&config.RepoConfig{
+		Root:    root,
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+	runner := &fakeRemote{
+		commandStdout: map[string]string{
+			readRemoteTextFileCommand("/remote/compose.yml"):                 "1\nold compose",
+			readRemoteTextFileCommand("/remote/docker-compose.override.yml"): "1\nold override",
+		},
+	}
+
+	got, err := d.prepareRecreateRestore(runner, "/remote", &config.AppConfig{Name: "probe"}, &DeployState{CurrentRelease: "old-release"})
+	if err != nil {
+		t.Fatalf("prepareRecreateRestore() error = %v", err)
+	}
+	if !got.canRestore() {
+		t.Fatal("prepareRecreateRestore() cannot restore, want true")
+	}
+	if got.files.compose != "old compose" || got.files.override != "old override" {
+		t.Fatalf("restore files = %+v", got.files)
+	}
+	if got.manifest == nil || got.manifest.ID != "old-release" {
+		t.Fatalf("restore manifest = %+v, want old-release", got.manifest)
+	}
+
+	wantCommands := []string{
+		readRemoteTextFileCommand("/remote/compose.yml"),
+		readRemoteTextFileCommand("/remote/docker-compose.override.yml"),
+	}
+	if !reflect.DeepEqual(runner.commands, wantCommands) {
+		t.Errorf("commands = %v, want %v", runner.commands, wantCommands)
+	}
+}
+
+func TestPrepareRecreateRestoreFailsWhenRecordedDeploymentFilesAreMissing(t *testing.T) {
+	d := NewDeployer(&config.RepoConfig{
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+	runner := &fakeRemote{
+		commandStdout: map[string]string{
+			readRemoteTextFileCommand("/remote/compose.yml"):                 "0\n",
+			readRemoteTextFileCommand("/remote/docker-compose.override.yml"): "0\n",
+		},
+	}
+
+	_, err := d.prepareRecreateRestore(runner, "/remote", &config.AppConfig{Name: "probe"}, &DeployState{CurrentVersion: "v1"})
+	if err == nil || err.Error() != "cannot prepare recreate restore for probe: previous compose files are missing" {
+		t.Fatalf("prepareRecreateRestore() error = %v", err)
+	}
+}
+
+func TestRestorePreviousRecreateDeploymentRestartsCapturedRelease(t *testing.T) {
+	d := NewDeployer(&config.RepoConfig{
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+	runner := &fakeRemote{}
+	restorePlan := recreateRestorePlan{
+		files: deploymentFileSnapshot{
+			compose:     "old compose",
+			override:    "old override",
+			hasCompose:  true,
+			hasOverride: true,
+		},
+		manifest: &release.Manifest{
+			App: "probe",
+			Services: map[string]release.ServiceManifest{
+				"probe": {
+					Environment: map[string]string{
+						"DOMAIN": "old.example",
+					},
+				},
+			},
+		},
+	}
+
+	var waitFlags []string
+	waitForHealth := func(_ commandRunner, _ string, _ string, projectFlag string, _ string, _ logger) error {
+		waitFlags = append(waitFlags, projectFlag)
+		return nil
+	}
+
+	err := d.restorePreviousRecreateDeployment(
+		runner,
+		"/remote",
+		&config.AppConfig{Name: "probe", Strategy: config.StrategyRecreate},
+		restorePlan,
+		"-f compose.yml -f docker-compose.override.yml",
+		false,
+		waitForHealth,
+	)
+	if err != nil {
+		t.Fatalf("restorePreviousRecreateDeployment() error = %v", err)
+	}
+
+	wantWrites := []string{
+		"/remote/compose.yml=old compose",
+		"/remote/docker-compose.override.yml=old override",
+	}
+	if !reflect.DeepEqual(runner.writes, wantWrites) {
+		t.Errorf("writes = %v, want %v", runner.writes, wantWrites)
+	}
+
+	wantSecretWrites := []string{
+		"/remote/.env.probe=DOMAIN=old.example\n",
+		"/remote/.env=DOMAIN=old.example\n",
+	}
+	if !reflect.DeepEqual(runner.secretWrites, wantSecretWrites) {
+		t.Errorf("secret writes = %v, want %v", runner.secretWrites, wantSecretWrites)
+	}
+
+	wantCommands := []string{
+		"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml --env-file .env up -d",
+		"rm -f /remote/.env /remote/.env.probe",
+	}
+	if !reflect.DeepEqual(runner.commands, wantCommands) {
+		t.Errorf("commands = %v, want %v", runner.commands, wantCommands)
+	}
+
+	if !reflect.DeepEqual(waitFlags, []string{"-p probe"}) {
+		t.Errorf("wait flags = %v, want [-p probe]", waitFlags)
+	}
+}
+
 func TestStartAndVerifyProjectStartFailure(t *testing.T) {
 	d := NewDeployer(&config.RepoConfig{
 		Cluster: &config.ClusterConfig{Project: "test"},
@@ -568,6 +709,79 @@ func TestWriteReleaseEnvFileWritesPerServiceAndProjectEnv(t *testing.T) {
 	}
 	if !reflect.DeepEqual(writer.secretWrites, want) {
 		t.Errorf("secret writes = %v, want %v", writer.secretWrites, want)
+	}
+}
+
+func TestWriteReleaseEnvFileWritesSharedSecretsPrefixToEachService(t *testing.T) {
+	var listRequests int
+	var valueRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/secrets" && r.URL.Query().Get("prefix") == "shared/prod":
+			listRequests++
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, []map[string]string{
+				{"key": "shared/prod/api_key", "state": "active"},
+			})
+		case r.URL.RawPath == "/api/secrets/shared%2Fprod%2Fapi_key" || r.URL.Path == "/api/secrets/shared/prod/api_key":
+			valueRequests++
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]string{
+				"key": "shared/prod/api_key", "value": "secret123", "state": "active",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	d := NewDeployer(&config.RepoConfig{
+		Cluster: &config.ClusterConfig{
+			Project: "test",
+			Secrets: config.SecretsConfig{Server: server.URL},
+		},
+	}, "")
+	manifest := &release.Manifest{
+		App: "api",
+		Services: map[string]release.ServiceManifest{
+			"api": {
+				SecretsPrefix: "shared/prod",
+			},
+			"worker": {
+				SecretsPrefix: "shared/prod",
+			},
+		},
+	}
+
+	writer := &fakeRemote{}
+	got, err := d.writeReleaseEnvFile(writer, "/remote", manifest)
+	if err != nil {
+		t.Fatalf("writeReleaseEnvFile() error = %v", err)
+	}
+	if !got {
+		t.Fatal("writeReleaseEnvFile() = false, want true")
+	}
+
+	want := []string{
+		"/remote/.env.api=API_KEY=secret123\n",
+		"/remote/.env.worker=API_KEY=secret123\n",
+		"/remote/.env=API_KEY=secret123\n",
+	}
+	if !reflect.DeepEqual(writer.secretWrites, want) {
+		t.Errorf("secret writes = %v, want %v", writer.secretWrites, want)
+	}
+	if listRequests != 2 {
+		t.Errorf("list requests = %d, want 2", listRequests)
+	}
+	if valueRequests != 2 {
+		t.Errorf("value requests = %d, want 2", valueRequests)
+	}
+}
+
+func writeJSON(t *testing.T, w http.ResponseWriter, value interface{}) {
+	t.Helper()
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Errorf("json encode response: %v", err)
 	}
 }
 
