@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -499,6 +500,7 @@ func TestPrepareRecreateRestoreLoadsPreviousReleaseAndFiles(t *testing.T) {
 		commandStdout: map[string]string{
 			readRemoteTextFileCommand("/remote/compose.yml"):                 "1\nold compose",
 			readRemoteTextFileCommand("/remote/docker-compose.override.yml"): "1\nold override",
+			listRemoteEnvFilesCommand("/remote"):                             "",
 		},
 	}
 
@@ -519,9 +521,67 @@ func TestPrepareRecreateRestoreLoadsPreviousReleaseAndFiles(t *testing.T) {
 	wantCommands := []string{
 		readRemoteTextFileCommand("/remote/compose.yml"),
 		readRemoteTextFileCommand("/remote/docker-compose.override.yml"),
+		listRemoteEnvFilesCommand("/remote"),
 	}
 	if !reflect.DeepEqual(runner.commands, wantCommands) {
 		t.Errorf("commands = %v, want %v", runner.commands, wantCommands)
+	}
+}
+
+func TestPrepareRecreateRestoreContinuesWhenPreviousReleaseManifestIsMissingWithCapturedEnvFiles(t *testing.T) {
+	root := t.TempDir()
+	d := NewDeployer(&config.RepoConfig{
+		Root:    root,
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+	runner := &fakeRemote{
+		commandStdout: map[string]string{
+			readRemoteTextFileCommand("/remote/compose.yml"):                 "1\nold compose",
+			readRemoteTextFileCommand("/remote/docker-compose.override.yml"): "1\nold override",
+			listRemoteEnvFilesCommand("/remote"):                             ".env\n.env.probe\n",
+			readRemoteTextFileCommand("/remote/.env"):                        "1\nDOMAIN=old.example\n",
+			readRemoteTextFileCommand("/remote/.env.probe"):                  "1\nDOMAIN=old.example\n",
+		},
+	}
+
+	got, err := d.prepareRecreateRestore(runner, "/remote", &config.AppConfig{Name: "probe"}, &DeployState{CurrentRelease: "old-release"})
+	if err != nil {
+		t.Fatalf("prepareRecreateRestore() error = %v", err)
+	}
+	if got.manifest != nil {
+		t.Fatalf("manifest = %+v, want nil", got.manifest)
+	}
+	if got.files.envFiles[".env"] != "DOMAIN=old.example\n" || got.files.envFiles[".env.probe"] != "DOMAIN=old.example\n" {
+		t.Fatalf("env files = %+v", got.files.envFiles)
+	}
+}
+
+func TestPrepareRecreateRestoreContinuesWhenPreviousReleaseManifestIsMissingWithoutCapturedEnvFiles(t *testing.T) {
+	root := t.TempDir()
+	d := NewDeployer(&config.RepoConfig{
+		Root:    root,
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+	runner := &fakeRemote{
+		commandStdout: map[string]string{
+			readRemoteTextFileCommand("/remote/compose.yml"):                 "1\nold compose",
+			readRemoteTextFileCommand("/remote/docker-compose.override.yml"): "1\nold override",
+			listRemoteEnvFilesCommand("/remote"):                             "",
+		},
+	}
+
+	got, err := d.prepareRecreateRestore(runner, "/remote", &config.AppConfig{Name: "probe"}, &DeployState{CurrentRelease: "old-release"})
+	if err != nil {
+		t.Fatalf("prepareRecreateRestore() error = %v", err)
+	}
+	if !got.canRestore() {
+		t.Fatal("prepareRecreateRestore() cannot restore, want true")
+	}
+	if got.manifest != nil {
+		t.Fatalf("manifest = %+v, want nil", got.manifest)
+	}
+	if len(got.files.envFiles) != 0 {
+		t.Fatalf("env files = %+v, want none", got.files.envFiles)
 	}
 }
 
@@ -539,6 +599,17 @@ func TestPrepareRecreateRestoreFailsWhenRecordedDeploymentFilesAreMissing(t *tes
 	_, err := d.prepareRecreateRestore(runner, "/remote", &config.AppConfig{Name: "probe"}, &DeployState{CurrentVersion: "v1"})
 	if err == nil || err.Error() != "cannot prepare recreate restore for probe: previous compose files are missing" {
 		t.Fatalf("prepareRecreateRestore() error = %v", err)
+	}
+}
+
+func TestListRemoteEnvFilesCommandSucceedsWithoutEnvFiles(t *testing.T) {
+	cmd := exec.Command("sh", "-c", listRemoteEnvFilesCommand(t.TempDir()))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("listRemoteEnvFilesCommand() error = %v output = %q", err, output)
+	}
+	if string(output) != "" {
+		t.Fatalf("listRemoteEnvFilesCommand() output = %q, want empty", output)
 	}
 }
 
@@ -611,6 +682,51 @@ func TestRestorePreviousRecreateDeploymentRestartsCapturedRelease(t *testing.T) 
 
 	if !reflect.DeepEqual(waitFlags, []string{"-p probe"}) {
 		t.Errorf("wait flags = %v, want [-p probe]", waitFlags)
+	}
+}
+
+func TestRestorePreviousRecreateDeploymentRestoresCapturedEnvWithoutManifest(t *testing.T) {
+	d := NewDeployer(&config.RepoConfig{
+		Cluster: &config.ClusterConfig{Project: "test"},
+	}, "")
+	runner := &fakeRemote{}
+	restorePlan := recreateRestorePlan{
+		files: deploymentFileSnapshot{
+			compose:     "old compose",
+			override:    "old override",
+			envFiles:    map[string]string{".env": "DOMAIN=old.example\n", ".env.probe": "DOMAIN=old.example\n"},
+			hasCompose:  true,
+			hasOverride: true,
+		},
+	}
+	waitForHealth := func(commandRunner, string, string, string, string, logger) error { return nil }
+
+	err := d.restorePreviousRecreateDeployment(
+		runner,
+		"/remote",
+		&config.AppConfig{Name: "probe", Strategy: config.StrategyRecreate},
+		restorePlan,
+		"-f compose.yml -f docker-compose.override.yml",
+		true,
+		waitForHealth,
+	)
+	if err != nil {
+		t.Fatalf("restorePreviousRecreateDeployment() error = %v", err)
+	}
+
+	wantSecretWrites := []string{
+		"/remote/.env=DOMAIN=old.example\n",
+		"/remote/.env.probe=DOMAIN=old.example\n",
+	}
+	if !reflect.DeepEqual(runner.secretWrites, wantSecretWrites) {
+		t.Errorf("secret writes = %v, want %v", runner.secretWrites, wantSecretWrites)
+	}
+	wantCommands := []string{
+		"rm -f '/remote'/.env '/remote'/.env.*",
+		"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml --env-file .env up -d",
+	}
+	if !reflect.DeepEqual(runner.commands, wantCommands) {
+		t.Errorf("commands = %v, want %v", runner.commands, wantCommands)
 	}
 }
 
@@ -844,27 +960,32 @@ type fakeRemote struct {
 	uploads       []string
 }
 
+// RunCommand records shell command calls.
 func (f *fakeRemote) RunCommand(cmd string) (string, string, error) {
 	f.commands = append(f.commands, cmd)
 	return f.commandStdout[cmd], f.commandStderr[cmd], f.commandErrs[cmd]
 }
 
+// RunCommandStdin records stdin command calls.
 func (f *fakeRemote) RunCommandStdin(cmd, stdinData string) (string, string, error) {
 	f.stdinCommands = append(f.stdinCommands, cmd)
 	f.stdinPayloads = append(f.stdinPayloads, stdinData)
 	return "", "", nil
 }
 
+// WriteFile records regular file writes.
 func (f *fakeRemote) WriteFile(remotePath, content string) error {
 	f.writes = append(f.writes, remotePath+"="+content)
 	return nil
 }
 
+// WriteFileSecret records secret file writes.
 func (f *fakeRemote) WriteFileSecret(remotePath, content string) error {
 	f.secretWrites = append(f.secretWrites, remotePath+"="+content)
 	return nil
 }
 
+// UploadFile records file uploads.
 func (f *fakeRemote) UploadFile(localPath, remotePath string) error {
 	f.uploads = append(f.uploads, localPath+"->"+remotePath)
 	return nil

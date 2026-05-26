@@ -53,7 +53,10 @@ func acquireLock(client *ssh.Client, appDir string, log *logrus.Logger) error {
 		User:       currentUser(),
 		AcquiredAt: time.Now(),
 	}
-	info.Host, _ = os.Hostname()
+	host, err := os.Hostname()
+	if err == nil {
+		info.Host = host
+	}
 
 	if data, err := json.Marshal(info); err == nil {
 		if writeErr := client.WriteFile(lockDir+"/info", string(data)); writeErr != nil {

@@ -112,6 +112,12 @@ func (c *Client) ReadFile(ctx context.Context, settings configrepo.RepositorySet
 	}
 	endpoint := "/repos/" + settings.Owner + "/" + settings.Repo + "/contents/" + path + "?ref=" + ref
 	if err := c.getJSON(ctx, settings, endpoint, &response); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			if message := c.repositoryAccessMessage(ctx, settings); message != "" {
+				return usecase.GitHubFile{}, fmt.Errorf("%s: %s", message, path)
+			}
+			return usecase.GitHubFile{}, fmt.Errorf("GitHub file not found: %s/%s@%s:%s. If this is a private repository, authorize the GitHub App and install it for this repository.", settings.Owner, settings.Repo, ref, path)
+		}
 		return usecase.GitHubFile{}, err
 	}
 	if response.Encoding != "base64" {
@@ -161,7 +167,7 @@ func (c *Client) WriteFile(ctx context.Context, input usecase.WriteFileInput) (u
 	payload := struct {
 		Message string `json:"message"`
 		Content string `json:"content"`
-		SHA     string `json:"sha"`
+		SHA     string `json:"sha,omitempty"`
 		Branch  string `json:"branch"`
 	}{
 		Message: input.Message,
@@ -187,6 +193,174 @@ func (c *Client) WriteFile(ctx context.Context, input usecase.WriteFileInput) (u
 		SHA:       response.Content.SHA,
 		CommitSHA: response.Commit.SHA,
 	}, nil
+}
+
+// WriteFiles writes files in one Git commit and branch update.
+func (c *Client) WriteFiles(ctx context.Context, input usecase.WriteFilesInput) ([]usecase.GitHubFile, error) {
+	if len(input.Files) == 0 {
+		return nil, fmt.Errorf("github files are required")
+	}
+	headSHA, err := c.gitRef(ctx, input.Settings)
+	if err != nil {
+		return nil, err
+	}
+	baseTreeSHA, err := c.gitCommitTree(ctx, input.Settings, headSHA)
+	if err != nil {
+		return nil, err
+	}
+	entries, created, err := c.createFileBlobs(ctx, input.Settings, input.Files)
+	if err != nil {
+		return nil, err
+	}
+	treeSHA, err := c.createTree(ctx, input.Settings, baseTreeSHA, entries)
+	if err != nil {
+		return nil, err
+	}
+	commitSHA, err := c.createCommit(ctx, input.Settings, input.Message, treeSHA, headSHA)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.updateRef(ctx, input.Settings, commitSHA); err != nil {
+		return nil, err
+	}
+	for index := range created {
+		created[index].CommitSHA = commitSHA
+	}
+	return created, nil
+}
+
+func (c *Client) createFileBlobs(ctx context.Context, settings configrepo.RepositorySettings, files []usecase.WriteFileChange) ([]gitTreeEntry, []usecase.GitHubFile, error) {
+	entries := make([]gitTreeEntry, 0, len(files))
+	created := make([]usecase.GitHubFile, 0, len(files))
+	for _, file := range files {
+		if strings.TrimSpace(file.Path) == "" {
+			return nil, nil, fmt.Errorf("github file path is required")
+		}
+		blobSHA, err := c.createBlob(ctx, settings, file.Content)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create github blob %s: %w", file.Path, err)
+		}
+		entries = append(entries, gitTreeEntry{Path: file.Path, Mode: "100644", Type: "blob", SHA: blobSHA})
+		created = append(created, usecase.GitHubFile{Path: file.Path, Content: file.Content, SHA: blobSHA})
+	}
+	return entries, created, nil
+}
+
+type gitTreeEntry struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"`
+	Type string `json:"type"`
+	SHA  string `json:"sha"`
+}
+
+func (c *Client) gitRef(ctx context.Context, settings configrepo.RepositorySettings) (string, error) {
+	var response struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := c.getJSON(ctx, settings, "/repos/"+settings.Owner+"/"+settings.Repo+"/git/ref/heads/"+settings.Branch, &response); err != nil {
+		return "", err
+	}
+	if response.Object.SHA == "" {
+		return "", fmt.Errorf("github branch %s has no ref SHA", settings.Branch)
+	}
+	return response.Object.SHA, nil
+}
+
+func (c *Client) gitCommitTree(ctx context.Context, settings configrepo.RepositorySettings, commitSHA string) (string, error) {
+	var response struct {
+		Tree struct {
+			SHA string `json:"sha"`
+		} `json:"tree"`
+	}
+	if err := c.getJSON(ctx, settings, "/repos/"+settings.Owner+"/"+settings.Repo+"/git/commits/"+commitSHA, &response); err != nil {
+		return "", err
+	}
+	if response.Tree.SHA == "" {
+		return "", fmt.Errorf("github commit %s has no tree SHA", commitSHA)
+	}
+	return response.Tree.SHA, nil
+}
+
+func (c *Client) createBlob(ctx context.Context, settings configrepo.RepositorySettings, content string) (string, error) {
+	payload := struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}{
+		Content:  content,
+		Encoding: "utf-8",
+	}
+	var response struct {
+		SHA string `json:"sha"`
+	}
+	if err := c.doJSON(ctx, settings, http.MethodPost, "/repos/"+settings.Owner+"/"+settings.Repo+"/git/blobs", payload, &response); err != nil {
+		return "", err
+	}
+	if response.SHA == "" {
+		return "", fmt.Errorf("github blob response missing SHA")
+	}
+	return response.SHA, nil
+}
+
+func (c *Client) createTree(ctx context.Context, settings configrepo.RepositorySettings, baseTreeSHA string, entries []gitTreeEntry) (string, error) {
+	payload := struct {
+		BaseTree string         `json:"base_tree"`
+		Tree     []gitTreeEntry `json:"tree"`
+	}{
+		BaseTree: baseTreeSHA,
+		Tree:     entries,
+	}
+	var response struct {
+		SHA string `json:"sha"`
+	}
+	if err := c.doJSON(ctx, settings, http.MethodPost, "/repos/"+settings.Owner+"/"+settings.Repo+"/git/trees", payload, &response); err != nil {
+		return "", err
+	}
+	if response.SHA == "" {
+		return "", fmt.Errorf("github tree response missing SHA")
+	}
+	return response.SHA, nil
+}
+
+func (c *Client) createCommit(ctx context.Context, settings configrepo.RepositorySettings, message string, treeSHA string, parentSHA string) (string, error) {
+	payload := struct {
+		Message string   `json:"message"`
+		Tree    string   `json:"tree"`
+		Parents []string `json:"parents"`
+	}{
+		Message: message,
+		Tree:    treeSHA,
+		Parents: []string{parentSHA},
+	}
+	var response struct {
+		SHA string `json:"sha"`
+	}
+	if err := c.doJSON(ctx, settings, http.MethodPost, "/repos/"+settings.Owner+"/"+settings.Repo+"/git/commits", payload, &response); err != nil {
+		return "", err
+	}
+	if response.SHA == "" {
+		return "", fmt.Errorf("github commit response missing SHA")
+	}
+	return response.SHA, nil
+}
+
+func (c *Client) updateRef(ctx context.Context, settings configrepo.RepositorySettings, commitSHA string) error {
+	payload := struct {
+		SHA   string `json:"sha"`
+		Force bool   `json:"force"`
+	}{
+		SHA: commitSHA,
+	}
+	err := c.doJSON(ctx, settings, http.MethodPatch, "/repos/"+settings.Owner+"/"+settings.Repo+"/git/refs/heads/"+settings.Branch, payload, nil)
+	if err == nil {
+		return nil
+	}
+	var apiErr APIError
+	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusConflict || apiErr.StatusCode == http.StatusUnprocessableEntity) {
+		return usecase.ErrConflict
+	}
+	return err
 }
 
 func (c *Client) getJSON(ctx context.Context, settings configrepo.RepositorySettings, endpoint string, target any) error {
@@ -222,7 +396,17 @@ func (c *Client) doJSON(ctx context.Context, settings configrepo.RepositorySetti
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return githubAPIError(resp, method, endpoint)
 	}
-	return json.NewDecoder(resp.Body).Decode(target)
+	return decodeJSONResponse(resp.Body, target)
+}
+
+func decodeJSONResponse(body io.Reader, target any) error {
+	if target == nil {
+		if _, err := io.Copy(io.Discard, body); err != nil {
+			return err
+		}
+		return nil
+	}
+	return json.NewDecoder(body).Decode(target)
 }
 
 func (c *Client) getAuthorizedJSON(ctx context.Context, endpoint string, target any) error {

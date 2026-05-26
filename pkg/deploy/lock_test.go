@@ -2,7 +2,6 @@ package deploy
 
 import (
 	"encoding/json"
-	"os"
 	"testing"
 	"time"
 )
@@ -57,15 +56,12 @@ func TestLockInfoUnmarshalInvalid(t *testing.T) {
 }
 
 func TestCurrentUser(t *testing.T) {
-	original := os.Getenv("USER")
-	defer os.Setenv("USER", original)
-
-	os.Setenv("USER", "testuser")
+	t.Setenv("USER", "testuser")
 	if got := currentUser(); got != "testuser" {
 		t.Errorf("expected testuser, got %s", got)
 	}
 
-	os.Unsetenv("USER")
+	t.Setenv("USER", "")
 	if got := currentUser(); got != "unknown" {
 		t.Errorf("expected unknown, got %s", got)
 	}

@@ -93,7 +93,6 @@ func fetchWithRetry(url string, maxRetries int, token string) ([]byte, error) {
 			return nil, fmt.Errorf("compose file not found at %s (404)", url)
 		}
 
-		// Retry on 5xx errors and rate limiting
 		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
 			lastErr = fmt.Errorf("server error: %d", resp.StatusCode)
 			if i < maxRetries-1 {

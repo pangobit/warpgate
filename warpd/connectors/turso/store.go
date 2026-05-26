@@ -125,6 +125,18 @@ func (s *Store) SaveConfigCursor(ctx context.Context, cursor configrepo.SyncCurs
 	return s.putJSON(ctx, "config_cursor", cursor)
 }
 
+// ClusterConfig returns the synced cluster config.
+func (s *Store) ClusterConfig(ctx context.Context) (configrepo.ClusterSnapshot, bool, error) {
+	var cluster configrepo.ClusterSnapshot
+	ok, err := s.getJSON(ctx, "cluster_config", &cluster)
+	return cluster, ok, err
+}
+
+// SaveClusterConfig persists the synced cluster config.
+func (s *Store) SaveClusterConfig(ctx context.Context, cluster configrepo.ClusterSnapshot) error {
+	return s.putJSON(ctx, "cluster_config", cluster)
+}
+
 // UpsertApp creates or updates an app snapshot.
 func (s *Store) UpsertApp(ctx context.Context, app configrepo.AppSnapshot) error {
 	data, err := json.Marshal(app)

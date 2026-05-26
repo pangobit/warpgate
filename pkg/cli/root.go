@@ -108,6 +108,9 @@ var (
 	uiDBPath         string
 	uiGitHubClientID string
 	uiOpenBrowser    bool
+	uiTailscaleSSH   bool
+	uiSSHKey         string
+	uiUser           string
 )
 
 // Cleanup flags
@@ -188,6 +191,9 @@ func Setup() {
 	uiCmd.Flags().StringVar(&uiDBPath, "db-path", defaultUI.DBPath, "Local UI database path")
 	uiCmd.Flags().StringVar(&uiGitHubClientID, "github-client-id", os.Getenv("WARPGATE_GITHUB_CLIENT_ID"), "GitHub App client ID")
 	uiCmd.Flags().BoolVar(&uiOpenBrowser, "open", defaultUI.OpenBrowser, "Open the local UI in a browser")
+	uiCmd.Flags().BoolVar(&uiTailscaleSSH, "tailscale-ssh", defaultUI.Deploy.TailscaleSSH, "Use Tailscale SSH for runtime operations")
+	uiCmd.Flags().StringVar(&uiSSHKey, "ssh-key", defaultUI.Deploy.SSHKey, "Path to SSH private key for runtime operations")
+	uiCmd.Flags().StringVar(&uiUser, "user", defaultUI.Deploy.User, "SSH user for runtime operations")
 
 	removeCmd.Flags().BoolVar(&removeAll, "all", false, "Remove all discovered apps")
 	removeCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
@@ -567,6 +573,9 @@ The UI binds to loopback by default and uses GitHub App device flow for reposito
 		cfg.DBPath = uiDBPath
 		cfg.GitHubClientID = uiGitHubClientID
 		cfg.OpenBrowser = uiOpenBrowser
+		cfg.Deploy.TailscaleSSH = uiTailscaleSSH
+		cfg.Deploy.SSHKey = uiSSHKey
+		cfg.Deploy.User = uiUser
 		return warpd.RunLocalUI(context.Background(), cfg)
 	},
 }

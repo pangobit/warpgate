@@ -129,6 +129,20 @@ func TestDeviceSessionLoadsPersistedAuthorization(t *testing.T) {
 	}
 }
 
+func TestDeviceSessionClientIDCanBeUpdated(t *testing.T) {
+	session := NewDeviceSession("")
+	if session.Status().Configured {
+		t.Fatalf("new session should not be configured")
+	}
+
+	session.SetClientID(" client-id ")
+	status := session.Status()
+
+	if !status.Configured || status.ClientID != "client-id" {
+		t.Fatalf("status = %+v, want configured client id", status)
+	}
+}
+
 func TestDeviceSessionRefreshesExpiredAuthorization(t *testing.T) {
 	store := &memorySessionStore{
 		session: identity.GitHubSession{
@@ -443,6 +457,51 @@ func TestBranchHeadNotFoundWithoutTokenProviderKeepsGenericMessage(t *testing.T)
 	}
 	if strings.Contains(message, "documentation_url") {
 		t.Fatalf("expected sanitized GitHub error, got %q", message)
+	}
+}
+
+func TestReadFileNotFoundDiagnosesGitHubAppAccess(t *testing.T) {
+	client := NewClientWithTokenProvider(staticTokenProvider("token"))
+	client.baseURL = "https://api.github.test"
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/repos/pangobit/learnbrighter-site/contents/deploy/compose.yml":
+			return jsonResponse(t, map[string]any{"message": "Not Found"}, http.StatusNotFound)
+		case "/user/installations":
+			return jsonResponse(t, map[string]any{
+				"installations": []map[string]any{
+					{
+						"id":                   12,
+						"repository_selection": "selected",
+						"account":              map[string]any{"login": "pangobit"},
+						"permissions":          map[string]any{"contents": "read"},
+					},
+				},
+			})
+		case "/user/installations/12/repositories":
+			return jsonResponse(t, map[string]any{
+				"repositories": []map[string]any{
+					{"full_name": "pangobit/brighter"},
+				},
+			})
+		default:
+			return jsonResponse(t, map[string]any{"message": "Not Found"}, http.StatusNotFound)
+		}
+	})}
+
+	_, err := client.ReadFile(context.Background(), configrepo.RepositorySettings{
+		Owner:  "pangobit",
+		Repo:   "learnbrighter-site",
+		Branch: "master",
+	}, "deploy/compose.yml", "master")
+	if err == nil {
+		t.Fatalf("expected read file error")
+	}
+	if !strings.Contains(err.Error(), "not selected") {
+		t.Fatalf("expected installation guidance, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "deploy/compose.yml") {
+		t.Fatalf("expected file path in error, got %q", err.Error())
 	}
 }
 

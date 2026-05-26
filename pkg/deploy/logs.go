@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -15,6 +16,14 @@ type LogsOptions struct {
 	Tail int
 	// Grep filters log output server-side with grep.
 	Grep string
+}
+
+// LogsResult is the output from fetching container logs.
+type LogsResult struct {
+	// Output is the raw prefixed log output.
+	Output string
+	// Message describes an empty result.
+	Message string
 }
 
 // BuildLogsCommand constructs the remote shell command for fetching container logs.
@@ -43,33 +52,43 @@ func BuildLogsCommand(opts LogsOptions) string {
 
 // Logs fetches recent container logs from a node.
 func (d *Deployer) Logs(opts LogsOptions) error {
+	result, err := d.FetchLogs(opts)
+	if err != nil {
+		return err
+	}
+	if result.Message != "" {
+		_, err := fmt.Fprintln(os.Stdout, result.Message)
+		return err
+	}
+	_, err = fmt.Fprint(os.Stdout, result.Output)
+	return err
+}
+
+// FetchLogs fetches recent container logs from a node.
+func (d *Deployer) FetchLogs(opts LogsOptions) (LogsResult, error) {
 	node := d.Repo.Cluster.GetNode(opts.NodeID)
 	if node == nil {
-		return fmt.Errorf("node '%s' not found in cluster config", opts.NodeID)
+		return LogsResult{}, fmt.Errorf("node '%s' not found in cluster config", opts.NodeID)
 	}
 
 	client, err := d.connect(node)
 	if err != nil {
-		return fmt.Errorf("failed to connect to %s: %w", opts.NodeID, err)
+		return LogsResult{}, fmt.Errorf("failed to connect to %s: %w", opts.NodeID, err)
 	}
 	defer client.Close()
 
 	cmd := BuildLogsCommand(opts)
 	stdout, stderr, err := client.RunCommand(cmd)
 	if err != nil {
-		// grep returns exit code 1 when no matches found — not an error
 		if opts.Grep != "" && strings.TrimSpace(stdout) == "" {
-			fmt.Println("No log lines matched the grep pattern.")
-			return nil
+			return LogsResult{Message: "No log lines matched the grep pattern."}, nil
 		}
-		return fmt.Errorf("failed to fetch logs: %w\n%s", err, stderr)
+		return LogsResult{}, fmt.Errorf("failed to fetch logs: %w\n%s", err, stderr)
 	}
 
 	if strings.TrimSpace(stdout) == "" {
-		fmt.Println("No containers found.")
-		return nil
+		return LogsResult{Message: "No containers found."}, nil
 	}
 
-	fmt.Print(stdout)
-	return nil
+	return LogsResult{Output: stdout}, nil
 }

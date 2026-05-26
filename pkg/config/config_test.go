@@ -173,6 +173,22 @@ func TestClusterValidate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "node invalid private ip",
+			config: ClusterConfig{
+				Project: "test",
+				Nodes:   []NodeConfig{{ID: "n", Host: "h", PrivateIP: "100.x.x.x"}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "node valid private ip",
+			config: ClusterConfig{
+				Project: "test",
+				Nodes:   []NodeConfig{{ID: "n", Host: "h", PrivateIP: "100.64.0.1"}},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

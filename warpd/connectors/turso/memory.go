@@ -26,6 +26,8 @@ type MemoryStore struct {
 	githubConnected bool
 	pollerSettings  configrepo.PollerSettings
 	configCursor    configrepo.SyncCursor
+	cluster         configrepo.ClusterSnapshot
+	clusterSynced   bool
 	apps            map[string]configrepo.AppSnapshot
 	imageCursors    map[string]imagewatch.Cursor
 	releases        map[string]release.Record
@@ -119,6 +121,22 @@ func (s *MemoryStore) SaveConfigCursor(_ context.Context, cursor configrepo.Sync
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.configCursor = cursor
+	return nil
+}
+
+// ClusterConfig returns the synced cluster config.
+func (s *MemoryStore) ClusterConfig(_ context.Context) (configrepo.ClusterSnapshot, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cluster, s.clusterSynced, nil
+}
+
+// SaveClusterConfig persists the synced cluster config.
+func (s *MemoryStore) SaveClusterConfig(_ context.Context, cluster configrepo.ClusterSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cluster = cluster
+	s.clusterSynced = true
 	return nil
 }
 

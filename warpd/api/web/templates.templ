@@ -25,6 +25,22 @@ templ settingsIcon() {
 	</svg>
 }
 
+templ statusIcon() {
+	<svg class={ navIcon() } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+		<path d="M3 3v18h18"></path>
+		<path d="m19 9-5 5-4-4-3 3"></path>
+	</svg>
+}
+
+templ logsIcon() {
+	<svg class={ navIcon() } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+		<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+		<path d="M14 2v6h6"></path>
+		<path d="M8 13h8"></path>
+		<path d="M8 17h8"></path>
+	</svg>
+}
+
 templ userIcon() {
 	<svg class={ pillIcon() } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 		<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
@@ -51,6 +67,7 @@ templ Layout(title string, identityLabel string) {
 			<link rel="stylesheet" href="/assets/css/components.css"/>
 			<script src="/assets/js/htmx.min.js"></script>
 			<script src="/assets/js/keyboard.js" defer></script>
+			<script src="/assets/js/deploy.js" defer></script>
 		</head>
 		<body>
 			<div class={ appFrame(), "responsive-grid" }>
@@ -62,6 +79,8 @@ templ Layout(title string, identityLabel string) {
 					<nav class={ sidebarNav() } aria-label="Primary">
 						<a class={ sidebarLink() } href="/" data-navigable>@dashboardIcon()<span>Dashboard</span></a>
 						<a class={ sidebarLink() } href="/apps" data-navigable>@appsIcon()<span>Apps</span></a>
+						<a class={ sidebarLink() } href="/status" data-navigable>@statusIcon()<span>Status</span></a>
+						<a class={ sidebarLink() } href="/logs" data-navigable>@logsIcon()<span>Logs</span></a>
 						<a class={ sidebarLink() } href="/settings" data-navigable>@settingsIcon()<span>Settings</span></a>
 					</nav>
 					<div class={ sidebarFooter() }>
@@ -76,6 +95,13 @@ templ Layout(title string, identityLabel string) {
 			</div>
 		</body>
 	</html>
+}
+
+templ deployButton() {
+	<button class={ primaryButton() } type="submit" data-deploy-button>
+		<span data-deploy-label>Deploy release</span>
+		<span class={ deployButtonLoading() } data-deploy-loading hidden aria-live="polite">Deploying...</span>
+	</button>
 }
 
 templ Dashboard(data DashboardPage) {
@@ -139,6 +165,127 @@ templ Apps(data AppsPage) {
 	}
 }
 
+templ Status(data StatusPage) {
+	@Layout(data.Title, data.IdentityLabel) {
+		<h1 class={ pageTitle() }>Status</h1>
+		if data.Error != "" {
+			<p class={ errorBox() }>{ data.Error }</p>
+		}
+		<div class={ dashboardGrid(), "responsive-grid" }>
+			<section class={ panel() }>
+				<div class={ sectionHeading() }>
+					<div><p class={ eyebrow() }>Runtime</p><h2 class={ panelTitle() }>Nodes</h2></div>
+					<a class={ primaryButton() } href="/status">Refresh</a>
+				</div>
+				<div class={ tableWrap() }>
+					<table class={ tableView() }>
+						<thead><tr><th class={ tableHead() } scope="col">Node</th><th class={ tableHead() } scope="col">Host</th><th class={ tableHead() } scope="col">Private IP</th><th class={ tableHead() } scope="col">Status</th></tr></thead>
+						<tbody>
+							for index, node := range data.Status.Nodes {
+								<tr class={ tableRowStyle(index) }>
+									<td class={ tableCell() }><code class={ codeText() }>{ node.ID }</code></td>
+									<td class={ tableCell() }><code class={ codeText() }>{ node.Host }</code></td>
+									<td class={ tableCell() }><code class={ codeText() }>{ node.PrivateIP }</code></td>
+									<td class={ tableCell() }><span class={ statusBase(), reachableStyle(node.Reachable) }>{ reachableLabel(node.Reachable) }</span></td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				</div>
+			</section>
+			<section class={ panel() }>
+				<div class={ sectionHeading() }><div><p class={ eyebrow() }>Runtime</p><h2 class={ panelTitle() }>Apps</h2></div></div>
+				<div class={ tableWrap() }>
+					<table class={ tableView() }>
+						<thead><tr><th class={ tableHead() } scope="col">App</th><th class={ tableHead() } scope="col">Node</th><th class={ tableHead() } scope="col">Version</th><th class={ tableHead() } scope="col">Slot</th><th class={ tableHead() } scope="col">Status</th></tr></thead>
+						<tbody>
+							for index, app := range data.Status.Apps {
+								<tr class={ tableRowStyle(index) }>
+									<td class={ tableCell() }><a class={ tableLink() } href={ templ.URL("/apps/" + app.App) }>{ app.App }</a></td>
+									<td class={ tableCell() }><code class={ codeText() }>{ app.NodeID }</code></td>
+									<td class={ tableCell() }><code class={ codeText() }>{ app.Version }</code></td>
+									<td class={ tableCell() }>{ app.Slot }</td>
+									<td class={ tableCell() }>
+										if app.Error != "" {
+											<span class={ statusBase(), statusDanger() }>error</span>
+											<p class={ codeText() }>{ app.Error }</p>
+										} else {
+											<span class={ statusBase(), statusStyle(app.State) }>{ app.State }</span>
+										}
+									</td>
+								</tr>
+								for _, service := range app.Services {
+									<tr class={ tableRowStyle(index) }>
+										<td class={ tableCell() }><span class={ codeText() }>{ service.Service }</span></td>
+										<td class={ tableCell() } colspan="3"><code class={ codeText() }>{ service.Name }</code></td>
+										<td class={ tableCell() }><span class={ statusBase(), statusStyle(service.State) }>{ service.State }</span></td>
+									</tr>
+								}
+							}
+						</tbody>
+					</table>
+				</div>
+			</section>
+		</div>
+	}
+}
+
+templ Logs(data LogsPage) {
+	@Layout(data.Title, data.IdentityLabel) {
+		<h1 class={ pageTitle() }>Logs</h1>
+		if data.Error != "" {
+			<p class={ errorBox() }>{ data.Error }</p>
+		}
+		<div class={ managementShell(), "responsive-grid" }>
+			<form class={ panel() } method="get" action="/logs">
+				<div class={ sectionHeading() }><div><p class={ eyebrow() }>Runtime</p><h2 class={ panelTitle() }>Container logs</h2></div></div>
+				<label class={ field() }>Node
+					<select class={ control() } name="node" required>
+						<option value="">Select a node</option>
+						for _, node := range data.Nodes {
+							<option value={ node.ID } selected?={ data.Request.NodeID == node.ID }>{ node.ID + " (" + node.Host + ")" }</option>
+						}
+					</select>
+				</label>
+				<label class={ field() }>App
+					<select class={ control() } name="app">
+						<option value="">All containers</option>
+						for _, app := range data.Apps {
+							<option value={ app.Name } selected?={ data.Request.App == app.Name }>{ app.Name }</option>
+						}
+					</select>
+				</label>
+				<label class={ field() }>Tail<input class={ control() } name="tail" type="number" min="1" max="2000" value={ fmt.Sprint(data.Request.Tail) }/></label>
+				<label class={ field() }>Grep<input class={ control() } name="grep" value={ data.Request.Grep }/></label>
+				<div class={ formActions() }><button class={ primaryButton() } type="submit">Fetch logs</button></div>
+			</form>
+			<section class={ panel() }>
+				<div class={ sectionHeading() }><div><p class={ eyebrow() }>Output</p><h2 class={ panelTitle() }>Recent logs</h2></div></div>
+				if data.HasResult {
+					if data.Result.Message != "" {
+						<p><span class={ pill() }>{ logsText(data) }</span></p>
+					} else {
+						<div class={ logOutputBox(), logList() } aria-label="Recent logs">
+							for _, line := range parsedLogLines(data) {
+								<div class={ logLineRow() }>
+									<code class={ logSource() }>{ line.source }</code>
+									if line.json {
+										<pre class={ logJSON() }>{ line.text }</pre>
+									} else {
+										<code class={ logMessage() }>{ line.text }</code>
+									}
+								</div>
+							}
+						</div>
+					}
+				} else {
+					<p><span class={ pill() }>Select a node to fetch logs.</span></p>
+				}
+			</section>
+		</div>
+	}
+}
+
 templ AppDetail(data AppDetailPage) {
 	@Layout(data.Title, data.IdentityLabel) {
 		<h1 class={ pageTitle() }>{ data.Detail.App.Name }</h1>
@@ -168,7 +315,7 @@ templ AppDetail(data AppDetailPage) {
 								<td class={ tableCell() }><a class={ tableLink() } href={ templ.URL("/releases/" + item.ID) }><code class={ codeText() }>{ item.ID }</code></a></td>
 								<td class={ tableCell() }><span class={ statusBase(), statusStyle(item.Status) }>{ string(item.Status) }</span></td>
 								<td class={ tableCell() }><code class={ codeText() }>{ item.ConfigCommit }</code></td>
-								<td class={ tableCell() }><form method="post" action={ templ.URL("/releases/" + item.ID + "/deploy") }><button class={ primaryButton() } type="submit">Deploy release</button></form></td>
+								<td class={ tableCell() }><form class={ deployForm() } method="post" action={ templ.URL("/releases/" + item.ID + "/deploy") } data-deploy-form>@deployButton()</form></td>
 							</tr>
 						}
 					</tbody>
@@ -204,10 +351,21 @@ templ AppEdit(data AppEditPage) {
 		}
 		<div class={ managementShell(), "responsive-grid" }>
 			<form class={ panel() } method="post" action={ templ.URL("/apps/" + data.App.Name + "/commit") }>
-				<div class={ sectionHeading() }><div><p class={ eyebrow() }>Release</p><h2 class={ panelTitle() }>Service image</h2></div></div>
-				<label class={ field() }>Service<input class={ control() } name="service" value={ data.Service } required/></label>
-				<label class={ field() }>Image tag<input class={ control() } name="image_tag"/></label>
-				<label class={ field() }>Image digest<input class={ control() } name="image_digest"/></label>
+				<div class={ sectionHeading() }><div><p class={ eyebrow() }>Release</p><h2 class={ panelTitle() }>Service images</h2></div></div>
+				if len(data.Services) == 0 {
+					<p><span class={ pill() }>No release services found.</span></p>
+				}
+				for _, service := range data.Services {
+					<div class={ serviceEditor() }>
+						<div class={ serviceEditorHeader() }>
+							<strong>{ service.Name }</strong>
+							<code class={ codeText() }>{ service.Image }</code>
+						</div>
+						<input type="hidden" name="service" value={ service.Name }/>
+						<label class={ field() }>Image tag<input class={ control() } name="image_tag" value={ service.ImageTag }/></label>
+						<label class={ field() }>Image digest<input class={ control() } name="image_digest" value={ service.ImageDigest }/></label>
+					</div>
+				}
 				<div class={ formActions() }><button class={ primaryButton() } type="submit">Commit release</button></div>
 			</form>
 			<section class={ panel() }>
@@ -227,7 +385,7 @@ templ ReleaseDetail(data ReleasePage) {
 		<section class={ panel() }>
 			<div class={ sectionHeading() }>
 				<div><p class={ eyebrow() }>Release</p><h2 class={ panelTitle() }>Manifest inputs</h2></div>
-				<form method="post" action={ templ.URL("/releases/" + data.Release.ID + "/deploy") }><button class={ primaryButton() } type="submit">Deploy release</button></form>
+				<form class={ deployForm() } method="post" action={ templ.URL("/releases/" + data.Release.ID + "/deploy") } data-deploy-form>@deployButton()</form>
 			</div>
 			<p><span class={ statusBase(), statusStyle(data.Release.Status) }>{ string(data.Release.Status) }</span></p>
 			<p>GitHub commit <code class={ codeText() }>{ data.Release.ConfigCommit }</code></p>
@@ -247,10 +405,11 @@ templ Settings(data SettingsPage) {
 				<div><p class={ eyebrow() }>GitHub</p><h2 class={ panelTitle() }>Account</h2></div>
 				<span class={ statusBase(), githubAuthStatusStyle(data.GitHubAuth) }>{ githubAuthLabel(data.GitHubAuth) }</span>
 			</div>
-			if !data.GitHubAuth.Configured {
-				<p>Set a GitHub App client ID before connecting GitHub.</p>
-			} else if data.GitHubAuth.Authenticated {
+			if data.GitHubAuth.Authenticated {
 				<p>Connected as <code class={ codeText() }>{ githubAuthLabel(data.GitHubAuth) }</code>.</p>
+				if data.GitHubAuth.ClientID != "" {
+					<p>GitHub App client ID <code class={ codeText() }>{ data.GitHubAuth.ClientID }</code></p>
+				}
 				<form method="post" action="/auth/github/disconnect">
 					<button class={ primaryButton() } type="submit">Disconnect</button>
 				</form>
@@ -265,6 +424,7 @@ templ Settings(data SettingsPage) {
 					</form>
 				} else {
 					<form method="post" action="/auth/github/start">
+						<label class={ field() }>GitHub App client ID<input class={ control() } name="github_client_id" value={ data.GitHubAuth.ClientID } required autocomplete="off"/></label>
 						<button class={ primaryButton() } type="submit">Connect GitHub</button>
 					</form>
 				}

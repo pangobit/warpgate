@@ -155,6 +155,16 @@ css primaryButton() {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
+	gap: var(--space-2);
+}
+
+css deployForm() {
+	display: inline-flex;
+	margin: 0;
+}
+
+css deployButtonLoading() {
+	align-items: center;
 }
 
 css iconButton() {
@@ -250,6 +260,20 @@ css formActions() {
 	gap: var(--space-2);
 }
 
+css serviceEditor() {
+	display: grid;
+	gap: var(--space-3);
+	padding: var(--space-4) 0;
+	border-top: 1px solid var(--border-subtle);
+}
+
+css serviceEditorHeader() {
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
+	color: var(--text-main);
+}
+
 css tableWrap() {
 	overflow-x: auto;
 }
@@ -315,6 +339,49 @@ css preBlock() {
 css yamlBox() {
 	height: clamp(18rem, calc(100vh - 16rem), 46rem);
 	max-height: max(18rem, calc(100vh - 16rem));
+}
+
+css logOutputBox() {
+	height: clamp(18rem, calc(100vh - 18rem), 44rem);
+	max-height: max(18rem, calc(100vh - 18rem));
+	overflow: auto;
+	background: var(--bg-panel);
+	border: 1px solid var(--border-subtle);
+	border-radius: var(--radius-2);
+}
+
+css logList() {
+	display: grid;
+	align-content: start;
+	font-family: var(--font-mono);
+	font-size: 0.78rem;
+}
+
+css logLineRow() {
+	display: grid;
+	grid-template-columns: minmax(8rem, 0.28fr) minmax(0, 1fr);
+	gap: var(--space-3);
+	padding: var(--space-2) var(--space-3);
+	border-bottom: 1px solid var(--border-subtle);
+}
+
+css logSource() {
+	color: var(--text-soft);
+	overflow-wrap: anywhere;
+}
+
+css logMessage() {
+	color: var(--text-main);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+css logJSON() {
+	margin: 0;
+	color: var(--text-main);
+	font-family: var(--font-mono);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
 }
 
 css errorBox() {

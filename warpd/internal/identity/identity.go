@@ -25,6 +25,8 @@ type User struct {
 type GitHubAuthStatus struct {
 	// Configured reports whether a GitHub App client ID is available.
 	Configured bool
+	// ClientID is the configured GitHub App client ID.
+	ClientID string
 	// Authenticated reports whether Warpgate has a usable GitHub token.
 	Authenticated bool
 	// Login is the authenticated GitHub login.

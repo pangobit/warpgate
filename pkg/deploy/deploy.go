@@ -2,6 +2,7 @@
 package deploy
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -95,6 +96,60 @@ func (d *Deployer) DeployRelease(appName, releaseID string) error {
 	return d.deployManifest(app, manifest, appDir, composeContent)
 }
 
+func (d *Deployer) printDryRunPlan(app *config.AppConfig, manifest *release.Manifest, override string, targetNodes []string) error {
+	if _, err := fmt.Fprintln(os.Stdout); err != nil {
+		return fmt.Errorf("write dry run output: %w", err)
+	}
+	if _, err := fmt.Fprintln(os.Stdout, "Override that will be applied:"); err != nil {
+		return fmt.Errorf("write dry run output: %w", err)
+	}
+	if _, err := fmt.Fprintln(os.Stdout, override); err != nil {
+		return fmt.Errorf("write dry run output: %w", err)
+	}
+	if _, err := fmt.Fprintf(os.Stdout, "Targets: %v\n", targetNodes); err != nil {
+		return fmt.Errorf("write dry run output: %w", err)
+	}
+	if app.Source != nil {
+		if _, err := fmt.Fprintf(os.Stdout, "Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.ComposeRef, app.Source.ComposePath); err != nil {
+			return fmt.Errorf("write dry run output: %w", err)
+		}
+	}
+	for _, serviceName := range sortedManifestServiceNames(manifest.Services) {
+		if err := d.printDryRunService(manifest, serviceName); err != nil {
+			return err
+		}
+	}
+	return printDryRunStrategy(app.Strategy)
+}
+
+func (d *Deployer) printDryRunService(manifest *release.Manifest, serviceName string) error {
+	service := manifest.Services[serviceName]
+	if service.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
+		if _, err := fmt.Fprintf(os.Stdout, "Secrets: %s fetch from %s (prefix: %s) → %s\n", serviceName, d.Repo.Cluster.Secrets.Server, service.SecretsPrefix, serviceEnvFile(serviceName)); err != nil {
+			return fmt.Errorf("write dry run output: %w", err)
+		}
+	}
+	if len(service.Environment) > 0 {
+		if _, err := fmt.Fprintf(os.Stdout, "Environment: %s has %d variable(s) from release → %s\n", serviceName, len(service.Environment), serviceEnvFile(serviceName)); err != nil {
+			return fmt.Errorf("write dry run output: %w", err)
+		}
+	}
+	return nil
+}
+
+func printDryRunStrategy(strategy config.DeployStrategy) error {
+	if strategy == config.StrategyRecreate {
+		if _, err := fmt.Fprintln(os.Stdout, "Each node: pull -> stop old -> start new -> health check"); err != nil {
+			return fmt.Errorf("write dry run output: %w", err)
+		}
+		return nil
+	}
+	if _, err := fmt.Fprintln(os.Stdout, "Each node: pull -> start new -> health check -> stop old"); err != nil {
+		return fmt.Errorf("write dry run output: %w", err)
+	}
+	return nil
+}
+
 // CreateRelease snapshots the current deploy inputs and writes a release manifest.
 func (d *Deployer) CreateRelease(appName string) (*release.Manifest, error) {
 	app := d.Repo.GetApp(appName)
@@ -121,46 +176,7 @@ func (d *Deployer) deployManifest(app *config.AppConfig, manifest *release.Manif
 	d.log.Infof("Deploying %s release %s to nodes: %v", app.Name, manifest.ID, targetNodes)
 
 	if d.DryRun {
-		if app.Strategy == config.StrategyRecreate {
-			d.log.Info("DRY RUN — recreate deploy (brief downtime)")
-		} else {
-			d.log.Info("DRY RUN — zero-downtime deploy via blue/green swap")
-		}
-		fmt.Println()
-		dryRunIP := "<nodePrivateIP>"
-		for _, nodeID := range targetNodes {
-			if n := d.Repo.Cluster.GetNode(nodeID); n != nil && n.PrivateIP != "" {
-				dryRunIP = n.PrivateIP
-				break
-			}
-		}
-		envFiles := releaseEnvFileMap(manifest, d.Repo.Cluster.Secrets.Server)
-		override, err := compose.GenerateReleaseOverrideWithEnvFiles(app, manifest, envFiles, &d.Repo.Cluster.Networking, internalHosts, dryRunIP, string(composeContent))
-		if err != nil {
-			return fmt.Errorf("failed to generate override: %w", err)
-		}
-		fmt.Println("Override that will be applied:")
-		fmt.Println(override)
-		fmt.Printf("Targets: %v\n", targetNodes)
-		if app.Source != nil {
-			fmt.Printf("Compose source: %s@%s (path: %s)\n", app.Source.Repo, app.ComposeRef, app.Source.ComposePath)
-		}
-		services := manifest.Services
-		for _, serviceName := range sortedManifestServiceNames(services) {
-			service := services[serviceName]
-			if service.SecretsPrefix != "" && d.Repo.Cluster.Secrets.Server != "" {
-				fmt.Printf("Secrets: %s fetch from %s (prefix: %s) → %s\n", serviceName, d.Repo.Cluster.Secrets.Server, service.SecretsPrefix, serviceEnvFile(serviceName))
-			}
-			if len(service.Environment) > 0 {
-				fmt.Printf("Environment: %s has %d variable(s) from release → %s\n", serviceName, len(service.Environment), serviceEnvFile(serviceName))
-			}
-		}
-		if app.Strategy == config.StrategyRecreate {
-			fmt.Printf("Each node: pull -> stop old -> start new -> health check\n")
-		} else {
-			fmt.Printf("Each node: pull -> start new -> health check -> stop old\n")
-		}
-		return nil
+		return d.dryRunDeployManifest(app, manifest, internalHosts, composeContent, targetNodes)
 	}
 
 	var deployed []string
@@ -190,14 +206,7 @@ func (d *Deployer) deployManifest(app *config.AppConfig, manifest *release.Manif
 		deployed = append(deployed, nodeID)
 	}
 
-	for _, serviceName := range sortedReleaseServiceConfigKeys(app.Release.Services) {
-		service := app.Release.Services[serviceName]
-		if service.EffectiveExpose().Internal != nil {
-			if err := d.updateReleaseServiceInternalRoutes(app, serviceName, service); err != nil {
-				d.log.Warnf("Failed to update internal routes for service %s: %v", serviceName, err)
-			}
-		}
-	}
+	d.updateReleaseInternalRoutes(app)
 
 	if err := d.updateInternalProxy(app); err != nil {
 		d.log.Warnf("Failed to update internal proxy: %v", err)
@@ -660,7 +669,6 @@ func (d *Deployer) ClusterStatus() (*ClusterStatusResult, error) {
 			status.State = ParseContainerHealth(stdout)
 			status.Services = parseReleaseServiceStatuses(stdout, app.Release.Services)
 
-			// Populate shadow status if a shadow is deployed.
 			if state.ShadowVersion != "" {
 				status.ShadowVersion = state.ShadowVersion
 
@@ -849,6 +857,39 @@ func (d *Deployer) uploadExtraFiles(uploader fileUploader, appDir, remoteDir str
 	return nil
 }
 
+func (d *Deployer) updateReleaseInternalRoutes(app *config.AppConfig) {
+	for _, serviceName := range sortedReleaseServiceConfigKeys(app.Release.Services) {
+		service := app.Release.Services[serviceName]
+		if service.EffectiveExpose().Internal == nil {
+			continue
+		}
+		if err := d.updateReleaseServiceInternalRoutes(app, serviceName, service); err != nil {
+			d.log.Warnf("Failed to update internal routes for service %s: %v", serviceName, err)
+		}
+	}
+}
+
+func (d *Deployer) dryRunDeployManifest(app *config.AppConfig, manifest *release.Manifest, internalHosts []string, composeContent []byte, targetNodes []string) error {
+	if app.Strategy == config.StrategyRecreate {
+		d.log.Info("DRY RUN — recreate deploy (brief downtime)")
+	} else {
+		d.log.Info("DRY RUN — zero-downtime deploy via blue/green swap")
+	}
+	dryRunIP := "<nodePrivateIP>"
+	for _, nodeID := range targetNodes {
+		if n := d.Repo.Cluster.GetNode(nodeID); n != nil && n.PrivateIP != "" {
+			dryRunIP = n.PrivateIP
+			break
+		}
+	}
+	envFiles := releaseEnvFileMap(manifest, d.Repo.Cluster.Secrets.Server)
+	override, err := compose.GenerateReleaseOverrideWithEnvFiles(app, manifest, envFiles, &d.Repo.Cluster.Networking, internalHosts, dryRunIP, string(composeContent))
+	if err != nil {
+		return fmt.Errorf("failed to generate override: %w", err)
+	}
+	return d.printDryRunPlan(app, manifest, override, targetNodes)
+}
+
 func (d *Deployer) connect(node *config.NodeConfig) (*ssh.Client, error) {
 	user := d.User
 	if user == "" {
@@ -858,22 +899,30 @@ func (d *Deployer) connect(node *config.NodeConfig) (*ssh.Client, error) {
 		user = "root"
 	}
 
+	targetHost := nodeSSHHost(node, d.TailscaleSSH)
 	var client *ssh.Client
 	if d.TailscaleSSH {
-		client = ssh.NewTailscaleClient(node.Host, user)
+		client = ssh.NewTailscaleClient(targetHost, user)
 	} else {
 		var err error
-		client, err = ssh.NewClient(node.Host, user, d.SSHKey)
+		client, err = ssh.NewClient(targetHost, user, d.SSHKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SSH client: %w", err)
 		}
 	}
 
 	if err := client.Connect(); err != nil {
-		return nil, fmt.Errorf("failed to connect to %s: %w", node.Host, err)
+		return nil, fmt.Errorf("failed to connect to %s: %w", targetHost, err)
 	}
 
 	return client, nil
+}
+
+func nodeSSHHost(node *config.NodeConfig, tailscale bool) string {
+	if tailscale && node.PrivateIP != "" {
+		return node.PrivateIP
+	}
+	return node.Host
 }
 
 func releaseNeedsEnvFile(manifest *release.Manifest, secretsServer string) bool {
@@ -944,6 +993,7 @@ type deployResult struct {
 type deploymentFileSnapshot struct {
 	compose     string
 	override    string
+	envFiles    map[string]string
 	hasCompose  bool
 	hasOverride bool
 }
@@ -1070,27 +1120,46 @@ func (d *Deployer) prepareRecreateRestore(runner commandRunner, remoteDir string
 		return recreateRestorePlan{}, fmt.Errorf("prepare recreate restore: %w", err)
 	}
 
-	hasRecordedDeployment := state != nil && (state.CurrentRelease != "" || state.CurrentVersion != "")
-	if hasRecordedDeployment && !files.complete() {
+	if stateHasRecordedDeployment(state) && !files.complete() {
 		return recreateRestorePlan{}, fmt.Errorf("cannot prepare recreate restore for %s: previous compose files are missing", app.Name)
 	}
 
 	plan := recreateRestorePlan{
 		files: files,
 	}
-	if state == nil || state.CurrentRelease == "" {
+	releaseID := stateCurrentRelease(state)
+	if releaseID == "" {
 		return plan, nil
 	}
 
-	manifest, err := release.Load(d.Repo.AppReleasesDir(app.Name), state.CurrentRelease)
+	manifest, err := release.Load(d.Repo.AppReleasesDir(app.Name), releaseID)
 	if err != nil {
-		return recreateRestorePlan{}, fmt.Errorf("cannot prepare recreate restore for %s release %s: %w", app.Name, state.CurrentRelease, err)
+		if errors.Is(err, os.ErrNotExist) {
+			d.log.Warnf("Previous release manifest %s for %s is unavailable; restore will use captured remote files", releaseID, app.Name)
+			return plan, nil
+		}
+		return recreateRestorePlan{}, fmt.Errorf("cannot prepare recreate restore for %s release %s: %w", app.Name, releaseID, err)
 	}
-	if manifest.App != "" && manifest.App != app.Name {
-		return recreateRestorePlan{}, fmt.Errorf("cannot prepare recreate restore for %s: release %s belongs to app %s", app.Name, state.CurrentRelease, manifest.App)
+	if !releaseManifestMatchesApp(manifest, app.Name) {
+		return recreateRestorePlan{}, fmt.Errorf("cannot prepare recreate restore for %s: release %s belongs to app %s", app.Name, releaseID, manifest.App)
 	}
 	plan.manifest = manifest
 	return plan, nil
+}
+
+func stateHasRecordedDeployment(state *DeployState) bool {
+	return state != nil && (state.CurrentRelease != "" || state.CurrentVersion != "")
+}
+
+func stateCurrentRelease(state *DeployState) string {
+	if state == nil {
+		return ""
+	}
+	return state.CurrentRelease
+}
+
+func releaseManifestMatchesApp(manifest *release.Manifest, appName string) bool {
+	return manifest.App == "" || manifest.App == appName
 }
 
 func captureDeploymentFiles(runner commandRunner, remoteDir string) (deploymentFileSnapshot, error) {
@@ -1103,13 +1172,51 @@ func captureDeploymentFiles(runner commandRunner, remoteDir string) (deploymentF
 	if err != nil {
 		return deploymentFileSnapshot{}, fmt.Errorf("read previous docker-compose.override.yml: %w", err)
 	}
+	envFiles, err := captureRemoteEnvFiles(runner, remoteDir)
+	if err != nil {
+		return deploymentFileSnapshot{}, fmt.Errorf("read previous env files: %w", err)
+	}
 
 	return deploymentFileSnapshot{
 		compose:     composeContent,
 		override:    overrideContent,
+		envFiles:    envFiles,
 		hasCompose:  hasCompose,
 		hasOverride: hasOverride,
 	}, nil
+}
+
+func captureRemoteEnvFiles(runner commandRunner, remoteDir string) (map[string]string, error) {
+	stdout, stderr, err := runner.RunCommand(listRemoteEnvFilesCommand(remoteDir))
+	if err != nil {
+		if stderr != "" {
+			return nil, fmt.Errorf("%w\n%s", err, stderr)
+		}
+		return nil, err
+	}
+	files := make(map[string]string)
+	for _, name := range strings.Fields(stdout) {
+		if !validEnvFileName(name) {
+			return nil, fmt.Errorf("unexpected env file name %q", name)
+		}
+		content, ok, err := readRemoteTextFile(runner, remoteDir+"/"+name)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			files[name] = content
+		}
+	}
+	return files, nil
+}
+
+func listRemoteEnvFilesCommand(remoteDir string) string {
+	quotedDir := shellQuote(remoteDir)
+	return "for f in " + quotedDir + "/.env " + quotedDir + "/.env.*; do [ -f \"$f\" ] && basename \"$f\"; done; true"
+}
+
+func validEnvFileName(name string) bool {
+	return name == ".env" || strings.HasPrefix(name, ".env.")
 }
 
 func readRemoteTextFile(runner commandRunner, path string) (string, bool, error) {
@@ -1233,6 +1340,11 @@ func (d *Deployer) restorePreviousRecreateDeployment(runner deploymentRunner, re
 		if err != nil {
 			return fmt.Errorf("write previous release env files: %w", err)
 		}
+	} else {
+		if err := restoreCapturedEnvFiles(runner, remoteDir, restorePlan.files.envFiles); err != nil {
+			return err
+		}
+		hasEnvFile = restorePlan.files.envFiles[".env"] != ""
 	}
 
 	projectFlag := deploymentProjectFlag(app.Name, config.StrategyRecreate, "")
@@ -1246,6 +1358,18 @@ func (d *Deployer) restorePreviousRecreateDeployment(runner deploymentRunner, re
 		}
 	}
 	d.log.Warnf("Restored previous deployment for %s", app.Name)
+	return nil
+}
+
+func restoreCapturedEnvFiles(runner deploymentRunner, remoteDir string, files map[string]string) error {
+	if _, _, err := runner.RunCommand("rm -f " + shellQuote(remoteDir) + "/.env " + shellQuote(remoteDir) + "/.env.*"); err != nil {
+		return fmt.Errorf("remove current env files: %w", err)
+	}
+	for _, name := range sortedMapKeys(files) {
+		if err := runner.WriteFileSecret(remoteDir+"/"+name, files[name]); err != nil {
+			return fmt.Errorf("restore %s: %w", name, err)
+		}
+	}
 	return nil
 }
 
@@ -1374,6 +1498,15 @@ func sortedReleaseServiceConfigKeys(services map[string]config.ReleaseServiceCon
 	}
 	sort.Strings(names)
 	return names
+}
+
+func sortedMapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func serviceEnvFile(serviceName string) string {

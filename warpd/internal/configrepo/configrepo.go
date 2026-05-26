@@ -37,6 +37,20 @@ type AppSnapshot struct {
 	UpdatedAt time.Time
 }
 
+// ClusterSnapshot is the latest observed cluster config from the desired-state repo.
+type ClusterSnapshot struct {
+	// Path is the repository path to cluster.yml.
+	Path string
+	// ConfigCommit is the commit SHA that produced RawYAML.
+	ConfigCommit string
+	// FileSHA is the GitHub blob SHA.
+	FileSHA string
+	// RawYAML is the cluster.yml content.
+	RawYAML string
+	// UpdatedAt is when this snapshot was persisted.
+	UpdatedAt time.Time
+}
+
 // SyncCursor records the last config sync attempt.
 type SyncCursor struct {
 	// LastObservedCommit is the latest branch head seen by Warpgate.

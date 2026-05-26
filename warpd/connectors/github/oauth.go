@@ -102,6 +102,7 @@ func (s *DeviceSession) Status() identity.GitHubAuthStatus {
 	defer s.mu.Unlock()
 	status := identity.GitHubAuthStatus{
 		Configured:    s.clientID != "",
+		ClientID:      s.clientID,
 		Authenticated: s.usableLocked(),
 		Login:         s.user.Email,
 		DisplayName:   s.user.DisplayName,
@@ -112,6 +113,19 @@ func (s *DeviceSession) Status() identity.GitHubAuthStatus {
 		status.VerificationURI = s.pending.VerificationURI
 	}
 	return status
+}
+
+// SetClientID updates the GitHub App client ID used for device flow.
+func (s *DeviceSession) SetClientID(clientID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clientID = strings.TrimSpace(clientID)
+	if s.clientID == clientID {
+		return
+	}
+	s.clientID = clientID
+	s.pending = deviceFlow{}
+	s.lastError = ""
 }
 
 // Identify returns the signed-in GitHub user or a local unknown identity.
