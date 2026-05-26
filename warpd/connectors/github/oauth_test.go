@@ -8,12 +8,16 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
+	"github.com/pangobit/warpgate/warpd/internal/identity"
 )
 
 func TestDeviceSessionDeviceFlow(t *testing.T) {
-	session := NewDeviceSession("client-id")
+	store := &memorySessionStore{}
+	session := NewDeviceSession("client-id", store)
+	session.now = func() time.Time { return time.Unix(100, 0).UTC() }
 	session.oauthURL = "https://github.test"
 	session.apiURL = "https://api.github.test"
 	session.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -43,8 +47,11 @@ func TestDeviceSessionDeviceFlow(t *testing.T) {
 				t.Fatalf("device_code = %q", r.Form.Get("device_code"))
 			}
 			return jsonResponse(t, map[string]any{
-				"access_token": "access-token",
-				"token_type":   "bearer",
+				"access_token":             "access-token",
+				"expires_in":               28800,
+				"refresh_token":            "refresh-token",
+				"refresh_token_expires_in": 15897600,
+				"token_type":               "bearer",
 			})
 		case "/user":
 			if r.Header.Get("Authorization") != "Bearer access-token" {
@@ -80,6 +87,148 @@ func TestDeviceSessionDeviceFlow(t *testing.T) {
 	}
 	if token != "access-token" {
 		t.Fatalf("token = %q", token)
+	}
+	saved, ok, err := store.GitHubSession(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("GitHubSession() ok = %v error = %v", ok, err)
+	}
+	if saved.AccessToken != "access-token" || saved.RefreshToken != "refresh-token" {
+		t.Fatalf("saved tokens = %q / %q", saved.AccessToken, saved.RefreshToken)
+	}
+	if saved.AccessTokenExpiresAt.IsZero() || saved.RefreshTokenExpiresAt.IsZero() {
+		t.Fatalf("expected token expirations to be saved")
+	}
+}
+
+func TestDeviceSessionLoadsPersistedAuthorization(t *testing.T) {
+	store := &memorySessionStore{
+		session: identity.GitHubSession{
+			AccessToken: "persisted-token",
+			User: identity.User{
+				Email:        "octo",
+				DisplayName:  "Octo User",
+				Capabilities: []string{identity.AdminCapability},
+			},
+		},
+		ok: true,
+	}
+	session := NewDeviceSession("client-id", store)
+	if err := session.Load(context.Background()); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	status := session.Status()
+	if !status.Authenticated || status.DisplayName != "Octo User" {
+		t.Fatalf("status = %+v", status)
+	}
+	token, err := session.Token(context.Background())
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if token != "persisted-token" {
+		t.Fatalf("token = %q", token)
+	}
+}
+
+func TestDeviceSessionRefreshesExpiredAuthorization(t *testing.T) {
+	store := &memorySessionStore{
+		session: identity.GitHubSession{
+			AccessToken:           "expired-token",
+			AccessTokenExpiresAt:  time.Unix(100, 0).UTC(),
+			RefreshToken:          "refresh-token",
+			RefreshTokenExpiresAt: time.Unix(1000, 0).UTC(),
+			User: identity.User{
+				Email:        "octo",
+				DisplayName:  "Octo User",
+				Capabilities: []string{identity.AdminCapability},
+			},
+		},
+		ok: true,
+	}
+	session := NewDeviceSession("client-id", store)
+	session.now = func() time.Time { return time.Unix(200, 0).UTC() }
+	session.oauthURL = "https://github.test"
+	session.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/login/oauth/access_token" {
+			return jsonResponse(t, map[string]any{"error": "not found"}, http.StatusNotFound)
+		}
+		if err := r.ParseForm(); err != nil {
+			return nil, err
+		}
+		if r.Form.Get("grant_type") != "refresh_token" {
+			t.Fatalf("grant_type = %q", r.Form.Get("grant_type"))
+		}
+		if r.Form.Get("refresh_token") != "refresh-token" {
+			t.Fatalf("refresh_token = %q", r.Form.Get("refresh_token"))
+		}
+		return jsonResponse(t, map[string]any{
+			"access_token":             "fresh-token",
+			"expires_in":               28800,
+			"refresh_token":            "fresh-refresh-token",
+			"refresh_token_expires_in": 15897600,
+			"token_type":               "bearer",
+		})
+	})}
+	if err := session.Load(context.Background()); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	token, err := session.Token(context.Background())
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if token != "fresh-token" {
+		t.Fatalf("token = %q", token)
+	}
+	saved, ok, err := store.GitHubSession(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("GitHubSession() ok = %v error = %v", ok, err)
+	}
+	if saved.AccessToken != "fresh-token" || saved.RefreshToken != "fresh-refresh-token" {
+		t.Fatalf("saved tokens = %q / %q", saved.AccessToken, saved.RefreshToken)
+	}
+}
+
+func TestDeviceSessionDisconnectDeletesPersistedAuthorization(t *testing.T) {
+	store := &memorySessionStore{
+		session: identity.GitHubSession{AccessToken: "persisted-token"},
+		ok:      true,
+	}
+	session := NewDeviceSession("client-id", store)
+	if err := session.Load(context.Background()); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	session.Disconnect()
+	if _, ok, err := store.GitHubSession(context.Background()); err != nil || ok {
+		t.Fatalf("GitHubSession() ok = %v error = %v", ok, err)
+	}
+	if session.Status().Authenticated {
+		t.Fatalf("expected disconnected status")
+	}
+}
+
+func TestDeviceSessionClearsExpiredAuthorizationWithoutRefresh(t *testing.T) {
+	store := &memorySessionStore{
+		session: identity.GitHubSession{
+			AccessToken:          "expired-token",
+			AccessTokenExpiresAt: time.Unix(100, 0).UTC(),
+			User: identity.User{
+				Email:        "octo",
+				DisplayName:  "Octo User",
+				Capabilities: []string{identity.AdminCapability},
+			},
+		},
+		ok: true,
+	}
+	session := NewDeviceSession("client-id", store)
+	session.now = func() time.Time { return time.Unix(200, 0).UTC() }
+	if err := session.Load(context.Background()); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	_, err := session.Token(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("Token() error = %v", err)
+	}
+	if _, ok, err := store.GitHubSession(context.Background()); err != nil || ok {
+		t.Fatalf("GitHubSession() ok = %v error = %v", ok, err)
 	}
 }
 
@@ -320,6 +469,30 @@ type staticTokenProvider string
 // Token returns the static token value.
 func (s staticTokenProvider) Token(context.Context) (string, error) {
 	return string(s), nil
+}
+
+type memorySessionStore struct {
+	session identity.GitHubSession
+	ok      bool
+}
+
+// GitHubSession returns the stored test session.
+func (s *memorySessionStore) GitHubSession(context.Context) (identity.GitHubSession, bool, error) {
+	return s.session, s.ok, nil
+}
+
+// SaveGitHubSession stores the test session.
+func (s *memorySessionStore) SaveGitHubSession(_ context.Context, session identity.GitHubSession) error {
+	s.session = session
+	s.ok = true
+	return nil
+}
+
+// DeleteGitHubSession removes the test session.
+func (s *memorySessionStore) DeleteGitHubSession(context.Context) error {
+	s.session = identity.GitHubSession{}
+	s.ok = false
+	return nil
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

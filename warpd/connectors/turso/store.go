@@ -12,6 +12,7 @@ import (
 	"github.com/pangobit/warpgate/warpd/internal/audit"
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
 	"github.com/pangobit/warpgate/warpd/internal/deployment"
+	"github.com/pangobit/warpgate/warpd/internal/identity"
 	"github.com/pangobit/warpgate/warpd/internal/imagewatch"
 	"github.com/pangobit/warpgate/warpd/internal/release"
 	_ "turso.tech/database/tursogo"
@@ -69,6 +70,24 @@ func (s *Store) RepositorySettings(ctx context.Context) (configrepo.RepositorySe
 // SaveRepositorySettings persists repository settings.
 func (s *Store) SaveRepositorySettings(ctx context.Context, settings configrepo.RepositorySettings) error {
 	return s.putJSON(ctx, "repo_settings", settings)
+}
+
+// GitHubSession returns the persisted GitHub authorization.
+func (s *Store) GitHubSession(ctx context.Context) (identity.GitHubSession, bool, error) {
+	var session identity.GitHubSession
+	ok, err := s.getJSON(ctx, "github_session", &session)
+	return session, ok, err
+}
+
+// SaveGitHubSession persists GitHub authorization.
+func (s *Store) SaveGitHubSession(ctx context.Context, session identity.GitHubSession) error {
+	return s.putJSON(ctx, "github_session", session)
+}
+
+// DeleteGitHubSession removes persisted GitHub authorization.
+func (s *Store) DeleteGitHubSession(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `delete from kv where key = ?`, "github_session")
+	return err
 }
 
 // PollerSettings returns persisted poller settings.

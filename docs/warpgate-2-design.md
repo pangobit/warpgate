@@ -156,8 +156,8 @@ Runtime behavior:
 - Print the resolved local URL.
 - Open the browser by default.
 - Use a local Turso database path.
-- Keep GitHub access tokens in memory for the first slice.
-- Re-authenticate on each process start unless durable keychain storage is added later.
+- Persist GitHub App user access tokens in the local Turso database.
+- Refresh expiring GitHub App user tokens when GitHub returns a refresh token.
 
 Minimal command configuration:
 
@@ -175,7 +175,7 @@ Persisted UI-configured settings include:
 - Attached repository records.
 - Any non-secret UI preferences.
 
-GitHub tokens should not be persisted in Turso.
+GitHub App user access tokens are persisted in Turso so the local UI can reconnect after restart. Users can clear the persisted token with Disconnect.
 
 ## Identity and GitHub Authorization
 
@@ -204,7 +204,8 @@ GitHub App authorization:
 - Require the app to be installed for the configured owner/repository.
 - Require repository contents read access before Warpgate can attach or sync a repository.
 - Avoid PATs and token environment variables for local UI flows.
-- Start with in-memory access tokens; add OS keychain-backed refresh token storage in a later slice.
+- Store GitHub App user access tokens in local Turso and clear them when the user disconnects GitHub.
+- Refresh expiring user access tokens when GitHub returns a refresh token.
 
 ## Persistence
 
@@ -467,7 +468,7 @@ The UI-configured persisted settings include:
 - GitHub owner, repo, branch, and optional repository subpath.
 - Deploy SSH mode and user.
 
-GitHub App user access tokens should not be stored in Turso. The first slice keeps the access token in memory and requires re-authentication after restarting the UI process.
+GitHub App user access tokens are stored in the local Turso database so the UI can restore GitHub access after restart. Disconnect removes the persisted token. A later hardening slice can move this secret to the OS keychain.
 
 ## Operational Model
 

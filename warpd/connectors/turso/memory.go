@@ -11,6 +11,7 @@ import (
 	"github.com/pangobit/warpgate/warpd/internal/audit"
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
 	"github.com/pangobit/warpgate/warpd/internal/deployment"
+	"github.com/pangobit/warpgate/warpd/internal/identity"
 	"github.com/pangobit/warpgate/warpd/internal/imagewatch"
 	"github.com/pangobit/warpgate/warpd/internal/release"
 )
@@ -21,6 +22,8 @@ type MemoryStore struct {
 
 	repoSettings    configrepo.RepositorySettings
 	repoAttached    bool
+	githubSession   identity.GitHubSession
+	githubConnected bool
 	pollerSettings  configrepo.PollerSettings
 	configCursor    configrepo.SyncCursor
 	apps            map[string]configrepo.AppSnapshot
@@ -61,6 +64,31 @@ func (s *MemoryStore) SaveRepositorySettings(_ context.Context, settings configr
 	defer s.mu.Unlock()
 	s.repoSettings = settings
 	s.repoAttached = true
+	return nil
+}
+
+// GitHubSession returns the persisted GitHub authorization.
+func (s *MemoryStore) GitHubSession(_ context.Context) (identity.GitHubSession, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.githubSession, s.githubConnected, nil
+}
+
+// SaveGitHubSession persists GitHub authorization.
+func (s *MemoryStore) SaveGitHubSession(_ context.Context, session identity.GitHubSession) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.githubSession = session
+	s.githubConnected = true
+	return nil
+}
+
+// DeleteGitHubSession removes persisted GitHub authorization.
+func (s *MemoryStore) DeleteGitHubSession(_ context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.githubSession = identity.GitHubSession{}
+	s.githubConnected = false
 	return nil
 }
 

@@ -116,7 +116,10 @@ func RunLocalUI(ctx context.Context, cfg LocalUIConfig) error {
 			logrus.Warnf("close store: %v", err)
 		}
 	}()
-	githubAuth := githubconn.NewDeviceSession(cfg.GitHubClientID)
+	githubAuth := githubconn.NewDeviceSession(cfg.GitHubClientID, store)
+	if err := githubAuth.Load(ctx); err != nil {
+		return fmt.Errorf("load GitHub session: %w", err)
+	}
 	service := usecase.NewService(
 		store,
 		githubconn.NewClientWithTokenProvider(githubAuth),
@@ -144,7 +147,9 @@ func RunLocalUI(ctx context.Context, cfg LocalUIConfig) error {
 		errCh <- server.Serve(listener)
 	}()
 	url := localURL(listener.Addr())
-	fmt.Printf("Warpgate UI: %s\n", url)
+	if _, err := fmt.Fprintf(os.Stdout, "Warpgate UI: %s\n", url); err != nil {
+		return err
+	}
 	if cfg.OpenBrowser {
 		if err := openBrowser(ctx, url); err != nil {
 			logrus.Warnf("open browser: %v", err)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"time"
 )
 
 // AdminCapability is the Tailscale capability required for Warpgate administration.
@@ -36,6 +37,24 @@ type GitHubAuthStatus struct {
 	VerificationURI string
 	// Error is the latest authorization error.
 	Error string
+}
+
+// GitHubSession is a persisted GitHub App user authorization.
+type GitHubSession struct {
+	// AccessToken is the GitHub user access token.
+	AccessToken string
+	// AccessTokenExpiresAt is when the access token expires.
+	AccessTokenExpiresAt time.Time
+	// RefreshToken is the GitHub user refresh token.
+	RefreshToken string
+	// RefreshTokenExpiresAt is when the refresh token expires.
+	RefreshTokenExpiresAt time.Time
+	// TokenType is the token type returned by GitHub.
+	TokenType string
+	// User is the GitHub user associated with the token.
+	User User
+	// UpdatedAt is when the token record was last changed.
+	UpdatedAt time.Time
 }
 
 // Identifier resolves the user associated with a request source.
