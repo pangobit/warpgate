@@ -490,7 +490,7 @@ This README is intentionally limited to what the current code does.
 - App discovery is local and file-based. Warpgate scans `apps/*/app.yml`.
 - The deploy override currently injects image tags and internal hostname `extra_hosts`.
 - Remote compose sources currently support GitHub raw fetches.
-- The daemon binary exists under [`cmd/warpd`](/home/ray/projects/warpgate/cmd/warpd/main.go), but the main workflow today is the `warpgate` CLI.
+- The local browser UI is started with `warpgate ui`; Warpgate does not ship a separate daemon binary.
 
 If you are evaluating behavior that depends on generated Traefik labels or more advanced orchestration, verify it against the current code before relying on it in production.
 
@@ -500,7 +500,6 @@ Build and test:
 
 ```bash
 go build ./cmd/warpgate
-go build ./cmd/warpd
 go test ./...
 go vet ./...
 go fmt ./...

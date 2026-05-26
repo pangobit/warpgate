@@ -4,7 +4,6 @@
 
 ```bash
 go build ./cmd/warpgate        # Build CLI
-go build ./cmd/warpd           # Build daemon
 go test ./...                  # Run all tests
 go test -run ^TestMyFunc$      # Run a single test
 go vet ./...                   # Vet
@@ -33,8 +32,8 @@ go vet ./...                   # Vet
 
 ## Architecture
 
-- `warpgate` (CLI) lives in `cmd/warpgate/` and uses `pkg/cli/`
-- `warpd` (daemon) lives in `cmd/warpd/` and uses `pkg/daemon/`
+- `warpgate` lives in `cmd/warpgate/` and uses `pkg/cli/`
+- The local browser UI is started with `warpgate ui` and uses internals under `warpd/`
 - Config loading and app discovery in `pkg/config/`, compose override generation in `pkg/compose/`
 - Deploy orchestration in `pkg/deploy/`, SSH client in `pkg/ssh/`, node bootstrap in `pkg/bootstrap/`
-- The CLI and daemon are separate binaries — don't add daemon commands to the CLI
+- Warpgate ships one CLI binary; do not add a separate daemon binary

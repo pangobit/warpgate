@@ -41,7 +41,7 @@ The existing CLI remains useful for bootstrap, diagnostics, scripting, and direc
 Warpgate currently has:
 
 - `cmd/warpgate` for the CLI.
-- `cmd/warpd` and `pkg/daemon` as earlier daemon scaffolding that is no longer the primary 2.0 product direction.
+- `warpgate ui` for the local browser UI, backed by internal packages under `warpd/`.
 - `pkg/config` for `cluster.yml` and `apps/*/app.yml` loading.
 - `pkg/deploy` for SSH/Tailscale SSH deployment orchestration.
 - `pkg/release` for file-backed release manifests.

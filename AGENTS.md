@@ -13,7 +13,6 @@ Warpgate is a lightweight Go-based deployment tool replacing our k3s + Flux setu
 
 ```bash
 go build ./cmd/warpgate        # Build CLI
-go build ./cmd/warpd           # Build daemon
 go test ./...                  # Run all tests
 go test -run ^TestMyFunc$      # Run a single test
 go vet ./...                   # Vet
@@ -22,16 +21,15 @@ go vet ./...                   # Vet
 ## Architecture
 
 - `cmd/warpgate/` - CLI binary, uses `pkg/cli/`
-- `cmd/warpd/` - Daemon binary (future), uses `pkg/daemon/`
 - `pkg/config/` - `cluster.yml` and `app.yml` types, loading, and app discovery from `apps/` directories
 - `pkg/cli/` - Cobra commands for the CLI
 - `pkg/compose/` - Compose override generation (Traefik labels + image tag only)
 - `pkg/deploy/` - Deploy orchestration, rollback, and deploy state management
 - `pkg/ssh/` - SSH client (key-based and Tailscale SSH modes)
 - `pkg/bootstrap/` - Node provisioning via SSH (OS detection, install scripts, Traefik setup)
-- `pkg/daemon/` - Server/agent daemon implementation (future)
+- `warpd/` - Local browser UI internals used by `warpgate ui`
 
-The CLI and daemon are separate binaries. Daemon commands belong in `warpd`, not `warpgate`.
+Warpgate ships one CLI binary. The local browser UI is started with `warpgate ui`; do not add a separate daemon binary.
 
 ### Config Model
 - `cluster.yml` at repo root defines nodes, networking, traefik, and registry
