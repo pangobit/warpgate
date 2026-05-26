@@ -3,6 +3,8 @@ package usecase_test
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
 	"testing"
 
 	tursoconn "github.com/pangobit/warpgate/warpd/connectors/turso"
@@ -45,6 +47,41 @@ func TestAttachRepositoryImportsExistingWarpgateRepo(t *testing.T) {
 	}
 	if cursor.LastObservedCommit != "commit-1" {
 		t.Fatalf("commit = %q, want commit-1", cursor.LastObservedCommit)
+	}
+}
+
+func TestAttachRepositoryImportsRepositorySubpath(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	github := newFakeGitHub()
+	service := usecase.NewService(store, github, fakeRegistry{}, fakeDeployer{})
+
+	err := service.AttachRepository(ctx, adminUser(), configrepo.RepositorySettings{
+		Owner:  "acme",
+		Repo:   "infra",
+		Branch: "main",
+		Path:   "/prod/",
+	})
+	if err != nil {
+		t.Fatalf("AttachRepository() error = %v", err)
+	}
+
+	settings, ok, err := store.RepositorySettings(ctx)
+	if err != nil || !ok {
+		t.Fatalf("RepositorySettings() ok = %v error = %v", ok, err)
+	}
+	if settings.Path != "prod" {
+		t.Fatalf("path = %q, want prod", settings.Path)
+	}
+	apps, err := store.ListApps(ctx)
+	if err != nil {
+		t.Fatalf("ListApps() error = %v", err)
+	}
+	if len(apps) != 1 {
+		t.Fatalf("apps = %d, want 1", len(apps))
+	}
+	if apps[0].Path != "prod/apps/api/app.yml" {
+		t.Fatalf("app path = %q, want prod/apps/api/app.yml", apps[0].Path)
 	}
 }
 
@@ -160,14 +197,34 @@ func newFakeGitHub() *fakeGitHub {
 				SHA:       "compose-sha",
 				CommitSHA: "commit-1",
 			},
+			"prod/cluster.yml": {
+				Path:      "prod/cluster.yml",
+				Content:   clusterYAML(),
+				SHA:       "prod-cluster-sha",
+				CommitSHA: "commit-1",
+			},
+			"prod/apps/api/app.yml": {
+				Path:      "prod/apps/api/app.yml",
+				Content:   appYAML("v1.0.0"),
+				SHA:       "prod-app-sha",
+				CommitSHA: "commit-1",
+			},
+			"prod/apps/api/compose.yml": {
+				Path:      "prod/apps/api/compose.yml",
+				Content:   "services:\n  api:\n    image: ghcr.io/acme/api\n",
+				SHA:       "prod-compose-sha",
+				CommitSHA: "commit-1",
+			},
 		},
 	}
 }
 
+// BranchHead returns the fake branch head.
 func (f *fakeGitHub) BranchHead(context.Context, configrepo.RepositorySettings) (string, error) {
 	return f.head, nil
 }
 
+// ReadFile returns a fake repository file by path.
 func (f *fakeGitHub) ReadFile(_ context.Context, _ configrepo.RepositorySettings, path string, _ string) (usecase.GitHubFile, error) {
 	file, ok := f.files[path]
 	if !ok {
@@ -176,10 +233,24 @@ func (f *fakeGitHub) ReadFile(_ context.Context, _ configrepo.RepositorySettings
 	return file, nil
 }
 
-func (f *fakeGitHub) ListAppConfigFiles(context.Context, configrepo.RepositorySettings, string) ([]usecase.GitHubFile, error) {
-	return []usecase.GitHubFile{f.files["apps/api/app.yml"]}, nil
+// ListAppConfigFiles returns fake app config files under the configured root.
+func (f *fakeGitHub) ListAppConfigFiles(_ context.Context, settings configrepo.RepositorySettings, _ string) ([]usecase.GitHubFile, error) {
+	prefix := "apps/"
+	root := strings.Trim(strings.TrimSpace(settings.Path), "/")
+	if root != "" {
+		prefix = root + "/apps/"
+	}
+	var files []usecase.GitHubFile
+	for name, file := range f.files {
+		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, "/app.yml") {
+			files = append(files, file)
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files, nil
 }
 
+// WriteFile updates a fake repository file.
 func (f *fakeGitHub) WriteFile(_ context.Context, input usecase.WriteFileInput) (usecase.GitHubFile, error) {
 	file := f.files[input.Path]
 	if file.SHA != input.ExpectedSHA {
@@ -196,6 +267,7 @@ type fakeRegistry struct {
 	digests map[string]string
 }
 
+// ResolveDigest returns a fake image digest.
 func (f fakeRegistry) ResolveDigest(_ context.Context, image string, tag string) (string, error) {
 	digest, ok := f.digests[image+":"+tag]
 	if !ok {
@@ -209,6 +281,7 @@ type fakeDeployer struct {
 	err     error
 }
 
+// DeployRelease returns a fake deployment result.
 func (f fakeDeployer) DeployRelease(context.Context, usecase.DeployReleaseInput) (usecase.DeployResult, error) {
 	return usecase.DeployResult{Targets: f.targets}, f.err
 }

@@ -1,4 +1,4 @@
-// Package deployment defines daemon-owned deployment records.
+// Package deployment defines Warpgate-owned deployment records.
 package deployment
 
 import "time"

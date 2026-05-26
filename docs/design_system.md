@@ -250,7 +250,7 @@ Use `.form-actions` to align submit buttons to the right.
 
 ## Tables
 
-Tables are preferred for app lists, release lists, deployment history, and poller history.
+Tables are preferred for app lists, release lists, deployment history, and refresh history.
 
 Use:
 
@@ -288,7 +288,6 @@ Dashboard should include:
 - repository sync panel with last commit, last check, and check-now action
 - app count
 - latest deployment status
-- poller health
 - image update summary
 
 App detail should include:
@@ -310,12 +309,10 @@ Deploy-data edit should include:
 
 Settings should include:
 
+- GitHub account connection state
 - attached GitHub repo
 - branch
-- GitHub token env var name
 - deploy SSH mode
-- polling intervals
-- Tailscale mode readout
 
 ## Template Shape
 

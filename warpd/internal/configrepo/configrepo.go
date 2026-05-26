@@ -11,9 +11,11 @@ type RepositorySettings struct {
 	Repo string
 	// Branch is the branch Warpgate reads from and writes to.
 	Branch string
+	// Path is the optional repository subdirectory that contains cluster.yml and apps/.
+	Path string
 	// TokenEnvVar is the environment variable that contains the GitHub token.
 	TokenEnvVar string
-	// AttachedAt is when the repository was attached to this daemon.
+	// AttachedAt is when the repository was attached to this Warpgate instance.
 	AttachedAt time.Time
 }
 
@@ -45,7 +47,7 @@ type SyncCursor struct {
 	LastError string
 }
 
-// PollerSettings controls daemon polling for a repository.
+// PollerSettings controls repository refresh behavior.
 type PollerSettings struct {
 	// ConfigEnabled enables scheduled config sync.
 	ConfigEnabled bool

@@ -53,6 +53,7 @@ require (
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/natefinch/atomic v1.0.1 // indirect
+	github.com/pangobit/agent-resources/tools v0.0.0-20260518213828-0f3f3a22df2c // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
@@ -78,4 +79,7 @@ require (
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
 
-tool github.com/a-h/templ/cmd/templ
+tool (
+	github.com/a-h/templ/cmd/templ
+	github.com/pangobit/agent-resources/tools/cmd/agentlint
+)

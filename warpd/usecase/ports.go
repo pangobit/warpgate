@@ -1,4 +1,4 @@
-// Package usecase orchestrates Warpgate daemon workflows.
+// Package usecase orchestrates Warpgate web workflows.
 package usecase
 
 import (
@@ -12,7 +12,7 @@ import (
 	"github.com/pangobit/warpgate/warpd/internal/release"
 )
 
-// Store persists daemon operational state.
+// Store persists Warpgate operational state.
 type Store interface {
 	RepositorySettings(ctx context.Context) (configrepo.RepositorySettings, bool, error)
 	SaveRepositorySettings(ctx context.Context, settings configrepo.RepositorySettings) error

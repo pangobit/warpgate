@@ -1,4 +1,4 @@
-// Package release defines daemon-owned release records.
+// Package release defines Warpgate-owned release records.
 package release
 
 import "time"

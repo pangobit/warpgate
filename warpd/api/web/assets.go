@@ -1,3 +1,4 @@
+// Package web renders Warpgate's server-side UI and static assets.
 package web
 
 import (

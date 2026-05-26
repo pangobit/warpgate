@@ -17,7 +17,7 @@ import (
 	_ "turso.tech/database/tursogo"
 )
 
-// Store persists daemon state in embedded Turso.
+// Store persists Warpgate state in embedded Turso.
 type Store struct {
 	db *sql.DB
 }

@@ -15,7 +15,7 @@ import (
 	"github.com/pangobit/warpgate/warpd/internal/release"
 )
 
-// MemoryStore is an in-process store used by tests and local daemon fallback.
+// MemoryStore is an in-process store used by tests and local fallback.
 type MemoryStore struct {
 	mu sync.Mutex
 

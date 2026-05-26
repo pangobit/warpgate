@@ -1,8 +1,10 @@
-// Package warpd composes and runs the Warpgate control plane daemon.
+// Package warpd composes and runs the Warpgate web control plane.
 package warpd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -56,8 +58,44 @@ type DeployConfig struct {
 	TailscaleSSH bool
 	// User is the deploy SSH user.
 	User string
-	// GitHubTokenEnvVar names the GitHub token env var.
+	// GitHubTokenEnvVar names the legacy GitHub token env var.
 	GitHubTokenEnvVar string
+}
+
+// LocalUIConfig holds local browser UI configuration.
+type LocalUIConfig struct {
+	// HTTPAddr is the local web server listen address.
+	HTTPAddr string
+	// DBPath is the local UI database path.
+	DBPath string
+	// GitHubClientID is the GitHub App client ID used for device flow.
+	GitHubClientID string
+	// OpenBrowser opens the local UI in the default browser.
+	OpenBrowser bool
+	// Deploy holds deploy adapter settings.
+	Deploy DeployConfig
+}
+
+// DefaultLocalUIConfig returns local browser UI defaults.
+func DefaultLocalUIConfig() LocalUIConfig {
+	return LocalUIConfig{
+		HTTPAddr:    "127.0.0.1:0",
+		DBPath:      defaultLocalDBPath(),
+		OpenBrowser: true,
+		Deploy: DeployConfig{
+			RepoPath:          ".",
+			TailscaleSSH:      true,
+			GitHubTokenEnvVar: "GITHUB_TOKEN",
+		},
+	}
+}
+
+func defaultLocalDBPath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		return "warpgate.db"
+	}
+	return filepath.Join(dir, "warpgate", "warpgate.db")
 }
 
 // LoadConfig loads daemon config from defaults, file, environment, and flags.

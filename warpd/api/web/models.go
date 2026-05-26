@@ -7,6 +7,7 @@ import (
 
 	"github.com/a-h/templ"
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
+	"github.com/pangobit/warpgate/warpd/internal/identity"
 	"github.com/pangobit/warpgate/warpd/internal/release"
 	"github.com/pangobit/warpgate/warpd/usecase"
 )
@@ -83,6 +84,8 @@ type SettingsPage struct {
 	Error string
 	// Repository is the attached repository.
 	Repository configrepo.RepositorySettings
+	// GitHubAuth is the local GitHub authorization state.
+	GitHubAuth identity.GitHubAuthStatus
 }
 
 // Renderer renders Warpgate web components.
@@ -110,6 +113,26 @@ func identityAuthStyle(label string) templ.CSSClass {
 		return statusWarning()
 	}
 	return statusSuccess()
+}
+
+func githubAuthLabel(status identity.GitHubAuthStatus) string {
+	if status.Authenticated {
+		if status.DisplayName != "" {
+			return status.DisplayName
+		}
+		if status.Login != "" {
+			return status.Login
+		}
+		return "connected"
+	}
+	return "unknown"
+}
+
+func githubAuthStatusStyle(status identity.GitHubAuthStatus) templ.CSSClass {
+	if status.Authenticated {
+		return statusSuccess()
+	}
+	return statusWarning()
 }
 
 func statusClass(status string) string {

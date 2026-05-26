@@ -26,7 +26,7 @@ import (
 // ErrConflict indicates that the desired-state repository moved before a write.
 var ErrConflict = errors.New("repository conflict: refresh before retrying")
 
-// Service coordinates daemon workflows.
+// Service coordinates Warpgate web workflows.
 type Service struct {
 	store    Store
 	github   GitHubRepo
@@ -35,7 +35,7 @@ type Service struct {
 	now      func() time.Time
 }
 
-// NewService creates a daemon application service.
+// NewService creates a Warpgate application service.
 func NewService(store Store, github GitHubRepo, registry Registry, deployer Deployer) *Service {
 	return &Service{
 		store:    store,
@@ -54,6 +54,11 @@ func (s *Service) AttachRepository(ctx context.Context, actor identity.User, set
 	if settings.Owner == "" || settings.Repo == "" || settings.Branch == "" {
 		return fmt.Errorf("owner, repo, and branch are required")
 	}
+	rootPath, err := cleanRepositoryPath(settings.Path)
+	if err != nil {
+		return err
+	}
+	settings.Path = rootPath
 	if settings.AttachedAt.IsZero() {
 		settings.AttachedAt = s.now()
 	}
@@ -423,7 +428,7 @@ func (s *Service) validateRepoAtRef(ctx context.Context, settings configrepo.Rep
 }
 
 func (s *Service) importRepoAtRef(ctx context.Context, settings configrepo.RepositorySettings, ref string, observedAt time.Time) error {
-	clusterFile, err := s.github.ReadFile(ctx, settings, "cluster.yml", ref)
+	clusterFile, err := s.github.ReadFile(ctx, settings, repositoryPath(settings, "cluster.yml"), ref)
 	if err != nil {
 		return fmt.Errorf("read cluster.yml: %w", err)
 	}
@@ -444,7 +449,7 @@ func (s *Service) importRepoAtRef(ctx context.Context, settings configrepo.Repos
 		if err != nil {
 			return err
 		}
-		composePath := path.Join("apps", appName, "compose.yml")
+		composePath := repositoryPath(settings, path.Join("apps", appName, "compose.yml"))
 		compose, err := s.github.ReadFile(ctx, settings, composePath, ref)
 		composeContent := ""
 		if err == nil {
@@ -466,6 +471,29 @@ func (s *Service) importRepoAtRef(ctx context.Context, settings configrepo.Repos
 		}
 	}
 	return nil
+}
+
+func cleanRepositoryPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "/")
+	if value == "" || value == "." {
+		return "", nil
+	}
+	cleaned := path.Clean(value)
+	if cleaned == "." {
+		return "", nil
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("repository path must stay inside the repository")
+	}
+	return cleaned, nil
+}
+
+func repositoryPath(settings configrepo.RepositorySettings, relative string) string {
+	if settings.Path == "" {
+		return relative
+	}
+	return path.Join(settings.Path, relative)
 }
 
 func (s *Service) recordConfigSyncError(ctx context.Context, cause error) error {

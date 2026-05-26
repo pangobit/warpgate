@@ -3,9 +3,12 @@ package warpd
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -46,7 +49,11 @@ func RunServer(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			logrus.Warnf("close store: %v", err)
+		}
+	}()
 
 	identifier := identifierForConfig(cfg)
 
@@ -76,6 +83,73 @@ func RunServer(ctx context.Context, cfg Config) error {
 		logrus.Infof("warpd listening on %s", cfg.HTTPAddr)
 		errCh <- server.ListenAndServe()
 	}()
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return server.Shutdown(shutdownCtx)
+	case err := <-errCh:
+		if err == http.ErrServerClosed {
+			return nil
+		}
+		return err
+	}
+}
+
+// RunLocalUI starts the local browser UI.
+func RunLocalUI(ctx context.Context, cfg LocalUIConfig) error {
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if cfg.HTTPAddr == "" {
+		cfg.HTTPAddr = "127.0.0.1:0"
+	}
+	if cfg.DBPath == "" {
+		cfg.DBPath = defaultLocalDBPath()
+	}
+	store, err := tursoconn.Open(ctx, cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			logrus.Warnf("close store: %v", err)
+		}
+	}()
+	githubAuth := githubconn.NewDeviceSession(cfg.GitHubClientID)
+	service := usecase.NewService(
+		store,
+		githubconn.NewClientWithTokenProvider(githubAuth),
+		registry.NewGHCR(),
+		deployconn.Adapter{
+			RepoPath:          cfg.Deploy.RepoPath,
+			SSHKey:            cfg.Deploy.SSHKey,
+			TailscaleSSH:      cfg.Deploy.TailscaleSSH,
+			User:              cfg.Deploy.User,
+			GitHubTokenEnvVar: cfg.Deploy.GitHubTokenEnvVar,
+		},
+	)
+	assets := webapi.NewAssets()
+	router := httpapi.NewRouter(service, githubAuth, assets, httpapi.WithGitHubAuth(githubAuth))
+	listener, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		return fmt.Errorf("listen for local UI: %w", err)
+	}
+	server := &http.Server{
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Serve(listener)
+	}()
+	url := localURL(listener.Addr())
+	fmt.Printf("Warpgate UI: %s\n", url)
+	if cfg.OpenBrowser {
+		if err := openBrowser(ctx, url); err != nil {
+			logrus.Warnf("open browser: %v", err)
+		}
+	}
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -153,7 +227,31 @@ func runPoller(ctx context.Context, service *usecase.Service, name string) {
 	}
 }
 
-// Main runs the daemon with process arguments.
+func localURL(addr net.Addr) string {
+	host, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "http://" + addr.String() + "/"
+	}
+	if host == "" || host == "::" || host == "[::]" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/"
+}
+
+func openBrowser(ctx context.Context, target string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.CommandContext(ctx, "open", target)
+	case "windows":
+		cmd = exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", target)
+	default:
+		cmd = exec.CommandContext(ctx, "xdg-open", target)
+	}
+	return cmd.Start()
+}
+
+// Main runs the legacy daemon with process arguments.
 func Main() error {
 	return Run(os.Args[1:])
 }

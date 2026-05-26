@@ -20,6 +20,24 @@ type User struct {
 	Capabilities []string
 }
 
+// GitHubAuthStatus describes the local GitHub authorization state.
+type GitHubAuthStatus struct {
+	// Configured reports whether a GitHub App client ID is available.
+	Configured bool
+	// Authenticated reports whether Warpgate has a usable GitHub token.
+	Authenticated bool
+	// Login is the authenticated GitHub login.
+	Login string
+	// DisplayName is the authenticated GitHub display name.
+	DisplayName string
+	// UserCode is the pending device-flow code.
+	UserCode string
+	// VerificationURI is the GitHub device-flow authorization URL.
+	VerificationURI string
+	// Error is the latest authorization error.
+	Error string
+}
+
 // Identifier resolves the user associated with a request source.
 type Identifier interface {
 	Identify(ctx context.Context, remoteAddr string) (User, error)

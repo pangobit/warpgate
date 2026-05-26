@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/pangobit/warpgate/pkg/config"
 	"github.com/pangobit/warpgate/pkg/deploy"
 	"github.com/pangobit/warpgate/pkg/tui"
+	"github.com/pangobit/warpgate/warpd"
 	"github.com/spf13/cobra"
 )
 
@@ -30,7 +32,7 @@ var rootCmd = &cobra.Command{
 It provides a simpler alternative to k3s + Flux for deploying containerized applications
 using Docker Compose, Traefik, Tailscale, and your own infrastructure.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if cmd.Name() == "init" {
+		if cmd.Name() == "init" || cmd.Name() == "ui" {
 			return nil
 		}
 
@@ -100,6 +102,14 @@ var (
 	dashRefresh      int
 )
 
+// UI flags
+var (
+	uiAddr           string
+	uiDBPath         string
+	uiGitHubClientID string
+	uiOpenBrowser    bool
+)
+
 // Cleanup flags
 var (
 	cleanupHost         string
@@ -127,6 +137,7 @@ func Setup() {
 	rootCmd.AddCommand(releaseCmd)
 	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(uiCmd)
 	rootCmd.AddCommand(dashboardCmd)
 	rootCmd.AddCommand(logsCmd)
 	rootCmd.AddCommand(rollbackCmd)
@@ -171,6 +182,12 @@ func Setup() {
 	dashboardCmd.Flags().StringVar(&dashSSHKey, "ssh-key", "", "Path to SSH private key")
 	dashboardCmd.Flags().StringVar(&dashUser, "user", "", "SSH user (defaults to current user)")
 	dashboardCmd.Flags().IntVar(&dashRefresh, "refresh", 30, "Auto-refresh interval in seconds")
+
+	defaultUI := warpd.DefaultLocalUIConfig()
+	uiCmd.Flags().StringVar(&uiAddr, "addr", defaultUI.HTTPAddr, "Local UI listen address")
+	uiCmd.Flags().StringVar(&uiDBPath, "db-path", defaultUI.DBPath, "Local UI database path")
+	uiCmd.Flags().StringVar(&uiGitHubClientID, "github-client-id", os.Getenv("WARPGATE_GITHUB_CLIENT_ID"), "GitHub App client ID")
+	uiCmd.Flags().BoolVar(&uiOpenBrowser, "open", defaultUI.OpenBrowser, "Open the local UI in a browser")
 
 	removeCmd.Flags().BoolVar(&removeAll, "all", false, "Remove all discovered apps")
 	removeCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
@@ -534,6 +551,23 @@ Examples:
 			Fetch:           d.ClusterStatus,
 			RefreshInterval: time.Duration(dashRefresh) * time.Second,
 		})
+	},
+}
+
+var uiCmd = &cobra.Command{
+	Use:   "ui",
+	Short: "Open the local Warpgate UI",
+	Long: `Start a local browser UI for Warpgate.
+
+The UI binds to loopback by default and uses GitHub App device flow for repository access.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg := warpd.DefaultLocalUIConfig()
+		cfg.HTTPAddr = uiAddr
+		cfg.DBPath = uiDBPath
+		cfg.GitHubClientID = uiGitHubClientID
+		cfg.OpenBrowser = uiOpenBrowser
+		return warpd.RunLocalUI(context.Background(), cfg)
 	},
 }
 

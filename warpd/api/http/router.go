@@ -2,6 +2,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -15,12 +16,15 @@ import (
 )
 
 // NewRouter creates the warpd HTTP route tree.
-func NewRouter(service *usecase.Service, identifier identity.Identifier, assets http.Handler) http.Handler {
+func NewRouter(service *usecase.Service, identifier identity.Identifier, assets http.Handler, options ...RouterOption) http.Handler {
 	router := &router{
 		service:    service,
 		identifier: identifier,
 		assets:     assets,
 		renderer:   webapi.NewRenderer(),
+	}
+	for _, option := range options {
+		option(router)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", router.health)
@@ -29,11 +33,30 @@ func NewRouter(service *usecase.Service, identifier identity.Identifier, assets 
 	return mux
 }
 
+// RouterOption configures the Warpgate HTTP route tree.
+type RouterOption func(*router)
+
+// WithGitHubAuth enables local GitHub App authorization routes.
+func WithGitHubAuth(auth GitHubAuthenticator) RouterOption {
+	return func(router *router) {
+		router.githubAuth = auth
+	}
+}
+
+// GitHubAuthenticator manages a local GitHub authorization session.
+type GitHubAuthenticator interface {
+	CompleteDeviceFlow(ctx context.Context) error
+	Disconnect()
+	StartDeviceFlow(ctx context.Context) error
+	Status() identity.GitHubAuthStatus
+}
+
 type router struct {
 	service    *usecase.Service
 	identifier identity.Identifier
 	assets     http.Handler
 	renderer   *webapi.Renderer
+	githubAuth GitHubAuthenticator
 }
 
 func (r *router) route(w http.ResponseWriter, req *http.Request) {
@@ -60,6 +83,12 @@ func (r *router) route(w http.ResponseWriter, req *http.Request) {
 		r.settings(w, req)
 	case req.Method == http.MethodPost && req.URL.Path == "/settings/repository":
 		r.attachRepository(w, req)
+	case req.Method == http.MethodPost && req.URL.Path == "/auth/github/start":
+		r.startGitHubAuth(w, req)
+	case req.Method == http.MethodPost && req.URL.Path == "/auth/github/complete":
+		r.completeGitHubAuth(w, req)
+	case req.Method == http.MethodPost && req.URL.Path == "/auth/github/disconnect":
+		r.disconnectGitHub(w, req)
 	default:
 		http.NotFound(w, req)
 	}
@@ -196,7 +225,7 @@ func (r *router) syncImages(w http.ResponseWriter, req *http.Request) {
 
 func (r *router) settings(w http.ResponseWriter, req *http.Request) {
 	settings, _, err := r.service.RepositorySettings(req.Context())
-	page := webapi.SettingsPage{Title: "Settings", IdentityLabel: identityLabel(req), Repository: settings}
+	page := r.settingsPage(req, settings)
 	if err != nil {
 		page.Error = err.Error()
 	}
@@ -210,14 +239,47 @@ func (r *router) attachRepository(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	settings := configrepo.RepositorySettings{
-		Owner:       req.Form.Get("owner"),
-		Repo:        req.Form.Get("repo"),
-		Branch:      req.Form.Get("branch"),
-		TokenEnvVar: req.Form.Get("token_env_var"),
+		Owner:  req.Form.Get("owner"),
+		Repo:   req.Form.Get("repo"),
+		Branch: req.Form.Get("branch"),
+		Path:   req.Form.Get("path"),
 	}
 	if err := r.service.AttachRepository(req.Context(), user, settings); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		page := r.settingsPage(req, settings)
+		page.Error = err.Error()
+		r.renderStatus(w, http.StatusBadRequest, webapi.Settings(page))
 		return
+	}
+	http.Redirect(w, req, "/settings", http.StatusSeeOther)
+}
+
+func (r *router) startGitHubAuth(w http.ResponseWriter, req *http.Request) {
+	if r.githubAuth == nil {
+		http.Error(w, "GitHub App authorization is not configured", http.StatusBadRequest)
+		return
+	}
+	if err := r.githubAuth.StartDeviceFlow(req.Context()); err != nil {
+		http.Redirect(w, req, "/settings", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, req, "/settings", http.StatusSeeOther)
+}
+
+func (r *router) completeGitHubAuth(w http.ResponseWriter, req *http.Request) {
+	if r.githubAuth == nil {
+		http.Error(w, "GitHub App authorization is not configured", http.StatusBadRequest)
+		return
+	}
+	if err := r.githubAuth.CompleteDeviceFlow(req.Context()); err != nil {
+		http.Redirect(w, req, "/settings", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, req, "/settings", http.StatusSeeOther)
+}
+
+func (r *router) disconnectGitHub(w http.ResponseWriter, req *http.Request) {
+	if r.githubAuth != nil {
+		r.githubAuth.Disconnect()
 	}
 	http.Redirect(w, req, "/settings", http.StatusSeeOther)
 }
@@ -226,6 +288,30 @@ func (r *router) render(w http.ResponseWriter, component templ.Component) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := r.renderer.Render(w, component); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (r *router) renderStatus(w http.ResponseWriter, status int, component templ.Component) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	if err := r.renderer.Render(w, component); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (r *router) githubAuthStatus() identity.GitHubAuthStatus {
+	if r.githubAuth == nil {
+		return identity.GitHubAuthStatus{}
+	}
+	return r.githubAuth.Status()
+}
+
+func (r *router) settingsPage(req *http.Request, settings configrepo.RepositorySettings) webapi.SettingsPage {
+	return webapi.SettingsPage{
+		Title:         "Settings",
+		IdentityLabel: identityLabel(req),
+		Repository:    settings,
+		GitHubAuth:    r.githubAuthStatus(),
 	}
 }
 

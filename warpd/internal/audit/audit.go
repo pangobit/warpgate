@@ -3,7 +3,7 @@ package audit
 
 import "time"
 
-// Event records an operator action or automated daemon observation.
+// Event records an operator action or automated Warpgate observation.
 type Event struct {
 	// ID is the event identifier.
 	ID string

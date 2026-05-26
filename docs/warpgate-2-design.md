@@ -6,23 +6,22 @@ Draft for review.
 
 ## Summary
 
-Warpgate 2.0 adds a long-running control plane daemon, `warpd`, that runs on a target node and manages deployments from a web UI. The daemon exposes a Tailscale-secured web surface, persists operational state in Turso, synchronizes desired state from a configured GitHub infrastructure repository, and can initiate releases by committing changes to Warpgate YAML.
+Warpgate 2.0 makes the browser UI the primary local operator experience. The user runs `warpgate ui`, Warpgate starts a loopback-only web server, opens the browser, persists local operational state in Turso, authenticates to GitHub with GitHub App device flow, and can initiate releases by committing changes to Warpgate YAML.
 
-The existing CLI remains useful for local bootstrap, diagnostics, and direct deploys. The daemon becomes the primary operator experience for day-to-day release management.
+The existing CLI remains useful for bootstrap, diagnostics, scripting, and direct deploys. The UI replaces day-to-day interactive CLI workflows without requiring users to operate a separate Warpgate service.
 
 ## Goals
 
-- Run a Warpgate server daemon on a target node.
-- Persist daemon state in Turso using the `turso.tech/database/tursogo` driver, not libsql/sqlite.
-- Authenticate web UI users through Tailscale identity derived from transport state.
-- Authorize admin access with a Tailscale capability, following the Brighter admin pattern.
+- Run a local browser UI from `warpgate ui`.
+- Bind the UI to loopback by default.
+- Persist local UI state in Turso using the `turso.tech/database/tursogo` driver, not libsql/sqlite.
+- Authenticate GitHub API access with GitHub App device flow instead of PATs or token env vars.
 - Configure a GitHub infrastructure repository that Warpgate can read from and write to.
 - Attach to an existing bootstrapped Warpgate infrastructure repository.
 - Let operators initiate releases from the UI by tweaking deploy data in forms; Warpgate writes the resulting app YAML and commits it to GitHub.
-- Poll for changes in configured config repositories and image repositories.
-- Provide manual "check now" actions for GitHub/config polling and image polling.
+- Provide manual "check now" actions for GitHub/config refresh and image refresh.
 - Build a server-rendered web UI using the local Warpgate design system in `docs/design_system.md`.
-- Reuse the existing deployment engine while the daemon control plane is introduced.
+- Reuse the existing deployment engine while the local UI is introduced.
 
 ## Non-Goals
 
@@ -33,7 +32,8 @@ The existing CLI remains useful for local bootstrap, diagnostics, and direct dep
 - Making webhooks the primary synchronization mechanism.
 - Editing secrets through the Warpgate UI.
 - Generating user `compose.yml` files.
-- Moving existing CLI commands into `warpd`.
+- Removing existing CLI commands.
+- Requiring a long-running Warpgate service for the first local UI slice.
 - Reading from or writing to image source repositories. Image repos stay owned by their existing CI/CD pipelines.
 
 ## Existing Baseline
@@ -41,8 +41,7 @@ The existing CLI remains useful for local bootstrap, diagnostics, and direct dep
 Warpgate currently has:
 
 - `cmd/warpgate` for the CLI.
-- `cmd/warpd` for the daemon entrypoint.
-- `pkg/daemon` with placeholder server and agent modes.
+- `cmd/warpd` and `pkg/daemon` as earlier daemon scaffolding that is no longer the primary 2.0 product direction.
 - `pkg/config` for `cluster.yml` and `apps/*/app.yml` loading.
 - `pkg/deploy` for SSH/Tailscale SSH deployment orchestration.
 - `pkg/release` for file-backed release manifests.
@@ -57,18 +56,15 @@ The existing config model is Git-friendly and should remain the desired-state so
 
 ## Referenced Patterns
 
-Probe and Brighter provide the Tailscale identity pattern:
+Probe provides the identity display pattern:
 
 - Define a small identity domain package with `User`, `Identifier`, `StaticIdentifier`, `WithUser`, and `UserFrom`.
-- In production, resolve identity with a Tailscale connector calling `LocalClient().WhoIs(r.Context(), r.RemoteAddr)`.
-- In local development, use a static identity.
-- In Brighter admin, require a global capability before allowing admin access.
+- Display the resolved identity in the navigation shell.
+- In local UI mode, unauthenticated GitHub state is allowed and displayed as `unknown`.
 
 The referenced projects provided useful patterns during planning. Warpgate's local docs now capture the UI specifics needed for implementation:
 
 - Use embedded Turso through `turso.tech/database/tursogo`.
-- Run Goose migrations from embedded SQL files.
-- Generate typed queries with sqlc.
 - Use server-rendered `templ` templates, HTMX, embedded static assets, and vanilla CSS tokens.
 - Keep HTTP handlers thin and route through an application service.
 
@@ -94,23 +90,23 @@ Operational state lives in Turso:
 - image poll cursors
 - config poll cursors
 - audit events
-- daemon startup metadata
+- local UI startup metadata
 
 Execution happens through the existing deployer:
 
-- The daemon checks out or fetches the configured repo state.
+- The local UI checks or fetches the configured repo state.
 - It creates a release record from a committed config revision.
 - It invokes the existing deploy path with the selected app and release inputs.
 - It records success, failure, timestamps, actor identity, and deploy output summary.
 
 ## Package Layout
 
-Warpgate 2.0 server code should use a hexagonal architecture under `warpd/`. The existing `pkg/...` packages remain available to the CLI and can be adapted through `warpd/connectors` where the daemon needs them.
+Warpgate 2.0 UI code should keep the current hexagonal architecture under `warpd/` while it is being renamed or moved. The existing `pkg/...` packages remain available to the CLI and can be adapted through connectors where the UI needs them.
 
 Proposed layout:
 
 ```text
-cmd/warpd/
+cmd/warpgate/
 warpd/
   api/
     http/
@@ -135,10 +131,10 @@ warpd/
 
 Responsibilities:
 
-- `cmd/warpd`: executable entrypoint only.
+- `cmd/warpgate`: executable entrypoint for the CLI and local UI command.
 - `warpd/api`: inbound adapters and routing. HTTP handlers bind requests, call use cases, and render responses.
 - `warpd/api/web`: server-rendered UI handlers, templates, and embedded assets.
-- `warpd/connectors`: outbound adapters for persistence, GitHub, registries, Tailscale, and the existing deploy engine.
+- `warpd/connectors`: outbound adapters for persistence, GitHub, registries, authorization, and the existing deploy engine.
 - `warpd/usecase`: application orchestration and port interfaces.
 - `warpd/internal/{domain}`: domain models, validation, constants, and pure behavior grouped by bounded domain.
 
@@ -148,52 +144,42 @@ Dependency direction:
 - `usecase` depends on domain packages and outbound port interfaces.
 - `connectors` depend inward on use-case ports and domain models.
 - `internal/{domain}` packages do not depend on `api`, `connectors`, or `usecase`.
-- Existing `pkg/...` deployment/config/release code is treated as legacy/core capability and is wrapped by `warpd/connectors/deploy` rather than called from HTTP handlers.
+- Existing `pkg/...` deployment/config/release code is treated as core capability and is wrapped by `warpd/connectors/deploy` rather than called from HTTP handlers.
 
-## Daemon Modes
+## Local UI Runtime
 
-`warpd` should support server mode first.
+`warpgate ui` starts the UI process.
 
-Modes:
+Runtime behavior:
 
-- `server`: runs web UI, persistence, GitHub sync, pollers, and deploy orchestration.
-- `agent`: remains reserved until the server is working.
+- Bind to `127.0.0.1:0` by default.
+- Print the resolved local URL.
+- Open the browser by default.
+- Use a local Turso database path.
+- Keep GitHub access tokens in memory for the first slice.
+- Re-authenticate on each process start unless durable keychain storage is added later.
 
-The default can remain `server`.
+Minimal command configuration:
 
-Required boot config should use Viper. The boot config should contain only what is necessary to start the daemon, open persistence, and expose the UI safely. Everything else should be configured through the web UI and persisted to Turso.
-
-Minimal boot config:
-
-```yaml
-mode: server
-http_addr: ":8080"
-db_path: "/opt/warpgate/warpgate.db"
-
-tailscale:
-  enabled: true
-  hostname: "warpgate"
-  state_dir: "/var/lib/warpgate/tsnet"
-  tags: "tag:warpgate"
-  oauth_client_id: "${TAILSCALE_OAUTH_CLIENT_ID}"
-  oauth_client_secret: "${TAILSCALE_OAUTH_CLIENT_SECRET}"
+```text
+warpgate ui \
+  --addr 127.0.0.1:0 \
+  --db-path ~/.config/warpgate/warpgate.db \
+  --github-client-id <client-id>
 ```
-
-Viper should support config file, environment variable, and flag overrides in the normal Viper style. The initial config file path and env prefix should be chosen during implementation, but the boot contract should stay small.
 
 Persisted UI-configured settings include:
 
-- GitHub owner, repo, branch, and token env var name.
+- GitHub owner, repo, branch, and optional repository subpath.
 - Deploy SSH mode, SSH user, and key path if needed.
-- Poll intervals and enablement.
 - Attached repository records.
-- Any non-secret daemon preferences.
+- Any non-secret UI preferences.
 
-Secrets should be injected through environment variables or SecretSauce and referenced by env var name. They should not be persisted in Turso.
+GitHub tokens should not be persisted in Turso.
 
-## Identity and Authorization
+## Identity and GitHub Authorization
 
-The web UI must not trust request headers for identity.
+The local UI does not use GitHub to protect localhost. GitHub App authorization grants Warpgate access to GitHub APIs. When no GitHub session exists, the navigation identity is `unknown` and repository operations that need GitHub fail with a connect-GitHub error.
 
 Identity model:
 
@@ -207,18 +193,18 @@ type User struct {
 
 Authorization:
 
-- Local development mode uses `StaticIdentifier`.
-- Tailscale mode uses `WhoIs` on the request source address.
-- Requests without a user are rejected.
-- Requests without the admin capability are rejected.
+- Local UI mode accepts loopback browser requests.
+- GitHub connected state becomes the actor for commits and audits.
+- Unknown GitHub state is allowed for read-only local UI screens.
 
-Proposed capability:
+GitHub App authorization:
 
-```text
-pangobit.com/cap/warpgate-admin
-```
-
-Human operators need that capability in the tailnet policy. Tagged machine identities without a user profile should not be accepted for browser admin access.
+- Use GitHub App device flow.
+- Use a GitHub App client ID so permissions are app-scoped and repo-scoped.
+- Require the app to be installed for the configured owner/repository.
+- Require repository contents read access before Warpgate can attach or sync a repository.
+- Avoid PATs and token environment variables for local UI flows.
+- Start with in-memory access tokens; add OS keychain-backed refresh token storage in a later slice.
 
 ## Persistence
 
@@ -268,11 +254,11 @@ Required operations:
 
 - Get branch head SHA.
 - Read a file at a ref.
-- List app config files under `apps/*/app.yml`.
+- List app config files under `apps/*/app.yml` relative to the configured repository subpath.
 - Write one file with optimistic concurrency.
 - Create a commit on the configured branch.
 
-The primary onboarding path should support an existing bootstrapped infra repo. The daemon is configured with owner, repo, and branch, then validates that the repo already contains a Warpgate layout:
+The primary onboarding path should support an existing bootstrapped infra repo. The local UI is configured with owner, repo, branch, and optional subpath, then validates that the selected repo root already contains a Warpgate layout:
 
 - `cluster.yml`
 - `apps/`
@@ -284,13 +270,13 @@ If validation succeeds, Warpgate imports the repo state into Turso as observed d
 The UI release initiation flow should be commit-first:
 
 1. User tweaks deploy data in the UI, such as service image tags, digests, environment values, routing data, targets, or strategy.
-2. Server loads the current `apps/<name>/app.yml`.
-3. Server applies the requested deploy-data changes to the YAML structure.
-4. Server validates the resulting YAML as a Warpgate app config.
-5. Server checks the latest known blob SHA or commit SHA.
-6. Server commits the modified `apps/<name>/app.yml` to GitHub.
-7. Server syncs the resulting commit into Turso.
-8. Server creates a release record from that committed config.
+2. Warpgate loads the current `apps/<name>/app.yml`.
+3. Warpgate applies the requested deploy-data changes to the YAML structure.
+4. Warpgate validates the resulting YAML as a Warpgate app config.
+5. Warpgate checks the latest known blob SHA or commit SHA.
+6. Warpgate commits the modified `apps/<name>/app.yml` to GitHub.
+7. Warpgate syncs the resulting commit into Turso.
+8. Warpgate creates a release record from that committed config.
 9. User can deploy the release.
 
 Commit messages should be deterministic and reviewable:
@@ -301,23 +287,23 @@ warpgate: release <app> <service>=<tag-or-digest>
 
 If the GitHub commit fails because the branch moved, the UI should show a conflict and require a refresh before retrying.
 
-## Config Synchronization
+## Config Refresh
 
-The config poller watches the configured GitHub repository branch.
+The config refresh action checks the configured GitHub repository branch.
 
 Behavior:
 
-- Poll branch head SHA.
+- Read branch head SHA.
 - If unchanged, record `last_checked_at`.
-- If changed, read `cluster.yml` and `apps/*/app.yml`.
+- If changed, read `cluster.yml` and `apps/*/app.yml` under the configured repository subpath.
 - Validate discovered config.
 - Upsert app rows with the new commit SHA and YAML.
 - Record an audit or sync event.
 - Preserve historical releases and deployments.
 
-The poller should not auto-deploy config changes in the first slice. It should surface that a config change exists and whether a release can be created.
+Config refresh should not auto-deploy config changes in the first slice. It should surface that a config change exists and whether a release can be created.
 
-The UI must also expose a manual "check now" or "update now" action for config synchronization. That action should run the same use case as the scheduled poller and return fresh status to the UI.
+The UI must expose a manual "check now" or "update now" action for config synchronization. That action should run the config sync use case and return fresh status to the UI.
 
 ## Image Watching
 
@@ -338,7 +324,7 @@ Warpgate does not touch image source repositories. Those repositories are manage
 
 Image changes should not deploy automatically in the first slice.
 
-The UI must expose a manual "check now" action for image polling. That action should refresh registry metadata for configured watches and update the same persisted state that the scheduled image poller updates.
+The UI must expose a manual "check now" action for image metadata. That action should refresh registry metadata for configured watches and update persisted image watch state.
 
 ## Release Lifecycle
 
@@ -357,7 +343,7 @@ Invariants:
 - Deployments must reference a release row.
 - Failed deployments remain visible and cannot overwrite prior successful history.
 
-The daemon may continue storing file-backed release manifests if needed to reuse `pkg/deploy` initially, but Turso is the source for the web UI's operational history.
+Warpgate may continue storing file-backed release manifests if needed to reuse `pkg/deploy` initially, but Turso is the source for the web UI's operational history.
 
 ## Deployment Execution
 
@@ -408,7 +394,6 @@ Primary screens:
   - "check now" action for GitHub/config sync
   - app count
   - latest deployment status
-  - poller health
 - Apps
   - app list
   - target nodes
@@ -432,15 +417,14 @@ Primary screens:
   - deploy action
   - deploy status
 - Settings
+  - GitHub account connect/disconnect
   - GitHub repo display
-  - poll intervals
-  - Tailscale mode display
 
 Handlers should only bind requests, call use-case methods, and render templates. Business rules belong in `warpd/usecase` and pure domain packages under `warpd/internal`.
 
 ## API Surface
 
-The UI can start with HTML routes only. JSON endpoints are optional unless needed by HTMX or pollers.
+The UI can start with HTML routes only. JSON endpoints are optional unless needed by HTMX.
 
 Proposed routes:
 
@@ -456,10 +440,13 @@ POST /releases/{releaseID}/deploy
 POST /sync/config/check-now
 POST /sync/images/check-now
 GET  /settings
+POST /auth/github/start
+POST /auth/github/complete
+POST /auth/github/disconnect
 GET  /assets/*
 ```
 
-All routes except health checks should require identity middleware.
+Routes use local identity middleware to attach the current GitHub actor or `unknown`.
 
 Optional unauthenticated health endpoint:
 
@@ -469,37 +456,31 @@ GET /healthz
 
 ## Configuration and Secrets
 
-The daemon boot config needs:
+The local UI command config needs:
 
 - Turso DB path.
-- Tailscale OAuth client ID and secret.
-- Tailscale state directory.
+- GitHub App client ID.
+- Local listen address.
 
 The UI-configured persisted settings include:
 
-- GitHub owner, repo, branch, and token env var name.
+- GitHub owner, repo, branch, and optional repository subpath.
 - Deploy SSH mode and user.
-- Polling intervals and enablement.
 
-Secrets should come from environment variables or SecretSauce injection. They should not be stored in Turso.
-
-Turso stores the name of token env vars or redacted configuration only.
+GitHub App user access tokens should not be stored in Turso. The first slice keeps the access token in memory and requires re-authentication after restarting the UI process.
 
 ## Operational Model
 
-On a target node, `warpd` should run as a systemd service or compose service.
-
-Persistent paths:
+The user starts Warpgate locally:
 
 ```text
-/opt/warpgate/warpgate.db
-/var/lib/warpgate/tsnet/
-/opt/warpgate/apps/
+warpgate ui
 ```
 
-The daemon needs network access to:
+The UI binds to loopback and stores local state under the user config directory by default.
 
-- Tailscale control plane during tsnet startup.
+The local UI needs network access to:
+
 - GitHub API.
 - container registries.
 - target nodes over SSH or Tailscale SSH.
@@ -510,14 +491,13 @@ Initial observability:
 
 - structured process logs
 - persisted audit events
-- persisted poller errors
+- persisted refresh errors
 - deployment status records
 - `/healthz`
 
 Later observability:
 
 - live deployment log streaming
-- per-poller metrics
 - webhook event history
 
 ## Failure Handling
@@ -533,11 +513,11 @@ Invalid YAML:
 - Reject before commit.
 - Show validation errors in the edit screen.
 
-Poll failures:
+Refresh failures:
 
 - Preserve previous good state.
 - Record `last_error`.
-- Retry on the next interval.
+- Retry when the user checks again.
 
 Deployment failures:
 
@@ -545,15 +525,16 @@ Deployment failures:
 - Keep release available for retry.
 - Do not delete or modify prior successful release records.
 
-Turso migration failures:
+Turso open or migration failures:
 
-- Fail daemon startup.
+- Fail UI startup.
 - Log the migration error.
 
-Tailscale identity failures:
+GitHub authorization failures:
 
-- Reject the request.
-- Do not fall back to header identity in production mode.
+- Keep the local UI usable.
+- Show `unknown` identity.
+- Block GitHub API operations until the user connects GitHub.
 
 ## Verification Plan
 
@@ -563,7 +544,6 @@ Required checks for implementation PRs:
 go fmt ./...
 go test ./...
 go vet ./...
-go tool sqlc generate
 go tool templ generate
 ```
 
@@ -571,9 +551,9 @@ The exact generator commands may change after tools are added to `go.mod`.
 
 Test coverage should include:
 
-- Turso migrations and store methods.
-- Identity middleware.
-- Tailscale identity mapping with fake WhoIs data.
+- Turso store methods.
+- Local identity middleware.
+- GitHub App device flow with fake GitHub endpoints.
 - GitHub connector request construction.
 - Config sync with fake GitHub.
 - Release commit flow with fake GitHub.
@@ -582,7 +562,7 @@ Test coverage should include:
 
 ## Review Questions
 
-- Is `pangobit.com/cap/warpgate-admin` the right Tailscale capability name?
+- Should Warpgate use a Pangobit-owned GitHub App client ID by default or require users to provide one?
 - Should the UI commit directly to `main`, or create a branch/PR for release YAML edits?
 - Should initial repo attach fail hard on invalid app configs, or import valid apps while surfacing invalid ones?
 - Should image updates create release drafts automatically, or only show an update indicator?
