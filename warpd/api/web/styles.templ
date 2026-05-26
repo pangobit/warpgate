@@ -256,7 +256,17 @@ css tableWrap() {
 
 css tableView() {
 	width: 100%;
-	border-collapse: collapse;
+	border-collapse: separate;
+	border-spacing: 0;
+	color: var(--text-muted);
+}
+
+css tableRow() {
+	background: var(--bg-surface);
+}
+
+css tableRowAlt() {
+	background: var(--bg-subtle);
 }
 
 css tableCell() {
@@ -276,6 +286,15 @@ css tableHead() {
 	font-size: 0.72rem;
 }
 
+css tableLink() {
+	display: inline-flex;
+	align-items: center;
+	color: var(--text-main);
+	text-decoration: none;
+	font-weight: 900;
+	border-bottom: 1px solid var(--border-strong);
+}
+
 css codeText() {
 	font-family: var(--font-mono);
 	color: var(--text-mono);
@@ -291,6 +310,11 @@ css preBlock() {
 	border: 1px solid var(--border-subtle);
 	border-radius: var(--radius-2);
 	padding: var(--space-3);
+}
+
+css yamlBox() {
+	height: clamp(18rem, calc(100vh - 16rem), 46rem);
+	max-height: max(18rem, calc(100vh - 16rem));
 }
 
 css errorBox() {

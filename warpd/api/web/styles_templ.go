@@ -451,8 +451,30 @@ func tableWrap() templ.CSSClass {
 func tableView() templ.CSSClass {
 	templ_7745c5c3_CSSBuilder := templruntime.GetBuilder()
 	templ_7745c5c3_CSSBuilder.WriteString(`width:100%;`)
-	templ_7745c5c3_CSSBuilder.WriteString(`border-collapse:collapse;`)
+	templ_7745c5c3_CSSBuilder.WriteString(`border-collapse:separate;`)
+	templ_7745c5c3_CSSBuilder.WriteString(`border-spacing:0;`)
+	templ_7745c5c3_CSSBuilder.WriteString(`color:var(--text-muted);`)
 	templ_7745c5c3_CSSID := templ.CSSID(`tableView`, templ_7745c5c3_CSSBuilder.String())
+	return templ.ComponentCSSClass{
+		ID:    templ_7745c5c3_CSSID,
+		Class: templ.SafeCSS(`.` + templ_7745c5c3_CSSID + `{` + templ_7745c5c3_CSSBuilder.String() + `}`),
+	}
+}
+
+func tableRow() templ.CSSClass {
+	templ_7745c5c3_CSSBuilder := templruntime.GetBuilder()
+	templ_7745c5c3_CSSBuilder.WriteString(`background:var(--bg-surface);`)
+	templ_7745c5c3_CSSID := templ.CSSID(`tableRow`, templ_7745c5c3_CSSBuilder.String())
+	return templ.ComponentCSSClass{
+		ID:    templ_7745c5c3_CSSID,
+		Class: templ.SafeCSS(`.` + templ_7745c5c3_CSSID + `{` + templ_7745c5c3_CSSBuilder.String() + `}`),
+	}
+}
+
+func tableRowAlt() templ.CSSClass {
+	templ_7745c5c3_CSSBuilder := templruntime.GetBuilder()
+	templ_7745c5c3_CSSBuilder.WriteString(`background:var(--bg-subtle);`)
+	templ_7745c5c3_CSSID := templ.CSSID(`tableRowAlt`, templ_7745c5c3_CSSBuilder.String())
 	return templ.ComponentCSSClass{
 		ID:    templ_7745c5c3_CSSID,
 		Class: templ.SafeCSS(`.` + templ_7745c5c3_CSSID + `{` + templ_7745c5c3_CSSBuilder.String() + `}`),
@@ -488,6 +510,21 @@ func tableHead() templ.CSSClass {
 	}
 }
 
+func tableLink() templ.CSSClass {
+	templ_7745c5c3_CSSBuilder := templruntime.GetBuilder()
+	templ_7745c5c3_CSSBuilder.WriteString(`display:inline-flex;`)
+	templ_7745c5c3_CSSBuilder.WriteString(`align-items:center;`)
+	templ_7745c5c3_CSSBuilder.WriteString(`color:var(--text-main);`)
+	templ_7745c5c3_CSSBuilder.WriteString(`text-decoration:none;`)
+	templ_7745c5c3_CSSBuilder.WriteString(`font-weight:900;`)
+	templ_7745c5c3_CSSBuilder.WriteString(`border-bottom:1px solid var(--border-strong);`)
+	templ_7745c5c3_CSSID := templ.CSSID(`tableLink`, templ_7745c5c3_CSSBuilder.String())
+	return templ.ComponentCSSClass{
+		ID:    templ_7745c5c3_CSSID,
+		Class: templ.SafeCSS(`.` + templ_7745c5c3_CSSID + `{` + templ_7745c5c3_CSSBuilder.String() + `}`),
+	}
+}
+
 func codeText() templ.CSSClass {
 	templ_7745c5c3_CSSBuilder := templruntime.GetBuilder()
 	templ_7745c5c3_CSSBuilder.WriteString(`font-family:var(--font-mono);`)
@@ -511,6 +548,17 @@ func preBlock() templ.CSSClass {
 	templ_7745c5c3_CSSBuilder.WriteString(`border-radius:var(--radius-2);`)
 	templ_7745c5c3_CSSBuilder.WriteString(`padding:var(--space-3);`)
 	templ_7745c5c3_CSSID := templ.CSSID(`preBlock`, templ_7745c5c3_CSSBuilder.String())
+	return templ.ComponentCSSClass{
+		ID:    templ_7745c5c3_CSSID,
+		Class: templ.SafeCSS(`.` + templ_7745c5c3_CSSID + `{` + templ_7745c5c3_CSSBuilder.String() + `}`),
+	}
+}
+
+func yamlBox() templ.CSSClass {
+	templ_7745c5c3_CSSBuilder := templruntime.GetBuilder()
+	templ_7745c5c3_CSSBuilder.WriteString(`height:clamp(18rem, calc(100vh - 16rem), 46rem);`)
+	templ_7745c5c3_CSSBuilder.WriteString(`max-height:max(18rem, calc(100vh - 16rem));`)
+	templ_7745c5c3_CSSID := templ.CSSID(`yamlBox`, templ_7745c5c3_CSSBuilder.String())
 	return templ.ComponentCSSClass{
 		ID:    templ_7745c5c3_CSSID,
 		Class: templ.SafeCSS(`.` + templ_7745c5c3_CSSID + `{` + templ_7745c5c3_CSSBuilder.String() + `}`),

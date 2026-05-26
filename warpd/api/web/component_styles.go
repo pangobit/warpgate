@@ -37,10 +37,15 @@ func ComponentStyles() []templ.CSSClass {
 		formActions(),
 		tableWrap(),
 		tableView(),
+		tableRow(),
+		tableRowAlt(),
 		tableCell(),
 		tableHead(),
+		tableLink(),
 		codeText(),
 		preBlock(),
+		yamlBox(),
+		yamlDocument(),
 		errorBox(),
 	}
 }

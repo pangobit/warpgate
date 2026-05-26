@@ -129,8 +129,8 @@ templ Apps(data AppsPage) {
 				<table class={ tableView() }>
 					<thead><tr><th class={ tableHead() } scope="col">App</th><th class={ tableHead() } scope="col">Config commit</th><th class={ tableHead() } scope="col">Path</th></tr></thead>
 					<tbody>
-						for _, app := range data.Apps {
-							<tr><td class={ tableCell() }><a href={ templ.URL("/apps/" + app.Name) }>{ app.Name }</a></td><td class={ tableCell() }><code class={ codeText() }>{ app.ConfigCommit }</code></td><td class={ tableCell() }><code class={ codeText() }>{ app.Path }</code></td></tr>
+						for index, app := range data.Apps {
+							<tr class={ tableRowStyle(index) }><td class={ tableCell() }><a class={ tableLink() } href={ templ.URL("/apps/" + app.Name) }>{ app.Name }</a></td><td class={ tableCell() }><code class={ codeText() }>{ app.ConfigCommit }</code></td><td class={ tableCell() }><code class={ codeText() }>{ app.Path }</code></td></tr>
 						}
 					</tbody>
 				</table>
@@ -148,7 +148,7 @@ templ AppDetail(data AppDetailPage) {
 		<div class={ detailGrid(), "responsive-grid" }>
 			<section class={ panel() }>
 				<div class={ sectionHeading() }><div><p class={ eyebrow() }>Config</p><h2 class={ panelTitle() }>Current YAML</h2></div><a class={ primaryButton() } href={ templ.URL("/apps/" + data.Detail.App.Name + "/edit") }>Edit deploy data</a></div>
-				<pre class={ preBlock() }>{ data.Detail.App.RawYAML }</pre>
+				<div class={ preBlock(), yamlBox(), yamlDocument() }>@templ.Raw(renderYAMLHTML(data.Detail.App.RawYAML))</div>
 			</section>
 			<aside class={ panel() }>
 				<p class={ eyebrow() }>Config commit</p>
@@ -163,9 +163,9 @@ templ AppDetail(data AppDetailPage) {
 				<table class={ tableView() }>
 					<thead><tr><th class={ tableHead() } scope="col">Release</th><th class={ tableHead() } scope="col">Status</th><th class={ tableHead() } scope="col">Commit</th><th class={ tableHead() } scope="col">Action</th></tr></thead>
 					<tbody>
-						for _, item := range data.Detail.Releases {
-							<tr>
-								<td class={ tableCell() }><a href={ templ.URL("/releases/" + item.ID) }><code class={ codeText() }>{ item.ID }</code></a></td>
+						for index, item := range data.Detail.Releases {
+							<tr class={ tableRowStyle(index) }>
+								<td class={ tableCell() }><a class={ tableLink() } href={ templ.URL("/releases/" + item.ID) }><code class={ codeText() }>{ item.ID }</code></a></td>
 								<td class={ tableCell() }><span class={ statusBase(), statusStyle(item.Status) }>{ string(item.Status) }</span></td>
 								<td class={ tableCell() }><code class={ codeText() }>{ item.ConfigCommit }</code></td>
 								<td class={ tableCell() }><form method="post" action={ templ.URL("/releases/" + item.ID + "/deploy") }><button class={ primaryButton() } type="submit">Deploy release</button></form></td>
@@ -181,8 +181,8 @@ templ AppDetail(data AppDetailPage) {
 				<table class={ tableView() }>
 					<thead><tr><th class={ tableHead() } scope="col">Deployment</th><th class={ tableHead() } scope="col">Status</th><th class={ tableHead() } scope="col">Started</th><th class={ tableHead() } scope="col">Error</th></tr></thead>
 					<tbody>
-						for _, item := range data.Detail.Deployments {
-							<tr>
+						for index, item := range data.Detail.Deployments {
+							<tr class={ tableRowStyle(index) }>
 								<td class={ tableCell() }><code class={ codeText() }>{ item.ID }</code></td>
 								<td class={ tableCell() }><span class={ statusBase(), statusStyle(item.Status) }>{ string(item.Status) }</span></td>
 								<td class={ tableCell() }>{ item.StartedAt.String() }</td>

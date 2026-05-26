@@ -7,8 +7,12 @@ require (
 	charm.land/bubbletea/v2 v2.0.2
 	charm.land/lipgloss/v2 v2.0.2
 	github.com/a-h/templ v0.3.1020
+	github.com/alecthomas/chroma/v2 v2.2.0
+	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
+	github.com/yuin/goldmark v1.8.2
+	github.com/yuin/goldmark-highlighting/v2 v2.0.0-20230729083705-37449abec8cc
 	golang.org/x/crypto v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
 	turso.tech/database/tursogo v0.6.1
@@ -17,6 +21,7 @@ require (
 require (
 	github.com/a-h/parse v0.0.0-20250122154542-74294addb73e // indirect
 	github.com/andybalholm/brotli v1.1.0 // indirect
+	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.2 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260205113103-524a6607adb8 // indirect
@@ -28,10 +33,12 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/dlclark/regexp2 v1.7.0 // indirect
 	github.com/ebitengine/purego v0.9.1 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/gorilla/css v1.0.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect

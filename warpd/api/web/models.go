@@ -135,6 +135,13 @@ func githubAuthStatusStyle(status identity.GitHubAuthStatus) templ.CSSClass {
 	return statusWarning()
 }
 
+func tableRowStyle(index int) templ.CSSClass {
+	if index%2 == 1 {
+		return tableRowAlt()
+	}
+	return tableRow()
+}
+
 func statusClass(status string) string {
 	switch status {
 	case "deployed", "succeeded", "ready", "healthy":
