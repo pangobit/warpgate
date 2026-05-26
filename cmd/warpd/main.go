@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/pangobit/warpgate/pkg/daemon"
+	"github.com/pangobit/warpgate/warpd"
 )
 
 func main() {
-	if err := daemon.Run(); err != nil {
+	if err := warpd.Main(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
