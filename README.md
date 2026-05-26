@@ -1,6 +1,6 @@
 # Warpgate
 
-Warpgate is a Go CLI for deploying Docker Compose applications to Linux hosts over SSH. It is aimed at small self-managed clusters where you want a repo with `cluster.yml`, per-app `app.yml`, and user-written `compose.yml` files instead of a larger orchestration stack.
+Warpgate is a Go deployment tool for Docker Compose applications on Linux hosts over SSH. It is aimed at small self-managed clusters where you want a repo with `cluster.yml`, per-app `app.yml`, and user-written `compose.yml` files instead of a larger orchestration stack. The CLI still exists, but the Warpgate 2 workflow centers on a local browser UI for day-to-day release, deploy, status, and log operations.
 
 It currently provides:
 
@@ -11,6 +11,7 @@ It currently provides:
 - Blue/green or recreate deployment strategies
 - Rollback, status, logs, app removal, deploy lock management, and node cleanup
 - Shadow deployments for pre-release testing on the internal network
+- A local browser UI with GitHub App device authorization, repository sync, release editing, deploy actions, status, and logs
 
 ## Requirements
 
@@ -25,6 +26,8 @@ Local machine:
 
 - Go 1.24+
 - SSH client
+- A browser for the local UI
+- A GitHub App with device flow enabled if you want the UI to read or write GitHub-backed config repositories
 
 Supported bootstrap targets in the code today include Ubuntu, Debian, CentOS, Rocky Linux, AlmaLinux, Fedora, and Amazon Linux.
 
@@ -111,6 +114,14 @@ Roll back if needed:
 ```bash
 warpgate rollback example-app --tailscale-ssh
 ```
+
+Or start the local UI:
+
+```bash
+warpgate ui --user root
+```
+
+The UI opens on loopback, uses Tailscale SSH for runtime operations by default, and lets you attach a GitHub-backed config repository from Settings.
 
 ## Repo Layout
 
@@ -259,6 +270,8 @@ release:
       image: ghcr.io/acme/worker
       image_tag: v2.0.0
 ```
+
+When the local UI is connected to GitHub, source compose files are read through the GitHub API using the authorized GitHub App user token. That allows private source repositories when the GitHub App installation has access to the source repo.
 
 Current validation rules to keep in mind:
 
@@ -440,12 +453,61 @@ services:
 
 Registry credentials can also be read from SecretSauce if they were stored during bootstrap.
 
+## Local UI
+
+Start the local browser UI:
+
+```bash
+warpgate ui
+```
+
+Useful flags:
+
+```bash
+warpgate ui --user root
+warpgate ui --addr 127.0.0.1:8080
+warpgate ui --open=false
+warpgate ui --db-path ./warpgate.db
+warpgate ui --github-client-id Iv1.example
+```
+
+Defaults:
+
+- The server binds to a loopback address and opens the browser automatically.
+- The local UI database is stored under the user's config directory unless `--db-path` is set.
+- Runtime deploy, status, and log operations use Tailscale SSH by default.
+- The GitHub App client ID can be passed with `--github-client-id`, read from `WARPGATE_GITHUB_CLIENT_ID`, or entered in Settings when connecting GitHub.
+
+Initial setup:
+
+1. Create a GitHub App, enable device flow, and install it for the config repository and any private source compose repositories.
+2. Give the app repository contents access. Warpgate reads config, writes release metadata, and commits updated `app.yml` release inputs.
+3. Run `warpgate ui`.
+4. In Settings, enter the repository owner, name, branch, and optional path such as `prod`.
+5. In Settings, enter the GitHub App client ID and complete the device authorization flow.
+
+The GitHub App client ID is not a secret. When entered through the UI, Warpgate stores it in an `HttpOnly`, `SameSite=Strict` browser session cookie so the next local request can reuse it without another CLI flag. GitHub user authorization tokens are stored in the local UI database.
+
+UI pages:
+
+- Dashboard shows repository sync, image sync, recent releases, and deployments.
+- Apps lists discovered apps and opens per-app release details.
+- App edit screens can update every release service in an `app.yml` and commit a release.
+- Release pages deploy a selected release and disable the deploy button while the request is in flight.
+- Status shows cluster nodes and runtime app/container state.
+- Logs fetch recent container logs from a selected node and display structured JSON logs in readable rows.
+- Settings manages the config repository and GitHub App authorization.
+
 ## Commands
 
 Common commands:
 
 ```bash
 warpgate init myapp
+
+warpgate ui
+warpgate ui --user root
+warpgate ui --addr 127.0.0.1:8080 --open=false
 
 warpgate bootstrap node-1 --tailscale-ssh
 warpgate bootstrap --host 203.0.113.10 --tailscale-ssh
@@ -489,7 +551,7 @@ This README is intentionally limited to what the current code does.
 
 - App discovery is local and file-based. Warpgate scans `apps/*/app.yml`.
 - The deploy override currently injects image tags and internal hostname `extra_hosts`.
-- Remote compose sources currently support GitHub raw fetches.
+- Remote compose sources are read from GitHub through the authorized GitHub App user token in the local UI path.
 - The local browser UI is started with `warpgate ui`; Warpgate does not ship a separate daemon binary.
 
 If you are evaluating behavior that depends on generated Traefik labels or more advanced orchestration, verify it against the current code before relying on it in production.
