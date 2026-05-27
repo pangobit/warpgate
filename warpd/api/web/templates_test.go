@@ -4,10 +4,6 @@ import (
 	"bytes"
 	"strings"
 	"testing"
-
-	"github.com/pangobit/warpgate/warpd/internal/identity"
-	"github.com/pangobit/warpgate/warpd/internal/release"
-	"github.com/pangobit/warpgate/warpd/usecase"
 )
 
 func TestDashboardRendersIdentityInNavigation(t *testing.T) {
@@ -37,7 +33,7 @@ func TestSettingsRendersGitHubConnectionWithoutTokenEnvVar(t *testing.T) {
 	if err := NewRenderer().Render(&body, Settings(SettingsPage{
 		Title:         "Settings",
 		IdentityLabel: "unknown",
-		GitHubAuth: identity.GitHubAuthStatus{
+		GitHubAuth: GitHubAuthView{
 			Configured: true,
 		},
 	})); err != nil {
@@ -66,7 +62,7 @@ func TestLogsRenderStructuredRows(t *testing.T) {
 	if err := NewRenderer().Render(&body, Logs(LogsPage{
 		Title:     "Logs",
 		HasResult: true,
-		Result: usecase.LogsResult{
+		Result: LogsResultView{
 			Output: `[api-1] {"level":"info","message":"ready"}` + "\n[worker-1] started\n",
 		},
 	})); err != nil {
@@ -88,7 +84,7 @@ func TestAppEditRendersEveryReleaseService(t *testing.T) {
 	var body bytes.Buffer
 	if err := NewRenderer().Render(&body, AppEdit(AppEditPage{
 		Title: "Edit api",
-		Services: []usecase.AppReleaseService{
+		Services: []AppReleaseServiceView{
 			{Name: "api", Image: "ghcr.io/acme/api", ImageTag: "v2.0.0"},
 			{Name: "worker", Image: "ghcr.io/acme/worker", ImageDigest: "sha256:worker"},
 		},
@@ -111,7 +107,7 @@ func TestReleaseDetailRendersDeployPendingState(t *testing.T) {
 	var body bytes.Buffer
 	if err := NewRenderer().Render(&body, ReleaseDetail(ReleasePage{
 		Title:   "Release rel-1",
-		Release: release.Record{ID: "rel-1"},
+		Release: ReleaseView{ID: "rel-1"},
 	})); err != nil {
 		t.Fatalf("render release detail: %v", err)
 	}

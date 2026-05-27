@@ -96,6 +96,19 @@ func (r *router) requireAdmin(next http.Handler) http.Handler {
 	})
 }
 
+func (r *router) currentUser(w http.ResponseWriter, req *http.Request) (identity.User, bool) {
+	user, ok := identity.UserFrom(req.Context())
+	if !ok {
+		http.Error(w, "Unauthenticated", http.StatusUnauthorized)
+		return identity.User{}, false
+	}
+	if err := identity.RequireAdmin(user); err != nil {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return identity.User{}, false
+	}
+	return user, true
+}
+
 func (r *router) health(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte("ok\n")); err != nil {
@@ -105,7 +118,7 @@ func (r *router) health(w http.ResponseWriter, _ *http.Request) {
 
 func (r *router) dashboard(w http.ResponseWriter, req *http.Request) {
 	dashboard, err := r.service.Dashboard(req.Context())
-	page := webapi.DashboardPage{Title: "Warpgate", IdentityLabel: identityLabel(req), Dashboard: dashboard}
+	page := webapi.DashboardPage{Title: "Warpgate", IdentityLabel: identityLabel(req), Dashboard: dashboardView(dashboard)}
 	if err != nil {
 		page.Error = err.Error()
 	}
@@ -114,7 +127,7 @@ func (r *router) dashboard(w http.ResponseWriter, req *http.Request) {
 
 func (r *router) apps(w http.ResponseWriter, req *http.Request) {
 	apps, err := r.service.Apps(req.Context())
-	page := webapi.AppsPage{Title: "Apps", IdentityLabel: identityLabel(req), Apps: apps}
+	page := webapi.AppsPage{Title: "Apps", IdentityLabel: identityLabel(req), Apps: appViews(apps)}
 	if err != nil {
 		page.Error = err.Error()
 	}
@@ -122,9 +135,12 @@ func (r *router) apps(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *router) runtimeStatus(w http.ResponseWriter, req *http.Request) {
-	user, _ := identity.UserFrom(req.Context())
+	user, ok := r.currentUser(w, req)
+	if !ok {
+		return
+	}
 	status, err := r.service.RuntimeStatus(req.Context(), user)
-	page := webapi.StatusPage{Title: "Status", IdentityLabel: identityLabel(req), Status: status}
+	page := webapi.StatusPage{Title: "Status", IdentityLabel: identityLabel(req), Status: runtimeStatusView(status)}
 	if err != nil {
 		page.Error = err.Error()
 	}
@@ -132,16 +148,19 @@ func (r *router) runtimeStatus(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *router) logs(w http.ResponseWriter, req *http.Request) {
-	user, _ := identity.UserFrom(req.Context())
+	user, ok := r.currentUser(w, req)
+	if !ok {
+		return
+	}
 	apps, appsErr := r.service.Apps(req.Context())
 	nodes, nodesErr := r.service.ConfigNodes(req.Context(), user)
 	input, requested, inputErr := logsInputFromRequest(req)
 	page := webapi.LogsPage{
 		Title:         "Logs",
 		IdentityLabel: identityLabel(req),
-		Request:       input,
-		Apps:          apps,
-		Nodes:         nodes,
+		Request:       logsRequestView(input),
+		Apps:          appViews(apps),
+		Nodes:         configNodeViews(nodes),
 	}
 	if appsErr != nil {
 		page.Error = appsErr.Error()
@@ -160,7 +179,7 @@ func (r *router) logs(w http.ResponseWriter, req *http.Request) {
 	}
 	if requested {
 		result, err := r.service.Logs(req.Context(), user, input)
-		page.Result = result
+		page.Result = logsResultView(result)
 		page.HasResult = err == nil
 		if err != nil {
 			page.Error = err.Error()
@@ -174,7 +193,7 @@ func (r *router) logs(w http.ResponseWriter, req *http.Request) {
 func (r *router) appDetail(w http.ResponseWriter, req *http.Request) {
 	appName := strings.TrimPrefix(req.URL.Path, "/apps/")
 	detail, err := r.service.AppDetail(req.Context(), appName)
-	page := webapi.AppDetailPage{Title: appName, IdentityLabel: identityLabel(req), Detail: detail}
+	page := webapi.AppDetailPage{Title: appName, IdentityLabel: identityLabel(req), Detail: appDetailView(detail)}
 	if err != nil {
 		page.Error = err.Error()
 	}
@@ -184,7 +203,7 @@ func (r *router) appDetail(w http.ResponseWriter, req *http.Request) {
 func (r *router) appEdit(w http.ResponseWriter, req *http.Request) {
 	appName := strings.TrimSuffix(strings.TrimPrefix(req.URL.Path, "/apps/"), "/edit")
 	detail, err := r.service.AppDetail(req.Context(), appName)
-	page := webapi.AppEditPage{Title: "Edit " + appName, IdentityLabel: identityLabel(req), App: detail.App, Services: detail.Services}
+	page := webapi.AppEditPage{Title: "Edit " + appName, IdentityLabel: identityLabel(req), App: appView(detail.App), Services: appReleaseServiceViews(detail.Services)}
 	if err != nil {
 		page.Error = err.Error()
 	}
@@ -192,7 +211,10 @@ func (r *router) appEdit(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *router) commitRelease(w http.ResponseWriter, req *http.Request) {
-	user, _ := identity.UserFrom(req.Context())
+	user, ok := r.currentUser(w, req)
+	if !ok {
+		return
+	}
 	appName := strings.TrimSuffix(strings.TrimPrefix(req.URL.Path, "/apps/"), "/commit")
 	if err := req.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -234,7 +256,7 @@ func formValueAt(values map[string][]string, key string, index int) string {
 func (r *router) releaseDetail(w http.ResponseWriter, req *http.Request) {
 	releaseID := strings.TrimPrefix(req.URL.Path, "/releases/")
 	record, ok, err := r.service.Release(req.Context(), releaseID)
-	page := webapi.ReleasePage{Title: "Release " + releaseID, IdentityLabel: identityLabel(req), Release: record}
+	page := webapi.ReleasePage{Title: "Release " + releaseID, IdentityLabel: identityLabel(req), Release: releaseView(record)}
 	if err != nil {
 		page.Error = err.Error()
 	} else if !ok {
@@ -245,11 +267,14 @@ func (r *router) releaseDetail(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *router) deployRelease(w http.ResponseWriter, req *http.Request) {
-	user, _ := identity.UserFrom(req.Context())
+	user, ok := r.currentUser(w, req)
+	if !ok {
+		return
+	}
 	releaseID := strings.TrimSuffix(strings.TrimPrefix(req.URL.Path, "/releases/"), "/deploy")
 	if _, err := r.service.DeployRelease(req.Context(), user, releaseID); err != nil {
 		record, _, releaseErr := r.service.Release(req.Context(), releaseID)
-		page := webapi.ReleasePage{Title: "Release " + releaseID, IdentityLabel: identityLabel(req), Release: record, Error: err.Error()}
+		page := webapi.ReleasePage{Title: "Release " + releaseID, IdentityLabel: identityLabel(req), Release: releaseView(record), Error: err.Error()}
 		if releaseErr != nil {
 			page.Error = errors.Join(err, releaseErr).Error()
 		}
@@ -260,7 +285,10 @@ func (r *router) deployRelease(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *router) syncConfig(w http.ResponseWriter, req *http.Request) {
-	user, _ := identity.UserFrom(req.Context())
+	user, ok := r.currentUser(w, req)
+	if !ok {
+		return
+	}
 	if err := r.service.SyncConfig(req.Context(), user); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -269,7 +297,10 @@ func (r *router) syncConfig(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *router) syncImages(w http.ResponseWriter, req *http.Request) {
-	user, _ := identity.UserFrom(req.Context())
+	user, ok := r.currentUser(w, req)
+	if !ok {
+		return
+	}
 	if err := r.service.CheckImages(req.Context(), user); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -287,7 +318,10 @@ func (r *router) settings(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *router) attachRepository(w http.ResponseWriter, req *http.Request) {
-	user, _ := identity.UserFrom(req.Context())
+	user, ok := r.currentUser(w, req)
+	if !ok {
+		return
+	}
 	if err := req.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -420,16 +454,7 @@ func validateGitHubClientID(clientID string) error {
 		return errors.New("GitHub App client ID is too long")
 	}
 	for _, char := range clientID {
-		if char >= 'a' && char <= 'z' {
-			continue
-		}
-		if char >= 'A' && char <= 'Z' {
-			continue
-		}
-		if char >= '0' && char <= '9' {
-			continue
-		}
-		if char == '.' || char == '_' || char == '-' {
+		if isGitHubClientIDChar(char) {
 			continue
 		}
 		return errors.New("GitHub App client ID contains invalid characters")
@@ -437,12 +462,25 @@ func validateGitHubClientID(clientID string) error {
 	return nil
 }
 
+func isGitHubClientIDChar(char rune) bool {
+	if char >= 'a' && char <= 'z' {
+		return true
+	}
+	if char >= 'A' && char <= 'Z' {
+		return true
+	}
+	if char >= '0' && char <= '9' {
+		return true
+	}
+	return char == '.' || char == '_' || char == '-'
+}
+
 func (r *router) settingsPage(req *http.Request, settings configrepo.RepositorySettings) webapi.SettingsPage {
 	return webapi.SettingsPage{
 		Title:         "Settings",
 		IdentityLabel: identityLabel(req),
-		Repository:    settings,
-		GitHubAuth:    r.githubAuthStatus(),
+		Repository:    repositoryView(settings),
+		GitHubAuth:    githubAuthView(r.githubAuthStatus()),
 	}
 }
 

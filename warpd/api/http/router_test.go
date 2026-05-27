@@ -206,6 +206,21 @@ func TestStartGitHubAuthStoresClientIDCookie(t *testing.T) {
 	}
 }
 
+func TestCurrentUserRejectsMissingContextUser(t *testing.T) {
+	router := &router{}
+	req := httptest.NewRequest(nethttp.MethodGet, "/status", nil)
+	resp := httptest.NewRecorder()
+
+	_, ok := router.currentUser(resp, req)
+
+	if ok {
+		t.Fatalf("currentUser() ok = true, want false")
+	}
+	if resp.Code != nethttp.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.Code, nethttp.StatusUnauthorized)
+	}
+}
+
 func TestSettingsAppliesGitHubClientIDCookie(t *testing.T) {
 	service := usecase.NewService(turso.NewMemoryStore(), failingGitHub{err: errors.New("unused")}, fakeRegistry{}, fakeDeployer{})
 	auth := &fakeGitHubAuth{}
