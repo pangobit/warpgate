@@ -10,6 +10,7 @@ import (
 // InternalRouteConfig represents a Traefik file-provider dynamic config for
 // routing internal service-to-service traffic across nodes.
 type InternalRouteConfig struct {
+	// HTTP holds Traefik HTTP routing config.
 	HTTP struct {
 		Routers  map[string]internalRouter  `yaml:"routers"`
 		Services map[string]internalService `yaml:"services"`

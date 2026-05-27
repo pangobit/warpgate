@@ -153,3 +153,21 @@ func TestParseReleaseServiceStatuses(t *testing.T) {
 		})
 	}
 }
+
+func TestNodeSSHHost(t *testing.T) {
+	node := &config.NodeConfig{
+		Host:      "10.0.0.1",
+		PrivateIP: "100.64.0.1",
+	}
+
+	if got := nodeSSHHost(node, true); got != "100.64.0.1" {
+		t.Fatalf("tailscale host = %q, want private IP", got)
+	}
+	if got := nodeSSHHost(node, false); got != "10.0.0.1" {
+		t.Fatalf("ssh host = %q, want host", got)
+	}
+	node.PrivateIP = ""
+	if got := nodeSSHHost(node, true); got != "10.0.0.1" {
+		t.Fatalf("tailscale fallback host = %q, want host", got)
+	}
+}

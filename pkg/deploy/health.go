@@ -110,7 +110,10 @@ func pollHealth(runner commandRunner, containerID string) (HealthStatus, error) 
 
 func getHealthLogs(runner commandRunner, containerID string) string {
 	cmd := fmt.Sprintf("docker inspect --format '{{range .State.Health.Log}}{{.Output}}{{end}}' %s 2>/dev/null", containerID)
-	stdout, _, _ := runner.RunCommand(cmd)
+	stdout, _, err := runner.RunCommand(cmd)
+	if err != nil {
+		return "(health check output unavailable)"
+	}
 	output := strings.TrimSpace(stdout)
 	if output == "" {
 		return "(no health check output)"

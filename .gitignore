@@ -1,6 +1,9 @@
 # Binaries (root only, not cmd/ directories)
 /warpgate
-/warpd
+
+# Local daemon state
+/warpgate.db
+/warpgate.db-*
 
 # Generated compose files
 generated/

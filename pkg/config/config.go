@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"regexp"
 	"strings"
@@ -363,6 +364,11 @@ func (c *ClusterConfig) Validate() error {
 		}
 		if node.Host == "" {
 			return fmt.Errorf("node %d: host is required", i)
+		}
+		if node.PrivateIP != "" {
+			if _, err := netip.ParseAddr(node.PrivateIP); err != nil {
+				return fmt.Errorf("node %s: private_ip must be an IP address: %s", node.ID, node.PrivateIP)
+			}
 		}
 	}
 

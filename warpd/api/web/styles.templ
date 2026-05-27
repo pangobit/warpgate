@@ -1,0 +1,393 @@
+package web
+
+css appFrame() {
+	display: grid;
+	grid-template-columns: 14rem minmax(0, 1fr);
+	min-height: 100vh;
+}
+
+css sidebar() {
+	position: sticky;
+	top: 0;
+	height: 100vh;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-5);
+	padding: var(--space-4);
+	background: var(--bg-panel);
+	border-right: 1px solid var(--border-subtle);
+}
+
+css brand() {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-2);
+	font-weight: 900;
+	text-decoration: none;
+	color: inherit;
+}
+
+css brandMark() {
+	display: grid;
+	place-items: center;
+	width: 1.5rem;
+	height: 1.5rem;
+	border-radius: var(--radius-1);
+	background: var(--bg-action);
+	color: var(--text-inverse);
+}
+
+css sidebarNav() {
+	display: grid;
+	gap: var(--space-1);
+}
+
+css sidebarLink() {
+	min-height: 2.25rem;
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: 0 var(--space-3);
+	border-radius: var(--radius-2);
+	color: var(--text-muted);
+	text-decoration: none;
+	font-weight: 800;
+}
+
+css navIcon() {
+	width: 1rem;
+	height: 1rem;
+	flex: 0 0 auto;
+	color: var(--text-soft);
+}
+
+css pillIcon() {
+	width: 0.95rem;
+	height: 0.95rem;
+	flex: 0 0 auto;
+	margin-right: var(--space-1);
+}
+
+css buttonIcon() {
+	width: 1rem;
+	height: 1rem;
+}
+
+css sidebarFooter() {
+	margin-top: auto;
+	display: grid;
+	gap: var(--space-2);
+}
+
+css appMain() {
+	width: min(92rem, 100%);
+	padding: var(--space-5);
+	min-width: 0;
+}
+
+css dashboardGrid() {
+	display: grid;
+	grid-template-columns: minmax(20rem, 0.8fr) minmax(0, 1.4fr);
+	gap: var(--space-5);
+	min-width: 0;
+}
+
+css managementShell() {
+	display: grid;
+	grid-template-columns: minmax(20rem, 0.75fr) minmax(0, 1.25fr);
+	gap: var(--space-5);
+	min-width: 0;
+}
+
+css detailGrid() {
+	display: grid;
+	grid-template-columns: minmax(0, 1.35fr) minmax(18rem, 0.65fr);
+	gap: var(--space-5);
+	min-width: 0;
+}
+
+css panel() {
+	background: var(--bg-surface);
+	border: 1px solid var(--border-subtle);
+	border-radius: var(--radius-2);
+	box-shadow: var(--shadow-panel);
+	padding: var(--space-5);
+	min-width: 0;
+}
+
+css sectionHeading() {
+	display: flex;
+	justify-content: space-between;
+	align-items: flex-start;
+	gap: var(--space-3);
+	margin-bottom: var(--space-4);
+}
+
+css pageTitle() {
+	font-size: 1.5rem;
+	margin: 0 0 var(--space-4);
+}
+
+css panelTitle() {
+	font-size: 1.08rem;
+	margin: 0;
+}
+
+css eyebrow() {
+	text-transform: uppercase;
+	font-size: 0.68rem;
+	font-weight: 900;
+	letter-spacing: 0.08em;
+	color: var(--text-soft);
+	margin: 0;
+}
+
+css primaryButton() {
+	min-height: 2.5rem;
+	padding: 0 var(--space-4);
+	border-radius: var(--radius-2);
+	background: var(--bg-action);
+	color: var(--text-inverse);
+	border: 1px solid var(--border-action);
+	font-weight: 800;
+	cursor: pointer;
+	text-decoration: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--space-2);
+}
+
+css deployForm() {
+	display: inline-flex;
+	margin: 0;
+}
+
+css deployButtonLoading() {
+	align-items: center;
+}
+
+css iconButton() {
+	width: 2.5rem;
+	height: 2.5rem;
+	display: grid;
+	place-items: center;
+	background: var(--bg-action);
+	color: var(--text-inverse);
+	border: 1px solid var(--border-action);
+	border-radius: var(--radius-2);
+	cursor: pointer;
+}
+
+css pill() {
+	display: inline-flex;
+	align-items: center;
+	min-height: 1.75rem;
+	padding: 0 var(--space-2);
+	border-radius: var(--radius-pill);
+	background: var(--bg-command);
+	color: var(--text-command);
+	font-weight: 800;
+	font-size: 0.78rem;
+	white-space: nowrap;
+}
+
+css identityPill() {
+	display: inline-flex;
+	align-items: center;
+	min-height: 1.75rem;
+	max-width: 100%;
+	padding: 0 var(--space-2);
+	border-radius: var(--radius-pill);
+	background: var(--bg-subtle);
+	color: var(--text-muted);
+	font-weight: 800;
+	font-size: 0.78rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+css statusBase() {
+	display: inline-flex;
+	align-items: center;
+	min-height: 1.6rem;
+	padding: 0 var(--space-2);
+	border-radius: var(--radius-pill);
+	border: 1px solid currentColor;
+	text-transform: uppercase;
+	font-size: 0.68rem;
+	font-weight: 900;
+	letter-spacing: 0.08em;
+}
+
+css statusSuccess() {
+	color: var(--success);
+	background: var(--success-bg);
+}
+
+css statusWarning() {
+	color: var(--warning);
+	background: var(--warning-bg);
+}
+
+css statusDanger() {
+	color: var(--danger);
+	background: var(--danger-bg);
+}
+
+css field() {
+	display: grid;
+	gap: var(--space-2);
+	margin-bottom: var(--space-4);
+	color: var(--text-muted);
+	font-size: 0.86rem;
+	font-weight: 800;
+}
+
+css control() {
+	width: 100%;
+	color: var(--text-main);
+	background: var(--bg-input);
+	border: 1px solid var(--border-subtle);
+	border-radius: var(--radius-2);
+	padding: var(--space-2) var(--space-3);
+}
+
+css formActions() {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--space-2);
+}
+
+css serviceEditor() {
+	display: grid;
+	gap: var(--space-3);
+	padding: var(--space-4) 0;
+	border-top: 1px solid var(--border-subtle);
+}
+
+css serviceEditorHeader() {
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
+	color: var(--text-main);
+}
+
+css tableWrap() {
+	overflow-x: auto;
+}
+
+css tableView() {
+	width: 100%;
+	border-collapse: separate;
+	border-spacing: 0;
+	color: var(--text-muted);
+}
+
+css tableRow() {
+	background: var(--bg-surface);
+}
+
+css tableRowAlt() {
+	background: var(--bg-subtle);
+}
+
+css tableCell() {
+	padding: var(--space-3);
+	border-bottom: 1px solid var(--border-subtle);
+	text-align: left;
+	vertical-align: top;
+}
+
+css tableHead() {
+	padding: var(--space-3);
+	border-bottom: 1px solid var(--border-subtle);
+	text-align: left;
+	vertical-align: top;
+	color: var(--text-soft);
+	text-transform: uppercase;
+	font-size: 0.72rem;
+}
+
+css tableLink() {
+	display: inline-flex;
+	align-items: center;
+	color: var(--text-main);
+	text-decoration: none;
+	font-weight: 900;
+	border-bottom: 1px solid var(--border-strong);
+}
+
+css codeText() {
+	font-family: var(--font-mono);
+	color: var(--text-mono);
+	overflow-wrap: anywhere;
+}
+
+css preBlock() {
+	min-height: 10rem;
+	overflow: auto;
+	font-family: var(--font-mono);
+	overflow-wrap: anywhere;
+	background: var(--bg-panel);
+	border: 1px solid var(--border-subtle);
+	border-radius: var(--radius-2);
+	padding: var(--space-3);
+}
+
+css yamlBox() {
+	height: clamp(18rem, calc(100vh - 16rem), 46rem);
+	max-height: max(18rem, calc(100vh - 16rem));
+}
+
+css logOutputBox() {
+	height: clamp(18rem, calc(100vh - 18rem), 44rem);
+	max-height: max(18rem, calc(100vh - 18rem));
+	overflow: auto;
+	background: var(--bg-panel);
+	border: 1px solid var(--border-subtle);
+	border-radius: var(--radius-2);
+}
+
+css logList() {
+	display: grid;
+	align-content: start;
+	font-family: var(--font-mono);
+	font-size: 0.78rem;
+}
+
+css logLineRow() {
+	display: grid;
+	grid-template-columns: minmax(8rem, 0.28fr) minmax(0, 1fr);
+	gap: var(--space-3);
+	padding: var(--space-2) var(--space-3);
+	border-bottom: 1px solid var(--border-subtle);
+}
+
+css logSource() {
+	color: var(--text-soft);
+	overflow-wrap: anywhere;
+}
+
+css logMessage() {
+	color: var(--text-main);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+css logJSON() {
+	margin: 0;
+	color: var(--text-main);
+	font-family: var(--font-mono);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+css errorBox() {
+	background: var(--bg-error);
+	color: var(--danger);
+	border: 1px solid var(--danger);
+	border-radius: var(--radius-2);
+	padding: var(--space-3);
+}
