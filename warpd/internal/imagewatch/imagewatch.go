@@ -8,6 +8,8 @@ const (
 	StatusReady Status = "ready"
 	// StatusChanged means a mutable tag resolved to a new digest.
 	StatusChanged Status = "changed"
+	// StatusUpdateAvailable means a newer tag matches the service's semver constraint.
+	StatusUpdateAvailable Status = "update-available"
 	// StatusInvalid means the image reference could not be checked.
 	StatusInvalid Status = "invalid"
 )
@@ -23,8 +25,13 @@ type Cursor struct {
 	Service string
 	// Image is the registry image without tag or digest.
 	Image string
-	// Tag is the mutable tag being watched.
+	// Tag is the tag being watched: the pinned tag for semver-tracked
+	// services, otherwise the mutable tag whose digest is observed.
 	Tag string
+	// Constraint is the semver constraint when the service tracks releases.
+	Constraint string
+	// CandidateTag is the highest registry tag matching Constraint.
+	CandidateTag string
 	// LastDigest is the most recent digest observed for the tag.
 	LastDigest string
 	// PreviousDigest is the prior digest when StatusChanged is set.

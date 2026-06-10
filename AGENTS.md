@@ -22,14 +22,15 @@ go vet ./...                   # Vet
 
 - `cmd/warpgate/` - CLI binary, uses `pkg/cli/`
 - `pkg/config/` - `cluster.yml` and `app.yml` types, loading, and app discovery from `apps/` directories
-- `pkg/cli/` - Cobra commands for the CLI
+- `pkg/cli/` - Cobra commands for the CLI (`init`, `serve`, `bootstrap`, `cleanup`, `shadow`)
+- `pkg/semver/` - Image tag constraint matching for daemon version tracking
 - `pkg/compose/` - Compose override generation (Traefik labels + image tag only)
 - `pkg/deploy/` - Deploy orchestration, rollback, and deploy state management
 - `pkg/ssh/` - SSH client (key-based and Tailscale SSH modes)
 - `pkg/bootstrap/` - Node provisioning via SSH (OS detection, install scripts, Traefik setup)
-- `warpd/` - Local browser UI internals used by `warpgate ui`
+- `warpd/` - Daemon internals: `usecase/` orchestration, `connectors/` (GitHub App, GHCR, deploy adapter, Turso), `api/ssh/` operator TUI over wish, `api/ci/` lean CI HTTP API
 
-Warpgate ships one CLI binary. The local browser UI is started with `warpgate ui`; do not add a separate daemon binary.
+Warpgate ships one CLI binary. The daemon is started with `warpgate serve`; do not add a separate daemon binary. The daemon is the only release actor (bump commits, synced-config releases) and the operator TUI is the only deploy actor — do not add unattended deploy paths.
 
 ### Config Model
 - `cluster.yml` at repo root defines nodes, networking, traefik, and registry

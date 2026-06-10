@@ -1,0 +1,37 @@
+# Local testing only — runs the Warpgate daemon in a container. Not for prod.
+#
+# Compose reads variables from a .env file next to this file. Required:
+#   WARPGATE_REPO=owner/repo
+#   WARPGATE_GH_APP_ID=123456
+#   WARPGATE_GH_INSTALLATION_ID=7891011
+#   WARPGATE_GH_PRIVATE_KEY_FILE=/path/to/github-app.pem   (host path; mounted into the container)
+#
+# Then:
+#   docker compose up --build
+#   curl http://127.0.0.1:7411/status
+#   ssh -p 7422 127.0.0.1
+#
+# There is no tailscaled inside the container, so the daemon runs with
+# --tailscale-ssh=false; real node deploys from this container need an SSH
+# key mounted and --ssh-key pointed at it.
+services:
+  warpgate:
+    build: .
+    command: ["serve", "--tailscale-ssh=false"]
+    ports:
+      - "127.0.0.1:7411:7411"
+      - "127.0.0.1:7422:7422"
+    environment:
+      WARPGATE_REPO: ${WARPGATE_REPO:?set WARPGATE_REPO=owner/repo in .env}
+      WARPGATE_REPO_BRANCH: ${WARPGATE_REPO_BRANCH:-master}
+      WARPGATE_REPO_PATH: ${WARPGATE_REPO_PATH:-}
+      WARPGATE_GH_APP_ID: ${WARPGATE_GH_APP_ID:?set WARPGATE_GH_APP_ID in .env}
+      WARPGATE_GH_INSTALLATION_ID: ${WARPGATE_GH_INSTALLATION_ID:?set WARPGATE_GH_INSTALLATION_ID in .env}
+      WARPGATE_GH_PRIVATE_KEY_FILE: /etc/warpgate/github-app.pem
+      WARPGATE_REGISTRY_TOKEN: ${WARPGATE_REGISTRY_TOKEN:-}
+    volumes:
+      - warpgate-state:/var/lib/warpgate
+      - ${WARPGATE_GH_PRIVATE_KEY_FILE:?set WARPGATE_GH_PRIVATE_KEY_FILE in .env to the host path of the App key}:/etc/warpgate/github-app.pem:ro
+
+volumes:
+  warpgate-state:

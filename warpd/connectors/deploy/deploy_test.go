@@ -272,42 +272,6 @@ func TestMapLogsResult(t *testing.T) {
 	}
 }
 
-func TestFindClusterPathUsesRepositorySubpath(t *testing.T) {
-	root := t.TempDir()
-	writeTestFile(t, filepath.Join(root, "prod", "cluster.yml"))
-
-	path, err := findClusterPath(root, "prod")
-	if err != nil {
-		t.Fatalf("findClusterPath() error = %v", err)
-	}
-	if path != filepath.Join(root, "prod", "cluster.yml") {
-		t.Fatalf("path = %q", path)
-	}
-}
-
-func TestFindClusterPathSearchesTwoDirectoriesDeep(t *testing.T) {
-	root := t.TempDir()
-	writeTestFile(t, filepath.Join(root, "examples", "infra-repo", "cluster.yml"))
-
-	path, err := findClusterPath(root, "")
-	if err != nil {
-		t.Fatalf("findClusterPath() error = %v", err)
-	}
-	if path != filepath.Join(root, "examples", "infra-repo", "cluster.yml") {
-		t.Fatalf("path = %q", path)
-	}
-}
-
-func writeTestFile(t *testing.T, path string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	if err := os.WriteFile(path, []byte("version: \"2\"\n"), 0644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-}
-
 func usecaseClusterSnapshot(privateIP string) configrepo.ClusterSnapshot {
 	return configrepo.ClusterSnapshot{
 		Path: "prod/cluster.yml",

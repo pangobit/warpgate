@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"slices"
-	"time"
 )
 
 // AdminCapability is the Tailscale capability required for Warpgate administration.
@@ -19,44 +18,6 @@ type User struct {
 	DisplayName string
 	// Capabilities is the set of capabilities granted by the identity provider.
 	Capabilities []string
-}
-
-// GitHubAuthStatus describes the local GitHub authorization state.
-type GitHubAuthStatus struct {
-	// Configured reports whether a GitHub App client ID is available.
-	Configured bool
-	// ClientID is the configured GitHub App client ID.
-	ClientID string
-	// Authenticated reports whether Warpgate has a usable GitHub token.
-	Authenticated bool
-	// Login is the authenticated GitHub login.
-	Login string
-	// DisplayName is the authenticated GitHub display name.
-	DisplayName string
-	// UserCode is the pending device-flow code.
-	UserCode string
-	// VerificationURI is the GitHub device-flow authorization URL.
-	VerificationURI string
-	// Error is the latest authorization error.
-	Error string
-}
-
-// GitHubSession is a persisted GitHub App user authorization.
-type GitHubSession struct {
-	// AccessToken is the GitHub user access token.
-	AccessToken string
-	// AccessTokenExpiresAt is when the access token expires.
-	AccessTokenExpiresAt time.Time
-	// RefreshToken is the GitHub user refresh token.
-	RefreshToken string
-	// RefreshTokenExpiresAt is when the refresh token expires.
-	RefreshTokenExpiresAt time.Time
-	// TokenType is the token type returned by GitHub.
-	TokenType string
-	// User is the GitHub user associated with the token.
-	User User
-	// UpdatedAt is when the token record was last changed.
-	UpdatedAt time.Time
 }
 
 // Identifier resolves the user associated with a request source.

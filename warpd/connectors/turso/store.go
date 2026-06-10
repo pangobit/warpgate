@@ -12,9 +12,9 @@ import (
 	"github.com/pangobit/warpgate/warpd/internal/audit"
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
 	"github.com/pangobit/warpgate/warpd/internal/deployment"
-	"github.com/pangobit/warpgate/warpd/internal/identity"
 	"github.com/pangobit/warpgate/warpd/internal/imagewatch"
 	"github.com/pangobit/warpgate/warpd/internal/release"
+	"github.com/pangobit/warpgate/warpd/internal/stackstate"
 	_ "turso.tech/database/tursogo"
 )
 
@@ -70,24 +70,6 @@ func (s *Store) RepositorySettings(ctx context.Context) (configrepo.RepositorySe
 // SaveRepositorySettings persists repository settings.
 func (s *Store) SaveRepositorySettings(ctx context.Context, settings configrepo.RepositorySettings) error {
 	return s.putJSON(ctx, "repo_settings", settings)
-}
-
-// GitHubSession returns the persisted GitHub authorization.
-func (s *Store) GitHubSession(ctx context.Context) (identity.GitHubSession, bool, error) {
-	var session identity.GitHubSession
-	ok, err := s.getJSON(ctx, "github_session", &session)
-	return session, ok, err
-}
-
-// SaveGitHubSession persists GitHub authorization.
-func (s *Store) SaveGitHubSession(ctx context.Context, session identity.GitHubSession) error {
-	return s.putJSON(ctx, "github_session", session)
-}
-
-// DeleteGitHubSession removes persisted GitHub authorization.
-func (s *Store) DeleteGitHubSession(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `delete from kv where key = ?`, "github_session")
-	return err
 }
 
 // PollerSettings returns persisted poller settings.
@@ -333,6 +315,20 @@ func (s *Store) ListDeployments(ctx context.Context, app string) ([]deployment.R
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+// StackState returns the persisted whole-stack deploy state.
+func (s *Store) StackState(ctx context.Context) (stackstate.State, error) {
+	var state stackstate.State
+	if _, err := s.getJSON(ctx, "stack_state", &state); err != nil {
+		return stackstate.State{}, err
+	}
+	return state, nil
+}
+
+// SaveStackState persists the whole-stack deploy state.
+func (s *Store) SaveStackState(ctx context.Context, state stackstate.State) error {
+	return s.putJSON(ctx, "stack_state", state)
 }
 
 // AddAuditEvent persists an audit event.

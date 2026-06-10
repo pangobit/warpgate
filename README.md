@@ -1,33 +1,39 @@
 # Warpgate
 
-Warpgate is a Go deployment tool for Docker Compose applications on Linux hosts over SSH. It is aimed at small self-managed clusters where you want a repo with `cluster.yml`, per-app `app.yml`, and user-written `compose.yml` files instead of a larger orchestration stack. The CLI still exists, but the Warpgate 2 workflow centers on a local browser UI for day-to-day release, deploy, status, and log operations.
+Warpgate is a Go deployment tool for Docker Compose applications on Linux hosts over SSH. It is aimed at small self-managed clusters where you want a repo with `cluster.yml`, per-app `app.yml`, and user-written `compose.yml` files instead of a larger orchestration stack.
+
+Warpgate 3 runs as a daemon on a server. The daemon watches your desired-state repository, commits semantic-version image bumps itself, and deploys only when a human operator says so from a TUI served over SSH. Git holds all desired state; the daemon is the only release actor; the operator is the only deploy actor.
 
 It currently provides:
 
 - Repo scaffolding with `warpgate init`
 - Node bootstrap over SSH or Tailscale SSH
-- App discovery from `apps/*/app.yml`
-- Rolling deploys to one or more nodes
-- Blue/green or recreate deployment strategies
-- Rollback, status, logs, app removal, deploy lock management, and node cleanup
+- A daemon (`warpgate serve`) that polls the desired-state repo and GHCR
+- Automatic version-bump commits for services tracking a semver constraint
+- An operator TUI served over SSH: deploy, rollback, pending updates, audit
+- Atomic whole-stack deploys with automatic revert to the last healthy baseline
+- Blue/green or recreate deployment strategies per app
+- A lean HTTP API for CI (`POST /refresh`, `GET /status`)
 - Shadow deployments for pre-release testing on the internal network
-- A local browser UI with GitHub App device authorization, repository sync, release editing, deploy actions, status, and logs
 
 ## Requirements
 
 Target nodes:
 
 - Linux
-- Tailscale installed if you want to use `--tailscale-ssh`
+- Tailscale installed if you want to use Tailscale SSH
 - Passwordless `sudo`
 - Network access to pull container images
 
-Local machine:
+Daemon host:
 
-- Go 1.24+
-- SSH client
-- A browser for the local UI
-- A GitHub App with device flow enabled if you want the UI to read or write GitHub-backed config repositories
+- Linux host reachable over your tailnet
+- Tailscale SSH access to the target nodes
+- A GitHub App installed for the desired-state repository
+
+The GitHub App needs **Contents: read and write** (config sync and bump commits). Generate a private key and note the App ID and installation ID.
+
+**Private GHCR images need a separate registry token.** GHCR does not accept GitHub App installation tokens at all — the App's "Packages" permission exists in the UI but has no effect on the container registry (a years-old GitHub limitation, confirmed by GitHub support). Outside Actions, GHCR accepts classic personal access tokens. Create a classic PAT with **only** the `read:packages` scope (no repo scope — it cannot touch git) and set it as `WARPGATE_REGISTRY_TOKEN` on the daemon. Without it, the daemon authenticates anonymously and only public images can be watched; private images show `403 Forbidden` under Pending updates in the TUI.
 
 Supported bootstrap targets in the code today include Ubuntu, Debian, CentOS, Rocky Linux, AlmaLinux, Fedora, and Amazon Linux.
 
@@ -57,71 +63,42 @@ apps/
     compose.yml
 ```
 
-Edit `cluster.yml` with your node details:
-
-```yaml
-version: "2"
-project: myapp
-
-nodes:
-  - id: node-1
-    host: 203.0.113.10
-    private_ip: 100.64.0.10
-
-networking:
-  private_network: my-tailnet.ts.net
-  dns:
-    provider: cloudflare
-    zone: example.com
-    api_token: ${CF_DNS_API_TOKEN}
-  traefik:
-    entry_points: [web, websecure]
-    acme:
-      enabled: true
-      email: admin@example.com
-      provider: letsencrypt
-      challenge: dns
-
-registry:
-  server: ghcr.io
-
-secrets:
-  server: http://100.64.0.10:8090
-```
-
-Bootstrap the node:
+Edit `cluster.yml` with your node details (see below), push the repo to GitHub, and bootstrap each node:
 
 ```bash
 warpgate bootstrap node-1 --tailscale-ssh
 ```
 
-Deploy the example app:
+Then start the daemon on its host:
 
 ```bash
-warpgate deploy example-app --tailscale-ssh
+export WARPGATE_REPO=acme/my-infra
+export WARPGATE_GH_APP_ID=123456
+export WARPGATE_GH_INSTALLATION_ID=7891011
+export WARPGATE_GH_PRIVATE_KEY_FILE=/etc/warpgate/github-app.pem
+export WARPGATE_SSH_ADDR=100.64.0.20:7422
+export WARPGATE_HTTP_ADDR=100.64.0.20:7411
+warpgate serve --user root
 ```
 
-Check status and logs:
+And operate it from anywhere on the tailnet:
 
 ```bash
-warpgate status
-warpgate status example-app --tailscale-ssh
-warpgate logs --node node-1 --app example-app --tailscale-ssh
+ssh -p 7422 100.64.0.20
 ```
 
-Roll back if needed:
+The TUI shows the synced config commit, pending image updates, stack state, and the audit log. Press `d` to deploy the stack, `r` to roll back to the last healthy baseline.
 
-```bash
-warpgate rollback example-app --tailscale-ssh
-```
+## The Warpgate 3 Flow
 
-Or start the local UI:
+1. You push code; CI builds and pushes `ghcr.io/acme/api:1.2.8`.
+2. The daemon sees the new tag matches `image_semver: "~1.2"`, resolves its digest, and commits the pin to `app.yml` (`warpgate: release api api=1.2.8`).
+3. The TUI shows the bump as a pending release.
+4. You press `d`. The daemon deploys every app at its latest release, health-checks the stack, and advances the last-healthy baseline — or reverts everything to it on failure.
 
-```bash
-warpgate ui --user root
-```
+Humans commit config changes (ports, env, services). The daemon commits version bumps. Nobody commits generated deploy files from a workstation, and the operator never runs a git command to release.
 
-The UI opens on loopback, uses Tailscale SSH for runtime operations by default, and lets you attach a GitHub-backed config repository from Settings.
+Config-only commits made by humans also become deployable releases automatically when the daemon syncs them.
 
 ## Repo Layout
 
@@ -144,7 +121,7 @@ my-infra/
 - `apps/<name>/compose.yml` is your Docker Compose file.
 - App names come from directory names, not from YAML.
 
-The repository under [`examples/infra-repo`](/home/ray/projects/warpgate/examples/infra-repo) shows a working example layout.
+The repository under [`examples/infra-repo`](examples/infra-repo) shows a working example layout.
 
 ## `cluster.yml`
 
@@ -199,7 +176,7 @@ Example:
 
 ```yaml
 kind: warpgate/app
-compose_ref: main
+compose_ref: master
 targets: [node-1]
 strategy: blue-green
 
@@ -207,7 +184,8 @@ release:
   services:
     api:
       image: ghcr.io/acme/api
-      image_tag: v1.2.3
+      image_semver: "~1.2"
+      image_tag: 1.2.7
       image_digest: sha256:...
       secrets_prefix: api/prod
       port: 8080
@@ -218,16 +196,6 @@ release:
         LOG_LEVEL: info
         APP_ENV: production
 
-    admin:
-      image: ghcr.io/acme/api-admin
-      image_tag: v1.2.3
-      image_digest: sha256:...
-      secrets_prefix: api-admin/prod
-      port: 8081
-      expose:
-        private:
-          port: 8081
-
 persistent_volumes:
   - compose_name: api-data
     name: warpgate-api-data
@@ -235,19 +203,12 @@ persistent_volumes:
 
 Release-owned deploy inputs must be declared under `release.services`. The compose file remains the topology source; Warpgate only overlays service images and generated env files for declared release services.
 
-Create and deploy a release:
-
-```bash
-warpgate release api
-warpgate deploy api --release latest --tailscale-ssh
-```
-
 Fields:
 
 - `kind` is optional. If set, it must be `warpgate/app`.
 - `release.services.<name>.image` is required for each first-class release service.
-- `release.services.<name>.image_tag` defaults to `latest` if omitted.
-- `release.services.<name>.image_digest` pins that service image immutably when set.
+- `release.services.<name>.image_semver` opts the service into daemon version tracking. Supported constraints: `*` (any stable version), `1.2.3` (exact), `~1.2` (same major.minor), `^1` (same major). Prereleases are excluded unless the constraint names one. Floating tags such as `1` or `1.2` are never selected.
+- `release.services.<name>.image_tag` and `image_digest` are daemon-owned once `image_semver` is set: the daemon pins both in a bump commit. Without `image_semver`, you manage them by hand.
 - `compose_ref` identifies the remote compose source revision when `source` is set.
 - `targets` defaults to all nodes if omitted.
 - `release.services.<name>.secrets_prefix` tells Warpgate which SecretSauce keys to fetch for that service.
@@ -260,7 +221,7 @@ Fields:
 `source` example:
 
 ```yaml
-compose_ref: main
+compose_ref: master
 source:
   repo: github.com/acme/deploy-definitions
   compose_path: services/worker/compose.yml
@@ -268,16 +229,17 @@ release:
   services:
     worker:
       image: ghcr.io/acme/worker
-      image_tag: v2.0.0
+      image_semver: "^2"
 ```
 
-When the local UI is connected to GitHub, source compose files are read through the GitHub API using the authorized GitHub App user token. That allows private source repositories when the GitHub App installation has access to the source repo.
+Source compose files are read through the GitHub API using the daemon's GitHub App installation token. Private source repositories work when the installation has access to them.
 
 Current validation rules to keep in mind:
 
 - `expose.public` requires `port` and at least one domain.
 - `expose.private` requires a port.
 - `expose.internal` requires `port` and a hostname.
+- `image_semver` must parse as a supported constraint.
 
 ## `compose.yml`
 
@@ -309,6 +271,7 @@ Health checks matter:
 
 - If the compose file defines a container health check, deploy waits for it before considering the rollout successful.
 - Without a health check, deploy proceeds as soon as `docker compose up -d` succeeds.
+- Stack deploys use these health checks to decide whether to advance the last-healthy baseline or revert.
 
 ## Deployment Strategies
 
@@ -323,65 +286,74 @@ Warpgate supports two strategies:
 
 For stateful apps that use SQLite or another single-writer local store, pair `recreate` with `persistent_volumes` so both slots resolve to the same Docker volume name without running concurrently.
 
-Example:
-
-```yaml
-strategy: recreate
-release:
-  services:
-    web:
-      image: ghcr.io/acme/web
-      port: 8080
-```
-
-Named volume example:
-
-```yaml
-strategy: recreate
-release:
-  services:
-    worker:
-      image: ghcr.io/acme/worker
-
-persistent_volumes:
-  - compose_name: worker-data
-    name: warpgate-worker-data
-```
-
 If you keep host `ports:` mappings in your compose file, `recreate` is usually the safer choice.
+
+## Stack Deploys and Rollback
+
+The daemon deploys the stack as one operation: every app at its newest committed release, in app-name order. The whole-stack result decides what happens next:
+
+- All apps healthy: the **last-healthy baseline** advances to this release set.
+- Any app fails: every app this attempt touched is redeployed at the baseline. The baseline does not move.
+- A revert itself fails: the attempt is flagged `revert-failed` in the TUI and audit log and the stack waits for an operator.
+- First-ever deploy with no baseline: the attempt halts as `failed`; there is nothing safe to revert to.
+
+`r` in the TUI redeploys the entire baseline on demand.
+
+## The Daemon
+
+`warpgate serve` is configured by environment:
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `WARPGATE_REPO` | Desired-state repository, `owner/repo` | required on first run |
+| `WARPGATE_REPO_BRANCH` | Branch to watch and write bumps to | `master` |
+| `WARPGATE_REPO_PATH` | Optional repository subdirectory | empty |
+| `WARPGATE_GH_APP_ID` | GitHub App ID | required |
+| `WARPGATE_GH_INSTALLATION_ID` | GitHub App installation ID | required |
+| `WARPGATE_GH_PRIVATE_KEY_FILE` | Path to the App private key PEM (file only; PEM content in env is not supported) | required |
+| `WARPGATE_SSH_ADDR` | Operator TUI SSH listen address | `127.0.0.1:7422` |
+| `WARPGATE_HTTP_ADDR` | CI API listen address | `127.0.0.1:7411` |
+| `WARPGATE_REGISTRY_TOKEN` | Classic PAT with `read:packages` for GHCR reads (App tokens are not accepted by GHCR) | optional; without it only public images are watchable |
+| `WARPGATE_HOST_KEY` | Daemon SSH host key path | generated under the config dir |
+| `WARPGATE_DB_PATH` | Daemon database path | under the config dir |
+
+Flags: `--tailscale-ssh` (default true), `--ssh-key`, `--user` control how the daemon reaches target nodes.
+
+For production, run the daemon under systemd — see [`examples/systemd/warpgate.service`](examples/systemd/warpgate.service). It loads the App key via `LoadCredential` (the key never enters the process environment), reads secrets from a root-owned `EnvironmentFile` (`/etc/warpgate/env`, mode `0400`), runs as the unprivileged `warpgate` user with a private state directory, and applies standard service sandboxing. Keep both secret files `root:root 0400`.
+
+The daemon fails at startup on missing or invalid GitHub App credentials, and refuses to run without a repository (env or previously attached).
+
+**Access control is the network.** Bind both listen addresses to a tailnet IP and use Tailscale ACLs to decide who can reach the TUI and the CI API. The daemon trusts connections it receives; do not bind either address to a public interface.
+
+Polling: config and image intervals come from stored poller settings (defaults: config every minute, images every 5 minutes). CI can nudge an immediate poll:
+
+```bash
+curl -X POST http://100.64.0.20:7411/refresh
+curl http://100.64.0.20:7411/status
+```
+
+`/status` returns the synced commit, pending updates, and stack state as JSON.
+
+### Operator TUI
+
+```bash
+ssh -p 7422 <daemon-tailnet-addr>
+```
+
+Keys: `d` deploy stack (with confirmation), `r` rollback to baseline (with confirmation), `s` schedule an immediate daemon poll, `a` audit log, `u` reload the view, `q` quit. Quitting is disabled while a deploy or rollback is running.
 
 ## Shadow Deployments
 
 A shadow deployment runs a version of an app alongside the live deployment on the same node(s). The shadow is not wired to the public Traefik proxy, so it is only reachable over the internal (Tailscale) network. This lets you test a release candidate before promoting it to live.
 
-Deploy a shadow:
-
 ```bash
 warpgate shadow deploy api v2.0.0 --tailscale-ssh
-```
-
-Check shadow status:
-
-```bash
 warpgate shadow status api --tailscale-ssh
-warpgate shadow status --tailscale-ssh
-```
-
-The shadow is accessible at `shadow-<hostname>` if the app has an `expose.internal.hostname` configured. For example, if `api` has `hostname: api.internal`, the shadow is reachable at `shadow-api.internal` from any node on the Tailscale network.
-
-When you are satisfied with the shadow, promote it to live:
-
-```bash
 warpgate shadow promote api --tailscale-ssh
-```
-
-Promote runs a standard blue/green deploy of the shadow version, then tears down the shadow containers. The live deployment is updated in place with zero downtime.
-
-To discard a shadow without promoting:
-
-```bash
 warpgate shadow remove api --tailscale-ssh
 ```
+
+The shadow is accessible at `shadow-<hostname>` if the app has an `expose.internal.hostname` configured. Promote runs a standard blue/green deploy of the shadow version, then tears down the shadow containers.
 
 Notes:
 
@@ -389,6 +361,7 @@ Notes:
 - Only one shadow per app can exist at a time.
 - The shadow uses the same compose file, secrets, and environment as the live deployment.
 - The shadow runs as a separate Docker Compose project (`<app>-shadow`) alongside the live blue/green project.
+- Shadow commands run from a workstation with a local repo checkout (`cluster.yml` present).
 
 ## Bootstrap
 
@@ -432,116 +405,30 @@ Deploy behavior:
 4. The merged values are written to temporary `.env.<service>` files on the target node.
 5. A merged `.env` is also written for Docker Compose interpolation in labels and other topology fields.
 
-Example:
-
-```yaml
-release:
-  services:
-    api:
-      image: ghcr.io/acme/api
-      secrets_prefix: api/prod
-      environment:
-        LOG_LEVEL: info
-```
-
-```yaml
-services:
-  api:
-    image: ghcr.io/acme/api
-    restart: unless-stopped
-```
-
 Registry credentials can also be read from SecretSauce if they were stored during bootstrap.
 
-## Local UI
-
-Start the local browser UI:
-
-```bash
-warpgate ui
-```
-
-Useful flags:
-
-```bash
-warpgate ui --user root
-warpgate ui --addr 127.0.0.1:8080
-warpgate ui --open=false
-warpgate ui --db-path ./warpgate.db
-warpgate ui --github-client-id Iv1.example
-```
-
-Defaults:
-
-- The server binds to a loopback address and opens the browser automatically.
-- The local UI database is stored under the user's config directory unless `--db-path` is set.
-- Runtime deploy, status, and log operations use Tailscale SSH by default.
-- The GitHub App client ID can be passed with `--github-client-id`, read from `WARPGATE_GITHUB_CLIENT_ID`, or entered in Settings when connecting GitHub.
-
-Initial setup:
-
-1. Create a GitHub App, enable device flow, and install it for the config repository and any private source compose repositories.
-2. Give the app repository contents access. Warpgate reads config, writes release metadata, and commits updated `app.yml` release inputs.
-3. Run `warpgate ui`.
-4. In Settings, enter the repository owner, name, branch, and optional path such as `prod`.
-5. In Settings, enter the GitHub App client ID and complete the device authorization flow.
-
-The GitHub App client ID is not a secret. When entered through the UI, Warpgate stores it in an `HttpOnly`, `SameSite=Strict` browser session cookie so the next local request can reuse it without another CLI flag. GitHub user authorization tokens are stored in the local UI database.
-
-UI pages:
-
-- Dashboard shows repository sync, image sync, recent releases, and deployments.
-- Apps lists discovered apps and opens per-app release details.
-- App edit screens can update every release service in an `app.yml` and commit a release.
-- Release pages deploy a selected release and disable the deploy button while the request is in flight.
-- Status shows cluster nodes and runtime app/container state.
-- Logs fetch recent container logs from a selected node and display structured JSON logs in readable rows.
-- Settings manages the config repository and GitHub App authorization.
-
 ## Commands
-
-Common commands:
 
 ```bash
 warpgate init myapp
 
-warpgate ui
-warpgate ui --user root
-warpgate ui --addr 127.0.0.1:8080 --open=false
+warpgate serve
+warpgate serve --user root --ssh-key ~/.ssh/deploy
 
 warpgate bootstrap node-1 --tailscale-ssh
 warpgate bootstrap --host 203.0.113.10 --tailscale-ssh
 warpgate bootstrap node-1 --dry-run
 
-warpgate deploy api
-warpgate deploy api v1.2.4
-warpgate deploy --all
-warpgate deploy api --dry-run
-
-warpgate status
-warpgate status api --tailscale-ssh
-warpgate dashboard --tailscale-ssh
-
-warpgate logs --node node-1 --tailscale-ssh
-warpgate logs --node node-1 --app api --tail 50 --grep error --tailscale-ssh
-
-warpgate rollback api --tailscale-ssh
-warpgate remove api --tailscale-ssh
-warpgate remove api --tailscale-ssh --force
-warpgate remove --all --force
-
-warpgate lock break api --tailscale-ssh
-
 warpgate shadow deploy api v2.0.0 --tailscale-ssh
-warpgate shadow status api --tailscale-ssh
 warpgate shadow status --tailscale-ssh
 warpgate shadow promote api --tailscale-ssh
 warpgate shadow remove api --tailscale-ssh
 
 warpgate cleanup node-1 --tailscale-ssh
-warpgate cleanup --host 203.0.113.10 --tailscale-ssh --force
 warpgate cleanup node-1 --tailscale-ssh --remove-go --remove-docker
 ```
+
+Deploy, rollback, status, logs, and release operations live in the daemon TUI; the Warpgate 2 web UI and per-app workstation deploy commands were removed in Warpgate 3.
 
 Use `warpgate <command> --help` for full flag details.
 
@@ -549,12 +436,12 @@ Use `warpgate <command> --help` for full flag details.
 
 This README is intentionally limited to what the current code does.
 
-- App discovery is local and file-based. Warpgate scans `apps/*/app.yml`.
-- The deploy override currently injects image tags and internal hostname `extra_hosts`.
-- Remote compose sources are read from GitHub through the authorized GitHub App user token in the local UI path.
-- The local browser UI is started with `warpgate ui`; Warpgate does not ship a separate daemon binary.
-
-If you are evaluating behavior that depends on generated Traefik labels or more advanced orchestration, verify it against the current code before relying on it in production.
+- The daemon polls GitHub through the API; it keeps no local git checkout. Bump commits are atomic Git Data API commits.
+- Only GHCR is supported for tag and digest reads.
+- The daemon never deploys on its own. Bumps and synced config become pending releases; a human deploys them.
+- Release manifests are committed to the repo under `apps/<app>/releases/` alongside bump commits, as in Warpgate 2.
+- TUI and CI API trust the network layer; bind them to the tailnet only.
+- Warpgate ships one CLI binary; the daemon is `warpgate serve`, not a separate binary.
 
 ## Development
 
@@ -566,3 +453,28 @@ go test ./...
 go vet ./...
 go fmt ./...
 ```
+
+### Local testing with Docker
+
+The repo ships a `Dockerfile` and `docker-compose.yml` for running the daemon locally. They are for testing only, not production.
+
+Create a `.env` next to `docker-compose.yml`:
+
+```bash
+WARPGATE_REPO=acme/my-infra
+WARPGATE_GH_APP_ID=123456
+WARPGATE_GH_INSTALLATION_ID=7891011
+WARPGATE_GH_PRIVATE_KEY_FILE=/path/to/github-app.pem
+```
+
+`WARPGATE_GH_PRIVATE_KEY_FILE` here is the **host** path; compose bind-mounts it read-only and points the daemon at the in-container copy.
+
+Then:
+
+```bash
+docker compose up --build
+curl http://127.0.0.1:7411/status
+ssh -p 7422 127.0.0.1
+```
+
+Daemon state persists in the `warpgate-state` volume. The container has no tailscaled, so it runs with `--tailscale-ssh=false`; exercising real node deploys from the container requires mounting an SSH key and adjusting the `command` to pass `--ssh-key`.

@@ -4,6 +4,7 @@ release:
   services:
     example-app:
       image: ghcr.io/org/example-app
+      image_semver: "~1.0"
       image_tag: v1.0.0
       secrets_prefix: example-app/prod
       port: 8080

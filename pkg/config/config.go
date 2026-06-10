@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/pangobit/warpgate/pkg/semver"
 	"gopkg.in/yaml.v3"
 )
 
@@ -153,6 +154,9 @@ type ReleaseServiceConfig struct {
 	ImageTag string `yaml:"image_tag,omitempty"`
 	// ImageDigest is the immutable Docker image digest for release creation.
 	ImageDigest string `yaml:"image_digest,omitempty"`
+	// ImageSemver constrains which registry tags the Warpgate daemon may
+	// pin into ImageTag and ImageDigest (e.g. "~1.2", "^1", "*").
+	ImageSemver string `yaml:"image_semver,omitempty"`
 	// SecretsPrefix is the secretsauce prefix for this service.
 	SecretsPrefix string `yaml:"secrets_prefix,omitempty"`
 	// Port is the container port used for service-level routing metadata.
@@ -397,7 +401,6 @@ func ValidateApp(app *AppConfig) error {
 
 	switch app.Strategy {
 	case "", StrategyBlueGreen, StrategyRecreate:
-		// valid
 	default:
 		return fmt.Errorf("app %s: invalid strategy %q (must be \"blue-green\" or \"recreate\")", app.Name, app.Strategy)
 	}
@@ -408,6 +411,11 @@ func ValidateApp(app *AppConfig) error {
 		}
 		if service.Image == "" {
 			return fmt.Errorf("app %s: release.services.%s.image is required", app.Name, serviceName)
+		}
+		if service.ImageSemver != "" {
+			if _, err := semver.ParseConstraint(service.ImageSemver); err != nil {
+				return fmt.Errorf("app %s: release.services.%s.image_semver: %w", app.Name, serviceName, err)
+			}
 		}
 		expose := service.EffectiveExpose()
 		if expose.Public != nil {

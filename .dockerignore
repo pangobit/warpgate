@@ -1,0 +1,8 @@
+.git
+warpgate
+warpgate.db
+docs
+examples
+*.md
+docker-compose.yml
+Dockerfile

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pangobit/warpgate/warpd/internal/identity"
+	"github.com/pangobit/warpgate/warpd/internal/stackstate"
 )
 
-func TestStorePersistsGitHubSession(t *testing.T) {
+func TestStorePersistsStackState(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "warpgate.db"))
 	if err != nil {
@@ -21,36 +21,43 @@ func TestStorePersistsGitHubSession(t *testing.T) {
 		}
 	}()
 
-	session := identity.GitHubSession{
-		AccessToken:           "access-token",
-		AccessTokenExpiresAt:  time.Unix(100, 0).UTC(),
-		RefreshToken:          "refresh-token",
-		RefreshTokenExpiresAt: time.Unix(200, 0).UTC(),
-		TokenType:             "bearer",
-		User: identity.User{
-			Email:       "octo",
-			DisplayName: "Octo User",
+	empty, err := store.StackState(ctx)
+	if err != nil {
+		t.Fatalf("StackState() on empty store error = %v", err)
+	}
+	if len(empty.LastHealthy.Releases) != 0 || empty.LastAttempt != nil {
+		t.Fatalf("empty stack state = %+v", empty)
+	}
+
+	finished := time.Unix(200, 0).UTC()
+	state := stackstate.State{
+		LastHealthy: stackstate.Snapshot{
+			Releases:  map[string]string{"api": "rel-1", "worker": "rel-2"},
+			UpdatedAt: time.Unix(100, 0).UTC(),
 		},
-		UpdatedAt: time.Unix(50, 0).UTC(),
+		LastAttempt: &stackstate.Attempt{
+			ID:         "stack-1",
+			Status:     stackstate.StatusSucceeded,
+			Releases:   map[string]string{"api": "rel-1", "worker": "rel-2"},
+			ActorEmail: "ray@ssh",
+			StartedAt:  time.Unix(150, 0).UTC(),
+			FinishedAt: &finished,
+		},
 	}
-	if err := store.SaveGitHubSession(ctx, session); err != nil {
-		t.Fatalf("SaveGitHubSession() error = %v", err)
+	if err := store.SaveStackState(ctx, state); err != nil {
+		t.Fatalf("SaveStackState() error = %v", err)
 	}
-	got, ok, err := store.GitHubSession(ctx)
-	if err != nil || !ok {
-		t.Fatalf("GitHubSession() ok = %v error = %v", ok, err)
+	got, err := store.StackState(ctx)
+	if err != nil {
+		t.Fatalf("StackState() error = %v", err)
 	}
-	if got.AccessToken != session.AccessToken || got.RefreshToken != session.RefreshToken {
-		t.Fatalf("tokens = %q / %q", got.AccessToken, got.RefreshToken)
+	if got.LastHealthy.Releases["api"] != "rel-1" || got.LastHealthy.Releases["worker"] != "rel-2" {
+		t.Fatalf("baseline = %+v", got.LastHealthy.Releases)
 	}
-	if got.User.DisplayName != "Octo User" {
-		t.Fatalf("display name = %q", got.User.DisplayName)
+	if got.LastAttempt == nil || got.LastAttempt.Status != stackstate.StatusSucceeded {
+		t.Fatalf("last attempt = %+v", got.LastAttempt)
 	}
-	if err := store.DeleteGitHubSession(ctx); err != nil {
-		t.Fatalf("DeleteGitHubSession() error = %v", err)
-	}
-	_, ok, err = store.GitHubSession(ctx)
-	if err != nil || ok {
-		t.Fatalf("GitHubSession() after delete ok = %v error = %v", ok, err)
+	if got.LastAttempt.FinishedAt == nil || !got.LastAttempt.FinishedAt.Equal(finished) {
+		t.Fatalf("finished at = %v, want %v", got.LastAttempt.FinishedAt, finished)
 	}
 }

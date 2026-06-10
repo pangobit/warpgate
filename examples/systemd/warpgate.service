@@ -1,0 +1,36 @@
+# Warpgate daemon unit. Secrets:
+#   /etc/warpgate/github-app.pem  root:root 0400  (GitHub App private key)
+#   /etc/warpgate/env             root:root 0400  (repo, IDs, registry token, listen addrs)
+[Unit]
+Description=Warpgate daemon
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=warpgate
+Group=warpgate
+EnvironmentFile=/etc/warpgate/env
+LoadCredential=github-app.pem:/etc/warpgate/github-app.pem
+Environment=WARPGATE_GH_PRIVATE_KEY_FILE=%d/github-app.pem
+StateDirectory=warpgate
+StateDirectoryMode=0700
+Environment=WARPGATE_DB_PATH=/var/lib/warpgate/warpgate.db
+Environment=WARPGATE_HOST_KEY=/var/lib/warpgate/host_key
+Environment=HOME=/var/lib/warpgate
+ExecStart=/usr/local/bin/warpgate serve
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/warpgate
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
