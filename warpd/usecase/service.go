@@ -14,12 +14,14 @@ import (
 
 	"github.com/pangobit/warpgate/pkg/config"
 	pkgrelease "github.com/pangobit/warpgate/pkg/release"
+	"github.com/pangobit/warpgate/pkg/semver"
 	"github.com/pangobit/warpgate/warpd/internal/audit"
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
 	"github.com/pangobit/warpgate/warpd/internal/deployment"
 	"github.com/pangobit/warpgate/warpd/internal/identity"
 	"github.com/pangobit/warpgate/warpd/internal/imagewatch"
 	"github.com/pangobit/warpgate/warpd/internal/release"
+	"github.com/pangobit/warpgate/warpd/internal/stackstate"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,7 +30,7 @@ var ErrConflict = errors.New("repository conflict: refresh before retrying")
 
 const maxLogTail = 2000
 
-// Service coordinates Warpgate web workflows.
+// Service coordinates Warpgate daemon workflows.
 type Service struct {
 	store    Store
 	github   GitHubRepo
@@ -135,39 +137,85 @@ func (s *Service) CheckImages(ctx context.Context, actor identity.User) error {
 			return err
 		}
 		for serviceName, service := range app.Release.Services {
-			if service.ImageDigest != "" {
-				continue
-			}
-			tag := service.EffectiveImageTag()
-			cursor := prior[snapshot.Name+"/"+serviceName]
-			cursor.App = snapshot.Name
-			cursor.Service = serviceName
-			cursor.Image = service.Image
-			cursor.Tag = tag
-			cursor.LastCheckedAt = s.now()
-			digest, err := s.registry.ResolveDigest(ctx, service.Image, tag)
-			if err != nil {
-				cursor.Status = imagewatch.StatusInvalid
-				cursor.LastError = err.Error()
-				if saveErr := s.store.SaveImageCursor(ctx, cursor); saveErr != nil {
-					return saveErr
-				}
-				continue
-			}
-			cursor.LastError = ""
-			if cursor.LastDigest != "" && cursor.LastDigest != digest {
-				cursor.PreviousDigest = cursor.LastDigest
-				cursor.Status = imagewatch.StatusChanged
-			} else {
-				cursor.Status = imagewatch.StatusReady
-			}
-			cursor.LastDigest = digest
-			if err := s.store.SaveImageCursor(ctx, cursor); err != nil {
+			if err := s.checkServiceImage(ctx, snapshot.Name, serviceName, service, prior); err != nil {
 				return err
 			}
 		}
 	}
 	return s.audit(ctx, "images.sync", actor.Email, "image metadata checked")
+}
+
+// checkServiceImage refreshes one service's image cursor: semver-tracked
+// services resolve a candidate tag, mutable-tag services track digest drift,
+// and digest-pinned services are skipped.
+func (s *Service) checkServiceImage(ctx context.Context, appName string, serviceName string, service config.ReleaseServiceConfig, prior map[string]imagewatch.Cursor) error {
+	if service.ImageSemver == "" && service.ImageDigest != "" {
+		return nil
+	}
+	cursor := prior[appName+"/"+serviceName]
+	cursor.App = appName
+	cursor.Service = serviceName
+	cursor.Image = service.Image
+	cursor.LastCheckedAt = s.now()
+	if service.ImageSemver != "" {
+		cursor.Tag = service.ImageTag
+		cursor.Constraint = service.ImageSemver
+		s.refreshSemverCursor(ctx, &cursor, service)
+	} else {
+		cursor.Tag = service.EffectiveImageTag()
+		s.refreshDigestCursor(ctx, &cursor, service)
+	}
+	return s.store.SaveImageCursor(ctx, cursor)
+}
+
+// refreshDigestCursor resolves a mutable tag's digest and records drift.
+func (s *Service) refreshDigestCursor(ctx context.Context, cursor *imagewatch.Cursor, service config.ReleaseServiceConfig) {
+	digest, err := s.registry.ResolveDigest(ctx, service.Image, cursor.Tag)
+	if err != nil {
+		cursor.Status = imagewatch.StatusInvalid
+		cursor.LastError = err.Error()
+		return
+	}
+	cursor.LastError = ""
+	if cursor.LastDigest != "" && cursor.LastDigest != digest {
+		cursor.PreviousDigest = cursor.LastDigest
+		cursor.Status = imagewatch.StatusChanged
+	} else {
+		cursor.Status = imagewatch.StatusReady
+	}
+	cursor.LastDigest = digest
+}
+
+// refreshSemverCursor updates a cursor for a semver-tracked service by
+// resolving the highest registry tag matching the service constraint.
+func (s *Service) refreshSemverCursor(ctx context.Context, cursor *imagewatch.Cursor, service config.ReleaseServiceConfig) {
+	constraint, err := semver.ParseConstraint(service.ImageSemver)
+	if err != nil {
+		cursor.Status = imagewatch.StatusInvalid
+		cursor.LastError = err.Error()
+		return
+	}
+	tags, err := s.registry.ListTags(ctx, service.Image)
+	if err != nil {
+		cursor.Status = imagewatch.StatusInvalid
+		cursor.LastError = err.Error()
+		return
+	}
+	candidate, ok := semver.HighestMatch(tags, constraint)
+	if !ok {
+		cursor.Status = imagewatch.StatusInvalid
+		cursor.CandidateTag = ""
+		cursor.LastError = "no registry tags match constraint " + service.ImageSemver
+		return
+	}
+	cursor.LastError = ""
+	cursor.CandidateTag = candidate
+	comparison, comparable := semver.CompareTags(candidate, service.ImageTag)
+	if !comparable || comparison > 0 {
+		cursor.Status = imagewatch.StatusUpdateAvailable
+		return
+	}
+	cursor.Status = imagewatch.StatusReady
 }
 
 // PreviewDeployData validates a deploy-data edit and returns the YAML and commit preview.
@@ -232,6 +280,84 @@ func (s *Service) CommitRelease(ctx context.Context, actor identity.User, appNam
 		return release.Record{}, err
 	}
 	return record, nil
+}
+
+// CommitImageBumps commits a release for every app with pending semver updates.
+// Each bump pins the candidate tag and its digest into app.yml. Bumps whose
+// digest cannot be resolved are skipped and recorded on the image cursor.
+func (s *Service) CommitImageBumps(ctx context.Context, actor identity.User) ([]release.Record, error) {
+	if err := identity.RequireAdmin(actor); err != nil {
+		return nil, err
+	}
+	cursors, err := s.store.ListImageCursors(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pending := make(map[string][]imagewatch.Cursor)
+	for _, cursor := range cursors {
+		if cursor.Status == imagewatch.StatusUpdateAvailable && cursor.CandidateTag != "" {
+			pending[cursor.App] = append(pending[cursor.App], cursor)
+		}
+	}
+	apps := make([]string, 0, len(pending))
+	for app := range pending {
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+	var records []release.Record
+	var failures []error
+	for _, app := range apps {
+		record, err := s.commitAppBumps(ctx, actor, app, pending[app])
+		if err != nil {
+			failures = append(failures, fmt.Errorf("bump %s: %w", app, err))
+			continue
+		}
+		if record != nil {
+			records = append(records, *record)
+		}
+	}
+	return records, errors.Join(failures...)
+}
+
+func (s *Service) commitAppBumps(ctx context.Context, actor identity.User, app string, cursors []imagewatch.Cursor) (*release.Record, error) {
+	changes := make([]release.DeployDataChange, 0, len(cursors))
+	bumped := make([]imagewatch.Cursor, 0, len(cursors))
+	for _, cursor := range cursors {
+		digest, err := s.registry.ResolveDigest(ctx, cursor.Image, cursor.CandidateTag)
+		if err != nil {
+			cursor.Status = imagewatch.StatusInvalid
+			cursor.LastError = "resolve digest for " + cursor.CandidateTag + ": " + err.Error()
+			cursor.LastCheckedAt = s.now()
+			if saveErr := s.store.SaveImageCursor(ctx, cursor); saveErr != nil {
+				return nil, saveErr
+			}
+			continue
+		}
+		changes = append(changes, release.DeployDataChange{
+			Service:     cursor.Service,
+			ImageTag:    cursor.CandidateTag,
+			ImageDigest: digest,
+		})
+		cursor.Tag = cursor.CandidateTag
+		cursor.LastDigest = digest
+		cursor.Status = imagewatch.StatusReady
+		cursor.LastError = ""
+		bumped = append(bumped, cursor)
+	}
+	if len(changes) == 0 {
+		return nil, nil
+	}
+	record, err := s.CommitRelease(ctx, actor, app, changes)
+	if err != nil {
+		return nil, err
+	}
+	for _, cursor := range bumped {
+		cursor.LastCheckedAt = s.now()
+		if err := s.store.SaveImageCursor(ctx, cursor); err != nil {
+			return nil, err
+		}
+	}
+	return &record, nil
 }
 
 // DeployRelease deploys a committed release and persists the attempt.
@@ -310,6 +436,186 @@ func (s *Service) DeployRelease(ctx context.Context, actor identity.User, releas
 		return deployment.Record{}, err
 	}
 	return deploy, s.audit(ctx, "deploy.succeeded", actor.Email, record.App+" "+record.ID)
+}
+
+// StackState returns the persisted whole-stack deploy state.
+func (s *Service) StackState(ctx context.Context) (stackstate.State, error) {
+	return s.store.StackState(ctx)
+}
+
+// DeployStack deploys the latest release of every app as one operation.
+// If any app fails, every app deployed by this attempt is reverted to the
+// last healthy baseline; the baseline advances only when all apps succeed.
+func (s *Service) DeployStack(ctx context.Context, actor identity.User) (stackstate.Attempt, error) {
+	if err := identity.RequireAdmin(actor); err != nil {
+		return stackstate.Attempt{}, err
+	}
+	targets, err := s.stackTargets(ctx)
+	if err != nil {
+		return stackstate.Attempt{}, err
+	}
+	if len(targets) == 0 {
+		return stackstate.Attempt{}, fmt.Errorf("no committed releases to deploy")
+	}
+	state, err := s.store.StackState(ctx)
+	if err != nil {
+		return stackstate.Attempt{}, err
+	}
+	attempt := stackstate.Attempt{
+		ID:         newID("stack"),
+		Status:     stackstate.StatusRunning,
+		Releases:   targets,
+		ActorEmail: actor.Email,
+		StartedAt:  s.now(),
+	}
+	state.LastAttempt = &attempt
+	if err := s.store.SaveStackState(ctx, state); err != nil {
+		return stackstate.Attempt{}, err
+	}
+	apps := make([]string, 0, len(targets))
+	for app := range targets {
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+	var attempted []string
+	var deployErr error
+	for _, app := range apps {
+		attempted = append(attempted, app)
+		if _, err := s.DeployRelease(ctx, actor, targets[app]); err != nil {
+			attempt.FailedApp = app
+			deployErr = err
+			break
+		}
+	}
+	if deployErr == nil {
+		attempt.Status = stackstate.StatusSucceeded
+		state.LastHealthy = stackstate.Snapshot{Releases: targets, UpdatedAt: s.now()}
+		if err := s.finishStackAttempt(ctx, state, &attempt); err != nil {
+			return attempt, err
+		}
+		return attempt, s.audit(ctx, "stack.deploy.succeeded", actor.Email, fmt.Sprintf("%d apps deployed", len(apps)))
+	}
+	attempt.Error = deployErr.Error()
+	if len(state.LastHealthy.Releases) == 0 {
+		attempt.Status = stackstate.StatusFailed
+		if err := s.finishStackAttempt(ctx, state, &attempt); err != nil {
+			return attempt, errors.Join(deployErr, err)
+		}
+		auditErr := s.audit(ctx, "stack.deploy.failed", actor.Email, attempt.FailedApp+": "+deployErr.Error()+" (no healthy baseline to revert to)")
+		return attempt, errors.Join(deployErr, auditErr)
+	}
+	revertErr := s.revertStack(ctx, actor, attempted, targets, state.LastHealthy)
+	if revertErr != nil {
+		attempt.Status = stackstate.StatusRevertFailed
+		attempt.RevertError = revertErr.Error()
+	} else {
+		attempt.Status = stackstate.StatusReverted
+	}
+	if err := s.finishStackAttempt(ctx, state, &attempt); err != nil {
+		return attempt, errors.Join(deployErr, revertErr, err)
+	}
+	message := attempt.FailedApp + ": " + deployErr.Error()
+	if revertErr != nil {
+		auditErr := s.audit(ctx, "stack.revert.failed", actor.Email, message+"; revert failed: "+revertErr.Error())
+		return attempt, errors.Join(deployErr, revertErr, auditErr)
+	}
+	auditErr := s.audit(ctx, "stack.reverted", actor.Email, message+"; reverted to last healthy baseline")
+	return attempt, errors.Join(deployErr, auditErr)
+}
+
+// RollbackStack redeploys the last healthy baseline.
+func (s *Service) RollbackStack(ctx context.Context, actor identity.User) (stackstate.Attempt, error) {
+	if err := identity.RequireAdmin(actor); err != nil {
+		return stackstate.Attempt{}, err
+	}
+	state, err := s.store.StackState(ctx)
+	if err != nil {
+		return stackstate.Attempt{}, err
+	}
+	if len(state.LastHealthy.Releases) == 0 {
+		return stackstate.Attempt{}, fmt.Errorf("no healthy baseline recorded")
+	}
+	attempt := stackstate.Attempt{
+		ID:         newID("stack"),
+		Status:     stackstate.StatusRunning,
+		Releases:   state.LastHealthy.Releases,
+		ActorEmail: actor.Email,
+		StartedAt:  s.now(),
+	}
+	state.LastAttempt = &attempt
+	if err := s.store.SaveStackState(ctx, state); err != nil {
+		return stackstate.Attempt{}, err
+	}
+	apps := make([]string, 0, len(state.LastHealthy.Releases))
+	for app := range state.LastHealthy.Releases {
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+	var rollbackErr error
+	for _, app := range apps {
+		if _, err := s.DeployRelease(ctx, actor, state.LastHealthy.Releases[app]); err != nil {
+			attempt.FailedApp = app
+			rollbackErr = err
+			break
+		}
+	}
+	if rollbackErr != nil {
+		attempt.Status = stackstate.StatusRevertFailed
+		attempt.RevertError = rollbackErr.Error()
+		if err := s.finishStackAttempt(ctx, state, &attempt); err != nil {
+			return attempt, errors.Join(rollbackErr, err)
+		}
+		auditErr := s.audit(ctx, "stack.rollback.failed", actor.Email, attempt.FailedApp+": "+rollbackErr.Error())
+		return attempt, errors.Join(rollbackErr, auditErr)
+	}
+	attempt.Status = stackstate.StatusReverted
+	if err := s.finishStackAttempt(ctx, state, &attempt); err != nil {
+		return attempt, err
+	}
+	return attempt, s.audit(ctx, "stack.rollback", actor.Email, fmt.Sprintf("%d apps redeployed at baseline", len(apps)))
+}
+
+// stackTargets maps every app to its newest committed release.
+func (s *Service) stackTargets(ctx context.Context) (map[string]string, error) {
+	apps, err := s.store.ListApps(ctx)
+	if err != nil {
+		return nil, err
+	}
+	targets := make(map[string]string)
+	for _, app := range apps {
+		records, err := s.store.ListReleases(ctx, app.Name)
+		if err != nil {
+			return nil, err
+		}
+		if len(records) == 0 {
+			continue
+		}
+		targets[app.Name] = records[0].ID
+	}
+	return targets, nil
+}
+
+// revertStack redeploys every attempted app whose baseline release differs from
+// the release this attempt deployed.
+func (s *Service) revertStack(ctx context.Context, actor identity.User, attempted []string, targets map[string]string, baseline stackstate.Snapshot) error {
+	var failures []error
+	for _, app := range attempted {
+		baselineRelease, ok := baseline.Releases[app]
+		if !ok || baselineRelease == targets[app] {
+			continue
+		}
+		if _, err := s.DeployRelease(ctx, actor, baselineRelease); err != nil {
+			failures = append(failures, fmt.Errorf("revert %s to %s: %w", app, baselineRelease, err))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func (s *Service) finishStackAttempt(ctx context.Context, state stackstate.State, attempt *stackstate.Attempt) error {
+	finishedAt := s.now()
+	attempt.FinishedAt = &finishedAt
+	state.LastAttempt = attempt
+	return s.store.SaveStackState(ctx, state)
 }
 
 func (s *Service) releaseManifests(ctx context.Context, app string, current release.Record) ([]ReleaseManifestInput, error) {
@@ -421,7 +727,7 @@ func (s *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 	}
 	var changed int
 	for _, cursor := range images {
-		if cursor.Status == imagewatch.StatusChanged {
+		if cursor.Status == imagewatch.StatusChanged || cursor.Status == imagewatch.StatusUpdateAvailable {
 			changed++
 		}
 	}
@@ -446,6 +752,16 @@ type Dashboard struct {
 	AppCount int
 	// ImageUpdates is the count of watched images with digest changes.
 	ImageUpdates int
+}
+
+// ImageCursors returns all image watch cursors.
+func (s *Service) ImageCursors(ctx context.Context) ([]imagewatch.Cursor, error) {
+	return s.store.ListImageCursors(ctx)
+}
+
+// AuditEvents returns recent audit events, newest first.
+func (s *Service) AuditEvents(ctx context.Context, limit int) ([]audit.Event, error) {
+	return s.store.ListAuditEvents(ctx, limit)
 }
 
 // Apps returns observed apps sorted by name.
@@ -560,7 +876,7 @@ func (s *Service) importRepoAtRef(ctx context.Context, settings configrepo.Repos
 		if err != nil {
 			return err
 		}
-		if err := s.store.UpsertApp(ctx, configrepo.AppSnapshot{
+		snapshot := configrepo.AppSnapshot{
 			Name:         appName,
 			Path:         file.Path,
 			ConfigCommit: ref,
@@ -568,11 +884,44 @@ func (s *Service) importRepoAtRef(ctx context.Context, settings configrepo.Repos
 			RawYAML:      file.Content,
 			ComposeYAML:  composeContent,
 			UpdatedAt:    observedAt,
-		}); err != nil {
+		}
+		if err := s.store.UpsertApp(ctx, snapshot); err != nil {
+			return err
+		}
+		if err := s.recordSyncedRelease(ctx, app, snapshot, observedAt); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// recordSyncedRelease creates a ready release for synced app config whose
+// manifest is not yet recorded, so human config commits become deployable.
+// Releases created by the bump committer share the same content-derived
+// manifest ID and are skipped here.
+func (s *Service) recordSyncedRelease(ctx context.Context, app *config.AppConfig, snapshot configrepo.AppSnapshot, observedAt time.Time) error {
+	manifest := pkgrelease.Build(app, []byte(snapshot.ComposeYAML), observedAt)
+	_, exists, err := s.store.Release(ctx, manifest.ID)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal synced release manifest: %w", err)
+	}
+	return s.store.CreateRelease(ctx, release.Record{
+		ID:           manifest.ID,
+		App:          snapshot.Name,
+		ConfigCommit: snapshot.ConfigCommit,
+		ManifestJSON: string(append(manifestJSON, '\n')),
+		RawYAML:      snapshot.RawYAML,
+		Status:       release.StatusReady,
+		ActorEmail:   "config-sync@warpgate",
+		CreatedAt:    observedAt,
+	})
 }
 
 func (s *Service) appComposeContent(ctx context.Context, settings configrepo.RepositorySettings, app *config.AppConfig, appName string, ref string) (string, error) {
@@ -766,14 +1115,6 @@ func (s *Service) recordConfigSyncError(ctx context.Context, cause error) error 
 	return cause
 }
 
-func (s *Service) deployRepositoryPath(ctx context.Context) (string, error) {
-	settings, ok, err := s.store.RepositorySettings(ctx)
-	if err != nil || !ok {
-		return "", err
-	}
-	return settings.Path, nil
-}
-
 func (s *Service) runtimeConfig(ctx context.Context) (RuntimeConfigInput, error) {
 	settings, err := s.attachedRepositorySettings(ctx)
 	if err != nil {
@@ -930,9 +1271,9 @@ func marshalApp(app *config.AppConfig) (string, error) {
 func commitMessage(app string, changes []release.DeployDataChange) string {
 	parts := make([]string, 0, len(changes))
 	for _, change := range changes {
-		value := change.ImageDigest
+		value := change.ImageTag
 		if value == "" {
-			value = change.ImageTag
+			value = change.ImageDigest
 		}
 		if value == "" {
 			value = "deploy-data"

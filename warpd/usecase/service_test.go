@@ -13,6 +13,7 @@ import (
 	"github.com/pangobit/warpgate/warpd/internal/identity"
 	"github.com/pangobit/warpgate/warpd/internal/imagewatch"
 	"github.com/pangobit/warpgate/warpd/internal/release"
+	"github.com/pangobit/warpgate/warpd/internal/stackstate"
 	"github.com/pangobit/warpgate/warpd/usecase"
 )
 
@@ -247,6 +248,267 @@ func TestCheckImagesRecordsDigestChanges(t *testing.T) {
 	}
 }
 
+func TestSyncConfigRecordsReleaseForChangedAppConfig(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	github := newFakeGitHub()
+	service := usecase.NewService(store, github, fakeRegistry{}, &fakeDeployer{})
+	if err := service.AttachRepository(ctx, adminUser(), configrepo.RepositorySettings{Owner: "acme", Repo: "infra", Branch: "main"}); err != nil {
+		t.Fatalf("AttachRepository() error = %v", err)
+	}
+	records, err := store.ListReleases(ctx, "api")
+	if err != nil {
+		t.Fatalf("ListReleases() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("releases after attach = %d, want 1 (synced config must be deployable)", len(records))
+	}
+	if records[0].Status != release.StatusReady {
+		t.Fatalf("release status = %q, want ready", records[0].Status)
+	}
+
+	if err := service.SyncConfig(ctx, adminUser()); err != nil {
+		t.Fatalf("SyncConfig() error = %v", err)
+	}
+	records, err = store.ListReleases(ctx, "api")
+	if err != nil {
+		t.Fatalf("ListReleases() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("releases after re-sync = %d, want 1 (no duplicates for unchanged config)", len(records))
+	}
+
+	github.files["apps/api/app.yml"] = usecase.GitHubFile{
+		Path:      "apps/api/app.yml",
+		Content:   appYAML("v2.0.0"),
+		SHA:       "app-sha-2",
+		CommitSHA: "commit-2",
+	}
+	github.head = "commit-2"
+	if err := service.SyncConfig(ctx, adminUser()); err != nil {
+		t.Fatalf("SyncConfig() after change error = %v", err)
+	}
+	records, err = store.ListReleases(ctx, "api")
+	if err != nil {
+		t.Fatalf("ListReleases() error = %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("releases after config change = %d, want 2", len(records))
+	}
+}
+
+func TestCheckImagesResolvesSemverCandidates(t *testing.T) {
+	tests := []struct {
+		name          string
+		pinnedTag     string
+		tags          []string
+		wantStatus    imagewatch.Status
+		wantCandidate string
+	}{
+		{
+			name:          "newer patch available",
+			pinnedTag:     "1.2.0",
+			tags:          []string{"1.2.0", "1.2.5", "1.3.0", "1.2", "latest"},
+			wantStatus:    imagewatch.StatusUpdateAvailable,
+			wantCandidate: "1.2.5",
+		},
+		{
+			name:          "pinned tag is current",
+			pinnedTag:     "1.2.5",
+			tags:          []string{"1.2.0", "1.2.5"},
+			wantStatus:    imagewatch.StatusReady,
+			wantCandidate: "1.2.5",
+		},
+		{
+			name:          "unpinned service adopts highest match",
+			pinnedTag:     "",
+			tags:          []string{"1.2.0", "1.2.5"},
+			wantStatus:    imagewatch.StatusUpdateAvailable,
+			wantCandidate: "1.2.5",
+		},
+		{
+			name:       "no matching tags",
+			pinnedTag:  "1.2.0",
+			tags:       []string{"latest", "edge"},
+			wantStatus: imagewatch.StatusInvalid,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := tursoconn.NewMemoryStore()
+			github := newFakeGitHub()
+			github.files["apps/api/app.yml"] = usecase.GitHubFile{
+				Path:      "apps/api/app.yml",
+				Content:   semverAppYAML("~1.2", test.pinnedTag),
+				SHA:       "app-sha",
+				CommitSHA: "commit-1",
+			}
+			registry := fakeRegistry{tags: map[string][]string{"ghcr.io/acme/api": test.tags}}
+			service := usecase.NewService(store, github, registry, &fakeDeployer{})
+			if err := service.AttachRepository(ctx, adminUser(), configrepo.RepositorySettings{Owner: "acme", Repo: "infra", Branch: "main"}); err != nil {
+				t.Fatalf("AttachRepository() error = %v", err)
+			}
+			if err := service.CheckImages(ctx, adminUser()); err != nil {
+				t.Fatalf("CheckImages() error = %v", err)
+			}
+			cursors, err := store.ListImageCursors(ctx)
+			if err != nil {
+				t.Fatalf("ListImageCursors() error = %v", err)
+			}
+			if len(cursors) != 1 {
+				t.Fatalf("cursors = %d, want 1", len(cursors))
+			}
+			if cursors[0].Status != test.wantStatus {
+				t.Fatalf("status = %q, want %q (error: %s)", cursors[0].Status, test.wantStatus, cursors[0].LastError)
+			}
+			if cursors[0].CandidateTag != test.wantCandidate {
+				t.Fatalf("candidate = %q, want %q", cursors[0].CandidateTag, test.wantCandidate)
+			}
+			if cursors[0].Constraint != "~1.2" {
+				t.Fatalf("constraint = %q, want ~1.2", cursors[0].Constraint)
+			}
+		})
+	}
+}
+
+func TestCheckImagesMarksSemverCursorInvalidOnRegistryError(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	github := newFakeGitHub()
+	github.files["apps/api/app.yml"] = usecase.GitHubFile{
+		Path:      "apps/api/app.yml",
+		Content:   semverAppYAML("~1.2", "1.2.0"),
+		SHA:       "app-sha",
+		CommitSHA: "commit-1",
+	}
+	service := usecase.NewService(store, github, fakeRegistry{}, &fakeDeployer{})
+	if err := service.AttachRepository(ctx, adminUser(), configrepo.RepositorySettings{Owner: "acme", Repo: "infra", Branch: "main"}); err != nil {
+		t.Fatalf("AttachRepository() error = %v", err)
+	}
+	if err := service.CheckImages(ctx, adminUser()); err != nil {
+		t.Fatalf("CheckImages() error = %v", err)
+	}
+	cursors, err := store.ListImageCursors(ctx)
+	if err != nil {
+		t.Fatalf("ListImageCursors() error = %v", err)
+	}
+	if len(cursors) != 1 || cursors[0].Status != imagewatch.StatusInvalid {
+		t.Fatalf("cursors = %+v, want one invalid cursor", cursors)
+	}
+	if cursors[0].LastError == "" {
+		t.Fatal("invalid cursor should record the registry error")
+	}
+}
+
+func TestCommitImageBumpsCommitsPendingUpdates(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	github := newFakeGitHub()
+	github.files["apps/api/app.yml"] = usecase.GitHubFile{
+		Path:      "apps/api/app.yml",
+		Content:   semverAppYAML("~1.2", "1.2.0"),
+		SHA:       "app-sha",
+		CommitSHA: "commit-1",
+	}
+	registry := fakeRegistry{
+		tags:    map[string][]string{"ghcr.io/acme/api": {"1.2.0", "1.2.5", "latest"}},
+		digests: map[string]string{"ghcr.io/acme/api:1.2.5": "sha256:bumped"},
+	}
+	service := usecase.NewService(store, github, registry, &fakeDeployer{})
+	if err := service.AttachRepository(ctx, adminUser(), configrepo.RepositorySettings{Owner: "acme", Repo: "infra", Branch: "main"}); err != nil {
+		t.Fatalf("AttachRepository() error = %v", err)
+	}
+	if err := service.CheckImages(ctx, adminUser()); err != nil {
+		t.Fatalf("CheckImages() error = %v", err)
+	}
+
+	records, err := service.CommitImageBumps(ctx, adminUser())
+	if err != nil {
+		t.Fatalf("CommitImageBumps() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	if records[0].App != "api" {
+		t.Fatalf("record app = %q, want api", records[0].App)
+	}
+
+	appFile := github.files["apps/api/app.yml"]
+	if !strings.Contains(appFile.Content, "image_tag: 1.2.5") {
+		t.Fatalf("app.yml missing bumped tag:\n%s", appFile.Content)
+	}
+	if !strings.Contains(appFile.Content, "image_digest: sha256:bumped") {
+		t.Fatalf("app.yml missing pinned digest:\n%s", appFile.Content)
+	}
+	if !strings.Contains(appFile.Content, "image_semver:") {
+		t.Fatalf("app.yml lost the semver constraint:\n%s", appFile.Content)
+	}
+
+	cursors, err := store.ListImageCursors(ctx)
+	if err != nil {
+		t.Fatalf("ListImageCursors() error = %v", err)
+	}
+	if len(cursors) != 1 || cursors[0].Status != imagewatch.StatusReady {
+		t.Fatalf("cursor after bump = %+v, want ready", cursors)
+	}
+	if cursors[0].Tag != "1.2.5" {
+		t.Fatalf("cursor tag = %q, want 1.2.5", cursors[0].Tag)
+	}
+
+	again, err := service.CommitImageBumps(ctx, adminUser())
+	if err != nil {
+		t.Fatalf("CommitImageBumps() second error = %v", err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("second run records = %d, want 0 (idempotent)", len(again))
+	}
+}
+
+func TestCommitImageBumpsBlocksOnDigestFailure(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	github := newFakeGitHub()
+	github.files["apps/api/app.yml"] = usecase.GitHubFile{
+		Path:      "apps/api/app.yml",
+		Content:   semverAppYAML("~1.2", "1.2.0"),
+		SHA:       "app-sha",
+		CommitSHA: "commit-1",
+	}
+	registry := fakeRegistry{
+		tags: map[string][]string{"ghcr.io/acme/api": {"1.2.5"}},
+	}
+	service := usecase.NewService(store, github, registry, &fakeDeployer{})
+	if err := service.AttachRepository(ctx, adminUser(), configrepo.RepositorySettings{Owner: "acme", Repo: "infra", Branch: "main"}); err != nil {
+		t.Fatalf("AttachRepository() error = %v", err)
+	}
+	if err := service.CheckImages(ctx, adminUser()); err != nil {
+		t.Fatalf("CheckImages() error = %v", err)
+	}
+
+	records, err := service.CommitImageBumps(ctx, adminUser())
+	if err != nil {
+		t.Fatalf("CommitImageBumps() error = %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records = %d, want 0 when digest resolution fails", len(records))
+	}
+	appFile := github.files["apps/api/app.yml"]
+	if strings.Contains(appFile.Content, "1.2.5") {
+		t.Fatalf("app.yml must not be bumped without a digest:\n%s", appFile.Content)
+	}
+	cursors, err := store.ListImageCursors(ctx)
+	if err != nil {
+		t.Fatalf("ListImageCursors() error = %v", err)
+	}
+	if len(cursors) != 1 || cursors[0].Status != imagewatch.StatusInvalid {
+		t.Fatalf("cursor = %+v, want invalid", cursors)
+	}
+	if !strings.Contains(cursors[0].LastError, "resolve digest") {
+		t.Fatalf("cursor error = %q, want digest resolution failure", cursors[0].LastError)
+	}
+}
+
 func TestDeployReleaseRecordsSuccessfulAttempt(t *testing.T) {
 	ctx := context.Background()
 	store := tursoconn.NewMemoryStore()
@@ -380,6 +642,204 @@ func TestDeployReleaseDoesNotResolveUnreleasedAppCompose(t *testing.T) {
 		if snapshot.Name == "site" && snapshot.ComposeYAML != "" {
 			t.Fatalf("unreleased source app compose was resolved")
 		}
+	}
+}
+
+func seedStackApps(t *testing.T, store *tursoconn.MemoryStore, releases map[string]string) {
+	t.Helper()
+	ctx := context.Background()
+	seedRuntimeConfig(t, store)
+	apps := make([]string, 0, len(releases))
+	for app := range releases {
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+	for _, app := range apps {
+		if err := store.UpsertApp(ctx, configrepo.AppSnapshot{Name: app, RawYAML: appYAML("v1.0.0")}); err != nil {
+			t.Fatalf("UpsertApp(%s) error = %v", app, err)
+		}
+		if err := store.CreateRelease(ctx, release.Record{
+			ID:           releases[app],
+			App:          app,
+			ConfigCommit: "commit-1",
+			ManifestJSON: `{}`,
+			Status:       release.StatusReady,
+			ActorEmail:   adminUser().Email,
+		}); err != nil {
+			t.Fatalf("CreateRelease(%s) error = %v", app, err)
+		}
+	}
+}
+
+func TestDeployStackAdvancesBaselineOnSuccess(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	seedStackApps(t, store, map[string]string{"api": "rel-api-1", "worker": "rel-worker-1"})
+	deployer := &fakeDeployer{targets: []string{"node-1"}}
+	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
+
+	attempt, err := service.DeployStack(ctx, adminUser())
+	if err != nil {
+		t.Fatalf("DeployStack() error = %v", err)
+	}
+	if attempt.Status != stackstate.StatusSucceeded {
+		t.Fatalf("attempt status = %q, want succeeded", attempt.Status)
+	}
+	if len(deployer.deployed) != 2 || deployer.deployed[0] != "rel-api-1" || deployer.deployed[1] != "rel-worker-1" {
+		t.Fatalf("deployed = %v, want [rel-api-1 rel-worker-1]", deployer.deployed)
+	}
+	state, err := store.StackState(ctx)
+	if err != nil {
+		t.Fatalf("StackState() error = %v", err)
+	}
+	if state.LastHealthy.Releases["api"] != "rel-api-1" || state.LastHealthy.Releases["worker"] != "rel-worker-1" {
+		t.Fatalf("baseline = %+v, want both releases", state.LastHealthy.Releases)
+	}
+	if state.LastAttempt == nil || state.LastAttempt.FinishedAt == nil {
+		t.Fatalf("last attempt = %+v, want finished attempt", state.LastAttempt)
+	}
+}
+
+func TestDeployStackRevertsToBaselineOnFailure(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	seedStackApps(t, store, map[string]string{"api": "rel-api-1", "worker": "rel-worker-1"})
+	baseline := stackstate.Snapshot{Releases: map[string]string{"api": "rel-api-1", "worker": "rel-worker-1"}}
+	if err := store.SaveStackState(ctx, stackstate.State{LastHealthy: baseline}); err != nil {
+		t.Fatalf("SaveStackState() error = %v", err)
+	}
+	for app, id := range map[string]string{"api": "rel-api-2", "worker": "rel-worker-2"} {
+		if err := store.CreateRelease(ctx, release.Record{
+			ID: id, App: app, ConfigCommit: "commit-2", ManifestJSON: `{}`,
+			Status: release.StatusReady, ActorEmail: adminUser().Email,
+		}); err != nil {
+			t.Fatalf("CreateRelease(%s) error = %v", id, err)
+		}
+	}
+	deployer := &fakeDeployer{
+		targets:      []string{"node-1"},
+		failReleases: map[string]error{"rel-worker-2": errors.New("health check failed")},
+	}
+	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
+
+	attempt, err := service.DeployStack(ctx, adminUser())
+	if err == nil {
+		t.Fatal("DeployStack() expected error, got nil")
+	}
+	if attempt.Status != stackstate.StatusReverted {
+		t.Fatalf("attempt status = %q, want reverted", attempt.Status)
+	}
+	if attempt.FailedApp != "worker" {
+		t.Fatalf("failed app = %q, want worker", attempt.FailedApp)
+	}
+	want := []string{"rel-api-2", "rel-worker-2", "rel-api-1", "rel-worker-1"}
+	if len(deployer.deployed) != len(want) {
+		t.Fatalf("deployed = %v, want %v", deployer.deployed, want)
+	}
+	for index := range want {
+		if deployer.deployed[index] != want[index] {
+			t.Fatalf("deployed = %v, want %v", deployer.deployed, want)
+		}
+	}
+	state, err := store.StackState(ctx)
+	if err != nil {
+		t.Fatalf("StackState() error = %v", err)
+	}
+	if state.LastHealthy.Releases["api"] != "rel-api-1" || state.LastHealthy.Releases["worker"] != "rel-worker-1" {
+		t.Fatalf("baseline = %+v, must not advance on failure", state.LastHealthy.Releases)
+	}
+}
+
+func TestDeployStackHaltsWithoutBaseline(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	seedStackApps(t, store, map[string]string{"api": "rel-api-1"})
+	deployer := &fakeDeployer{
+		targets:      []string{"node-1"},
+		failReleases: map[string]error{"rel-api-1": errors.New("health check failed")},
+	}
+	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
+
+	attempt, err := service.DeployStack(ctx, adminUser())
+	if err == nil {
+		t.Fatal("DeployStack() expected error, got nil")
+	}
+	if attempt.Status != stackstate.StatusFailed {
+		t.Fatalf("attempt status = %q, want failed", attempt.Status)
+	}
+	if len(deployer.deployed) != 1 {
+		t.Fatalf("deployed = %v, want no revert deploys without a baseline", deployer.deployed)
+	}
+}
+
+func TestDeployStackFlagsRevertFailure(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	seedStackApps(t, store, map[string]string{"api": "rel-api-1"})
+	if err := store.SaveStackState(ctx, stackstate.State{
+		LastHealthy: stackstate.Snapshot{Releases: map[string]string{"api": "rel-api-1"}},
+	}); err != nil {
+		t.Fatalf("SaveStackState() error = %v", err)
+	}
+	if err := store.CreateRelease(ctx, release.Record{
+		ID: "rel-api-2", App: "api", ConfigCommit: "commit-2", ManifestJSON: `{}`,
+		Status: release.StatusReady, ActorEmail: adminUser().Email,
+	}); err != nil {
+		t.Fatalf("CreateRelease() error = %v", err)
+	}
+	deployer := &fakeDeployer{
+		targets: []string{"node-1"},
+		failReleases: map[string]error{
+			"rel-api-2": errors.New("health check failed"),
+			"rel-api-1": errors.New("node unreachable"),
+		},
+	}
+	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
+
+	attempt, err := service.DeployStack(ctx, adminUser())
+	if err == nil {
+		t.Fatal("DeployStack() expected error, got nil")
+	}
+	if attempt.Status != stackstate.StatusRevertFailed {
+		t.Fatalf("attempt status = %q, want revert-failed", attempt.Status)
+	}
+	if attempt.RevertError == "" {
+		t.Fatal("revert error must be recorded for operator attention")
+	}
+}
+
+func TestRollbackStackRedeploysBaseline(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	seedStackApps(t, store, map[string]string{"api": "rel-api-1", "worker": "rel-worker-1"})
+	if err := store.SaveStackState(ctx, stackstate.State{
+		LastHealthy: stackstate.Snapshot{Releases: map[string]string{"api": "rel-api-1", "worker": "rel-worker-1"}},
+	}); err != nil {
+		t.Fatalf("SaveStackState() error = %v", err)
+	}
+	deployer := &fakeDeployer{targets: []string{"node-1"}}
+	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
+
+	attempt, err := service.RollbackStack(ctx, adminUser())
+	if err != nil {
+		t.Fatalf("RollbackStack() error = %v", err)
+	}
+	if attempt.Status != stackstate.StatusReverted {
+		t.Fatalf("attempt status = %q, want reverted", attempt.Status)
+	}
+	if len(deployer.deployed) != 2 || deployer.deployed[0] != "rel-api-1" || deployer.deployed[1] != "rel-worker-1" {
+		t.Fatalf("deployed = %v, want baseline releases in app order", deployer.deployed)
+	}
+}
+
+func TestRollbackStackRequiresBaseline(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	seedStackApps(t, store, map[string]string{"api": "rel-api-1"})
+	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, &fakeDeployer{})
+
+	if _, err := service.RollbackStack(ctx, adminUser()); err == nil {
+		t.Fatal("RollbackStack() expected error without a baseline")
 	}
 }
 
@@ -586,6 +1046,7 @@ func (f *fakeGitHub) WriteFiles(_ context.Context, input usecase.WriteFilesInput
 
 type fakeRegistry struct {
 	digests map[string]string
+	tags    map[string][]string
 }
 
 // ResolveDigest returns a fake image digest.
@@ -597,9 +1058,20 @@ func (f fakeRegistry) ResolveDigest(_ context.Context, image string, tag string)
 	return digest, nil
 }
 
+// ListTags returns fake registry tags.
+func (f fakeRegistry) ListTags(_ context.Context, image string) ([]string, error) {
+	tags, ok := f.tags[image]
+	if !ok {
+		return nil, errors.New("tags not found")
+	}
+	return tags, nil
+}
+
 type fakeDeployer struct {
 	targets          []string
 	err              error
+	failReleases     map[string]error
+	deployed         []string
 	nodes            []usecase.ConfigNode
 	runtime          usecase.RuntimeStatus
 	config           usecase.RuntimeConfigInput
@@ -610,6 +1082,10 @@ type fakeDeployer struct {
 func (f *fakeDeployer) DeployRelease(_ context.Context, input usecase.DeployReleaseInput) (usecase.DeployResult, error) {
 	f.config = input.Config
 	f.releaseManifests = input.ReleaseManifests
+	f.deployed = append(f.deployed, input.ReleaseID)
+	if err, ok := f.failReleases[input.ReleaseID]; ok {
+		return usecase.DeployResult{}, err
+	}
 	return usecase.DeployResult{Targets: f.targets}, f.err
 }
 
@@ -730,6 +1206,25 @@ release:
       image: ghcr.io/acme/api
       image_tag: ` + tag + `
       port: 8080
+      expose:
+        public:
+          domains: [api.example.com]
+`
+}
+
+func semverAppYAML(constraint string, tag string) string {
+	yaml := `kind: warpgate/app
+targets: [node-1]
+release:
+  services:
+    api:
+      image: ghcr.io/acme/api
+      image_semver: "` + constraint + `"
+`
+	if tag != "" {
+		yaml += "      image_tag: " + tag + "\n"
+	}
+	return yaml + `      port: 8080
       expose:
         public:
           domains: [api.example.com]

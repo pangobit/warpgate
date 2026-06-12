@@ -571,7 +571,6 @@ func TestDiscoverApps(t *testing.T) {
 		}
 	}
 
-	// Directory without app.yml should be skipped
 	if err := os.MkdirAll(filepath.Join(appsDir, "no-config"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +584,6 @@ func TestDiscoverApps(t *testing.T) {
 		t.Fatalf("expected 3 apps, got %d", len(apps))
 	}
 
-	// Should be sorted alphabetically
 	expected := []string{"api", "auth", "site"}
 	for i, app := range apps {
 		if app.Name != expected[i] {

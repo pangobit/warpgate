@@ -33,7 +33,11 @@ go vet ./...                   # Vet
 ## Architecture
 
 - `warpgate` lives in `cmd/warpgate/` and uses `pkg/cli/`
-- The local browser UI is started with `warpgate ui` and uses internals under `warpd/`
-- Config loading and app discovery in `pkg/config/`, compose override generation in `pkg/compose/`
+- The daemon is started with `warpgate serve` and composed in `warpd/serve.go`
+- `warpd/usecase/` orchestrates sync, image watching, bump commits, and stack deploys against ports in `warpd/usecase/ports.go`
+- Connectors under `warpd/connectors/`: GitHub App auth + repo API (`github`), GHCR (`registry`), deploy engine adapter (`deploy`), Turso store (`turso`)
+- Operator TUI is served over SSH from `warpd/api/ssh/` (wish + bubbletea); the CI HTTP API is `warpd/api/ci/`
+- Semver constraint matching in `pkg/semver/`; config loading and app discovery in `pkg/config/`; compose override generation in `pkg/compose/`
 - Deploy orchestration in `pkg/deploy/`, SSH client in `pkg/ssh/`, node bootstrap in `pkg/bootstrap/`
-- Warpgate ships one CLI binary; do not add a separate daemon binary
+- Warpgate ships one CLI binary; the daemon is `warpgate serve`, never a separate binary
+- The daemon is the only release actor (bump commits, synced-config releases); the operator is the only deploy actor (TUI). Do not add unattended deploy paths

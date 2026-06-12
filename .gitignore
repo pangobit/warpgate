@@ -5,6 +5,9 @@
 /warpgate.db
 /warpgate.db-*
 
+# Local docker-compose environment
+/.env
+
 # Generated compose files
 generated/
 

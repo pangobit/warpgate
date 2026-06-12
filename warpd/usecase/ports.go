@@ -1,4 +1,4 @@
-// Package usecase orchestrates Warpgate web workflows.
+// Package usecase orchestrates Warpgate daemon workflows.
 package usecase
 
 import (
@@ -10,6 +10,7 @@ import (
 	"github.com/pangobit/warpgate/warpd/internal/deployment"
 	"github.com/pangobit/warpgate/warpd/internal/imagewatch"
 	"github.com/pangobit/warpgate/warpd/internal/release"
+	"github.com/pangobit/warpgate/warpd/internal/stackstate"
 )
 
 // Store persists Warpgate operational state.
@@ -36,6 +37,8 @@ type Store interface {
 	ListDeployments(ctx context.Context, app string) ([]deployment.Record, error)
 	AddAuditEvent(ctx context.Context, event audit.Event) error
 	ListAuditEvents(ctx context.Context, limit int) ([]audit.Event, error)
+	StackState(ctx context.Context) (stackstate.State, error)
+	SaveStackState(ctx context.Context, state stackstate.State) error
 }
 
 // GitHubRepo reads and writes the configured infrastructure repository.
@@ -91,9 +94,10 @@ type WriteFileChange struct {
 	Content string
 }
 
-// Registry resolves mutable image tags to digests.
+// Registry reads image metadata: tag lists and tag digests.
 type Registry interface {
 	ResolveDigest(ctx context.Context, image string, tag string) (string, error)
+	ListTags(ctx context.Context, image string) ([]string, error)
 }
 
 // Deployer executes a committed release.

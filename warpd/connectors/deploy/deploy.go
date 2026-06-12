@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 
 	"github.com/pangobit/warpgate/pkg/config"
 	pkgdeploy "github.com/pangobit/warpgate/pkg/deploy"
@@ -17,12 +15,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const maxClusterSearchDepth = 2
+// TokenProvider supplies GitHub tokens for deploy-time registry access.
+type TokenProvider interface {
+	Token(ctx context.Context) (string, error)
+}
 
 // Adapter deploys releases through pkg/deploy.
 type Adapter struct {
-	// RepoPath is the local infrastructure repository checkout.
-	RepoPath string
 	// SSHKey is the path to the SSH private key.
 	SSHKey string
 	// TailscaleSSH enables Tailscale SSH.
@@ -31,6 +30,8 @@ type Adapter struct {
 	User string
 	// GitHubTokenEnvVar names the env var containing a GitHub token.
 	GitHubTokenEnvVar string
+	// TokenSource mints GitHub tokens on demand; preferred over GitHubTokenEnvVar.
+	TokenSource TokenProvider
 }
 
 // DeployRelease deploys the app through the existing deployment engine.
@@ -48,7 +49,10 @@ func (a Adapter) DeployRelease(ctx context.Context, input usecase.DeployReleaseI
 		return usecase.DeployResult{}, os.ErrNotExist
 	}
 	targets := app.GetTargetNodes(repo.Cluster.Nodes)
-	deployer := a.newDeployer(repo)
+	deployer, err := a.newDeployer(ctx, repo)
+	if err != nil {
+		return usecase.DeployResult{}, err
+	}
 	if err := deployer.DeployRelease(input.App, input.ReleaseID); err != nil {
 		return usecase.DeployResult{}, err
 	}
@@ -76,7 +80,11 @@ func (a Adapter) RuntimeStatus(ctx context.Context, input usecase.RuntimeConfigI
 	if err != nil {
 		return usecase.RuntimeStatus{}, err
 	}
-	result, err := a.newDeployer(repo).ClusterStatus()
+	deployer, err := a.newDeployer(ctx, repo)
+	if err != nil {
+		return usecase.RuntimeStatus{}, err
+	}
+	result, err := deployer.ClusterStatus()
 	if err != nil {
 		return usecase.RuntimeStatus{}, err
 	}
@@ -92,7 +100,11 @@ func (a Adapter) AppRuntimeStatus(ctx context.Context, input usecase.RuntimeConf
 	if err != nil {
 		return nil, err
 	}
-	result, err := a.newDeployer(repo).Status(app)
+	deployer, err := a.newDeployer(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	result, err := deployer.Status(app)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +120,11 @@ func (a Adapter) Logs(ctx context.Context, runtimeConfig usecase.RuntimeConfigIn
 	if err != nil {
 		return usecase.LogsResult{}, err
 	}
-	result, err := a.newDeployer(repo).FetchLogs(pkgdeploy.LogsOptions{
+	deployer, err := a.newDeployer(ctx, repo)
+	if err != nil {
+		return usecase.LogsResult{}, err
+	}
+	result, err := deployer.FetchLogs(pkgdeploy.LogsOptions{
 		NodeID: input.NodeID,
 		App:    input.App,
 		Tail:   input.Tail,
@@ -120,22 +136,26 @@ func (a Adapter) Logs(ctx context.Context, runtimeConfig usecase.RuntimeConfigIn
 	return mapLogsResult(result), nil
 }
 
-func (a Adapter) loadRepo(repositoryPath string) (*config.RepoConfig, error) {
-	clusterPath, err := findClusterPath(a.RepoPath, repositoryPath)
-	if err != nil {
-		return nil, err
-	}
-	return config.LoadRepo(clusterPath)
-}
-
-func (a Adapter) newDeployer(repo *config.RepoConfig) *pkgdeploy.Deployer {
+func (a Adapter) newDeployer(ctx context.Context, repo *config.RepoConfig) (*pkgdeploy.Deployer, error) {
 	deployer := pkgdeploy.NewDeployer(repo, a.SSHKey)
 	deployer.TailscaleSSH = a.TailscaleSSH
 	deployer.User = a.User
-	if a.GitHubTokenEnvVar != "" {
-		deployer.GitHubToken = os.Getenv(a.GitHubTokenEnvVar)
+	token, err := a.githubToken(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return deployer
+	deployer.GitHubToken = token
+	return deployer, nil
+}
+
+func (a Adapter) githubToken(ctx context.Context) (string, error) {
+	if a.TokenSource != nil {
+		return a.TokenSource.Token(ctx)
+	}
+	if a.GitHubTokenEnvVar != "" {
+		return os.Getenv(a.GitHubTokenEnvVar), nil
+	}
+	return "", nil
 }
 
 func repoFromRuntimeConfig(input usecase.RuntimeConfigInput) (*config.RepoConfig, error) {
@@ -349,67 +369,4 @@ func mapLogsResult(result pkgdeploy.LogsResult) usecase.LogsResult {
 		Output:  result.Output,
 		Message: result.Message,
 	}
-}
-
-func findClusterPath(repoPath string, repositoryPath string) (string, error) {
-	root := repoPath
-	if root == "" {
-		root = "."
-	}
-	if repositoryPath != "" {
-		candidate := filepath.Join(root, filepath.FromSlash(repositoryPath), "cluster.yml")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
-		}
-	}
-	candidate := filepath.Join(root, "cluster.yml")
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate, nil
-	}
-	matches, err := findClusterPaths(root, maxClusterSearchDepth)
-	if err != nil {
-		return "", err
-	}
-	if len(matches) > 0 {
-		return matches[0], nil
-	}
-	return "", fmt.Errorf("cluster.yml not found under %s within %d levels", root, maxClusterSearchDepth)
-}
-
-func findClusterPaths(root string, maxDepth int) ([]string, error) {
-	var matches []string
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			depth := pathDepth(root, path)
-			if depth > maxDepth {
-				return filepath.SkipDir
-			}
-			name := entry.Name()
-			if strings.HasPrefix(name, ".") && depth > 0 {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if pathDirDepth(root, path) <= maxDepth && entry.Name() == "cluster.yml" {
-			matches = append(matches, path)
-		}
-		return nil
-	})
-	sort.Strings(matches)
-	return matches, err
-}
-
-func pathDepth(root string, path string) int {
-	relative, err := filepath.Rel(root, path)
-	if err != nil || relative == "." {
-		return 0
-	}
-	return len(strings.Split(relative, string(os.PathSeparator)))
-}
-
-func pathDirDepth(root string, path string) int {
-	return pathDepth(root, filepath.Dir(path))
 }

@@ -11,9 +11,9 @@ import (
 	"github.com/pangobit/warpgate/warpd/internal/audit"
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
 	"github.com/pangobit/warpgate/warpd/internal/deployment"
-	"github.com/pangobit/warpgate/warpd/internal/identity"
 	"github.com/pangobit/warpgate/warpd/internal/imagewatch"
 	"github.com/pangobit/warpgate/warpd/internal/release"
+	"github.com/pangobit/warpgate/warpd/internal/stackstate"
 )
 
 // MemoryStore is an in-process store used by tests and local fallback.
@@ -22,8 +22,6 @@ type MemoryStore struct {
 
 	repoSettings    configrepo.RepositorySettings
 	repoAttached    bool
-	githubSession   identity.GitHubSession
-	githubConnected bool
 	pollerSettings  configrepo.PollerSettings
 	configCursor    configrepo.SyncCursor
 	cluster         configrepo.ClusterSnapshot
@@ -35,6 +33,7 @@ type MemoryStore struct {
 	auditEvents     []audit.Event
 	deploymentOrder []string
 	releaseOrder    []string
+	stackState      stackstate.State
 }
 
 // NewMemoryStore creates an empty in-memory store.
@@ -66,31 +65,6 @@ func (s *MemoryStore) SaveRepositorySettings(_ context.Context, settings configr
 	defer s.mu.Unlock()
 	s.repoSettings = settings
 	s.repoAttached = true
-	return nil
-}
-
-// GitHubSession returns the persisted GitHub authorization.
-func (s *MemoryStore) GitHubSession(_ context.Context) (identity.GitHubSession, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.githubSession, s.githubConnected, nil
-}
-
-// SaveGitHubSession persists GitHub authorization.
-func (s *MemoryStore) SaveGitHubSession(_ context.Context, session identity.GitHubSession) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.githubSession = session
-	s.githubConnected = true
-	return nil
-}
-
-// DeleteGitHubSession removes persisted GitHub authorization.
-func (s *MemoryStore) DeleteGitHubSession(_ context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.githubSession = identity.GitHubSession{}
-	s.githubConnected = false
 	return nil
 }
 
@@ -277,6 +251,21 @@ func (s *MemoryStore) ListDeployments(_ context.Context, app string) ([]deployme
 		}
 	}
 	return records, nil
+}
+
+// StackState returns the persisted whole-stack deploy state.
+func (s *MemoryStore) StackState(_ context.Context) (stackstate.State, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stackState, nil
+}
+
+// SaveStackState persists the whole-stack deploy state.
+func (s *MemoryStore) SaveStackState(_ context.Context, state stackstate.State) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stackState = state
+	return nil
 }
 
 // AddAuditEvent persists an audit event.
