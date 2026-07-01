@@ -228,6 +228,11 @@ func writeSyncedRepo(root string, input usecase.RuntimeConfigInput, releaseApp s
 				return err
 			}
 		}
+		for name, content := range snapshot.ExtraFiles {
+			if err := writeFile(filepath.Join(appDir, name), content); err != nil {
+				return err
+			}
+		}
 		if snapshot.Name == releaseApp {
 			if err := writeReleaseManifests(appDir, releaseID, manifestJSON, releaseManifests); err != nil {
 				return err

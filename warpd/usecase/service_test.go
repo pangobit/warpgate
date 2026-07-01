@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pangobit/warpgate/pkg/config"
 	tursoconn "github.com/pangobit/warpgate/warpd/connectors/turso"
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
 	"github.com/pangobit/warpgate/warpd/internal/deployment"
@@ -83,6 +84,9 @@ func TestAttachRepositoryImportsRepositorySubpath(t *testing.T) {
 	}
 	if apps[0].Path != "prod/apps/api/app.yml" {
 		t.Fatalf("app path = %q, want prod/apps/api/app.yml", apps[0].Path)
+	}
+	if apps[0].ExtraFiles["vector.yaml"] != "sources: {}\n" {
+		t.Fatalf("extra files = %#v, want vector.yaml synced", apps[0].ExtraFiles)
 	}
 }
 
@@ -975,6 +979,12 @@ func newFakeGitHub() *fakeGitHub {
 				SHA:       "prod-compose-sha",
 				CommitSHA: "commit-1",
 			},
+			"prod/apps/api/vector.yaml": {
+				Path:      "prod/apps/api/vector.yaml",
+				Content:   "sources: {}\n",
+				SHA:       "prod-vector-sha",
+				CommitSHA: "commit-1",
+			},
 		},
 	}
 }
@@ -1005,6 +1015,31 @@ func (f *fakeGitHub) ListAppConfigFiles(_ context.Context, settings configrepo.R
 		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, "/app.yml") {
 			files = append(files, file)
 		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files, nil
+}
+
+// ListAppExtraFiles returns fake flat app config files under the configured root.
+func (f *fakeGitHub) ListAppExtraFiles(_ context.Context, settings configrepo.RepositorySettings, appName string, _ string) ([]usecase.GitHubFile, error) {
+	prefix := "apps/" + appName + "/"
+	root := strings.Trim(strings.TrimSpace(settings.Path), "/")
+	if root != "" {
+		prefix = root + "/" + prefix
+	}
+	var files []usecase.GitHubFile
+	for name, file := range f.files {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		rel := strings.TrimPrefix(name, prefix)
+		if strings.Contains(rel, "/") {
+			continue
+		}
+		if !config.IsDeployExtraFile(rel) {
+			continue
+		}
+		files = append(files, file)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, nil

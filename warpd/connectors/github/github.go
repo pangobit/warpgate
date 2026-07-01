@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pangobit/warpgate/pkg/config"
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
 	"github.com/pangobit/warpgate/warpd/usecase"
 )
@@ -151,6 +152,33 @@ func (c *Client) ListAppConfigFiles(ctx context.Context, settings configrepo.Rep
 	root := repositoryPathPrefix(settings)
 	for _, item := range tree.Tree {
 		if item.Type != "blob" || !isAppConfigPath(root, item.Path) {
+			continue
+		}
+		file, err := c.ReadFile(ctx, settings, item.Path, ref)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	return files, nil
+}
+
+// ListAppExtraFiles lists flat config files under apps/<appName>/ at the given ref.
+func (c *Client) ListAppExtraFiles(ctx context.Context, settings configrepo.RepositorySettings, appName string, ref string) ([]usecase.GitHubFile, error) {
+	var tree struct {
+		Tree []struct {
+			Path string `json:"path"`
+			Type string `json:"type"`
+		} `json:"tree"`
+	}
+	endpoint := "/repos/" + settings.Owner + "/" + settings.Repo + "/git/trees/" + ref + "?recursive=1"
+	if err := c.getJSON(ctx, settings, endpoint, &tree); err != nil {
+		return nil, err
+	}
+	var files []usecase.GitHubFile
+	root := repositoryPathPrefix(settings)
+	for _, item := range tree.Tree {
+		if item.Type != "blob" || !isAppExtraFilePath(root, appName, item.Path) {
 			continue
 		}
 		file, err := c.ReadFile(ctx, settings, item.Path, ref)
@@ -571,4 +599,22 @@ func isAppConfigPath(root string, value string) bool {
 	}
 	parts := strings.Split(value, "/")
 	return len(parts) == 3
+}
+
+func isAppExtraFilePath(root string, appName string, value string) bool {
+	if root != "" {
+		if !strings.HasPrefix(value, root) {
+			return false
+		}
+		value = strings.TrimPrefix(value, root)
+	}
+	prefix := "apps/" + appName + "/"
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	parts := strings.Split(value, "/")
+	if len(parts) != 3 {
+		return false
+	}
+	return config.IsDeployExtraFile(parts[2])
 }

@@ -501,6 +501,8 @@ func TestPrepareRecreateRestoreLoadsPreviousReleaseAndFiles(t *testing.T) {
 			readRemoteTextFileCommand("/remote/compose.yml"):                 "1\nold compose",
 			readRemoteTextFileCommand("/remote/docker-compose.override.yml"): "1\nold override",
 			listRemoteEnvFilesCommand("/remote"):                             "",
+			listRemoteExtraFilesCommand("/remote"):                           "vector.yaml\n",
+			readRemoteTextFileCommand("/remote/vector.yaml"):                 "1\nold vector\n",
 		},
 	}
 
@@ -514,6 +516,9 @@ func TestPrepareRecreateRestoreLoadsPreviousReleaseAndFiles(t *testing.T) {
 	if got.files.compose != "old compose" || got.files.override != "old override" {
 		t.Fatalf("restore files = %+v", got.files)
 	}
+	if got.files.extraFiles["vector.yaml"] != "old vector\n" {
+		t.Fatalf("extra files = %#v", got.files.extraFiles)
+	}
 	if got.manifest == nil || got.manifest.ID != "old-release" {
 		t.Fatalf("restore manifest = %+v, want old-release", got.manifest)
 	}
@@ -522,6 +527,8 @@ func TestPrepareRecreateRestoreLoadsPreviousReleaseAndFiles(t *testing.T) {
 		readRemoteTextFileCommand("/remote/compose.yml"),
 		readRemoteTextFileCommand("/remote/docker-compose.override.yml"),
 		listRemoteEnvFilesCommand("/remote"),
+		listRemoteExtraFilesCommand("/remote"),
+		readRemoteTextFileCommand("/remote/vector.yaml"),
 	}
 	if !reflect.DeepEqual(runner.commands, wantCommands) {
 		t.Errorf("commands = %v, want %v", runner.commands, wantCommands)
@@ -539,6 +546,7 @@ func TestPrepareRecreateRestoreContinuesWhenPreviousReleaseManifestIsMissingWith
 			readRemoteTextFileCommand("/remote/compose.yml"):                 "1\nold compose",
 			readRemoteTextFileCommand("/remote/docker-compose.override.yml"): "1\nold override",
 			listRemoteEnvFilesCommand("/remote"):                             ".env\n.env.probe\n",
+			listRemoteExtraFilesCommand("/remote"):                           "",
 			readRemoteTextFileCommand("/remote/.env"):                        "1\nDOMAIN=old.example\n",
 			readRemoteTextFileCommand("/remote/.env.probe"):                  "1\nDOMAIN=old.example\n",
 		},
@@ -567,6 +575,7 @@ func TestPrepareRecreateRestoreContinuesWhenPreviousReleaseManifestIsMissingWith
 			readRemoteTextFileCommand("/remote/compose.yml"):                 "1\nold compose",
 			readRemoteTextFileCommand("/remote/docker-compose.override.yml"): "1\nold override",
 			listRemoteEnvFilesCommand("/remote"):                             "",
+			listRemoteExtraFilesCommand("/remote"):                           "",
 		},
 	}
 
@@ -582,6 +591,9 @@ func TestPrepareRecreateRestoreContinuesWhenPreviousReleaseManifestIsMissingWith
 	}
 	if len(got.files.envFiles) != 0 {
 		t.Fatalf("env files = %+v, want none", got.files.envFiles)
+	}
+	if len(got.files.extraFiles) != 0 {
+		t.Fatalf("extra files = %#v, want none", got.files.extraFiles)
 	}
 }
 
