@@ -876,6 +876,10 @@ func (s *Service) importRepoAtRef(ctx context.Context, settings configrepo.Repos
 		if err != nil {
 			return err
 		}
+		extraFiles, err := s.appExtraFiles(ctx, settings, appName, ref)
+		if err != nil {
+			return err
+		}
 		snapshot := configrepo.AppSnapshot{
 			Name:         appName,
 			Path:         file.Path,
@@ -883,6 +887,7 @@ func (s *Service) importRepoAtRef(ctx context.Context, settings configrepo.Repos
 			FileSHA:      file.SHA,
 			RawYAML:      file.Content,
 			ComposeYAML:  composeContent,
+			ExtraFiles:   extraFiles,
 			UpdatedAt:    observedAt,
 		}
 		if err := s.store.UpsertApp(ctx, snapshot); err != nil {
@@ -946,6 +951,22 @@ func (s *Service) appComposeContent(ctx context.Context, settings configrepo.Rep
 		return "", fmt.Errorf("app %s: compose.yml is required when source is not set", appName)
 	}
 	return compose.Content, nil
+}
+
+func (s *Service) appExtraFiles(ctx context.Context, settings configrepo.RepositorySettings, appName string, ref string) (map[string]string, error) {
+	files, err := s.github.ListAppExtraFiles(ctx, settings, appName, ref)
+	if err != nil {
+		return nil, fmt.Errorf("app %s: list extra files: %w", appName, err)
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+	extraFiles := make(map[string]string, len(files))
+	for _, file := range files {
+		name := path.Base(file.Path)
+		extraFiles[name] = file.Content
+	}
+	return extraFiles, nil
 }
 
 func sourceRepositorySettings(source *config.SourceConfig, ref string) (configrepo.RepositorySettings, error) {

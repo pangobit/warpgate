@@ -46,6 +46,7 @@ type GitHubRepo interface {
 	BranchHead(ctx context.Context, settings configrepo.RepositorySettings) (string, error)
 	ReadFile(ctx context.Context, settings configrepo.RepositorySettings, path string, ref string) (GitHubFile, error)
 	ListAppConfigFiles(ctx context.Context, settings configrepo.RepositorySettings, ref string) ([]GitHubFile, error)
+	ListAppExtraFiles(ctx context.Context, settings configrepo.RepositorySettings, appName string, ref string) ([]GitHubFile, error)
 	WriteFile(ctx context.Context, input WriteFileInput) (GitHubFile, error)
 	WriteFiles(ctx context.Context, input WriteFilesInput) ([]GitHubFile, error)
 }
