@@ -49,6 +49,22 @@ func testOverview() overview {
 			},
 		},
 		apps: []configrepo.AppSnapshot{{Name: "api"}},
+		appServices: []usecase.AppReleaseServices{{
+			Name: "api",
+			Services: []usecase.AppReleaseService{
+				{Name: "api", Image: "ghcr.io/acme/api", ImageTag: "1.2.0"},
+				{Name: "worker", Image: "ghcr.io/acme/worker", ImageTag: "1.1.0"},
+			},
+		}},
+		baselineReleases: []usecase.AppBaselineRelease{{
+			Name:            "api",
+			ConfigCommit:    "abcdef1234567890",
+			PrimaryImageTag: "v1.2.0",
+			Services: []usecase.AppDeployedService{
+				{Name: "api", ImageRef: "ghcr.io/acme/api:v1.2.0"},
+				{Name: "worker", ImageRef: "ghcr.io/acme/worker:v1.1.0"},
+			},
+		}},
 	}
 }
 
@@ -73,15 +89,101 @@ func TestDashboardRendersOverviewSections(t *testing.T) {
 	for _, want := range []string{
 		"acme/infra@main",
 		"abcdef12",
-		"api/api",
-		"1.2.5",
+		"1 semver update pending — see Apps section",
+		"→ 1.2.5 (commit pending)",
 		"baseline: 1 apps",
 		"succeeded",
+		"commit abcdef12 · v1.2.0",
+		"ghcr.io/acme/api:v1.2.0",
+		"ghcr.io/acme/worker:v1.1.0",
 		"[d] deploy stack",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("view missing %q:\n%s", want, content)
 		}
+	}
+}
+
+func TestAppsSectionShowsMissingBaselineRelease(t *testing.T) {
+	data := testOverview()
+	data.baselineReleases = []usecase.AppBaselineRelease{{
+		Name:           "api",
+		ReleaseMissing: true,
+	}}
+	m := updated(t, newTestModel(), overviewMsg{data: data})
+	content := m.View().Content
+	if !strings.Contains(content, "release record missing") {
+		t.Fatalf("expected missing release error:\n%s", content)
+	}
+}
+
+func TestAppsSectionShowsInvalidCursorInline(t *testing.T) {
+	data := testOverview()
+	data.cursors = []imagewatch.Cursor{{
+		App:       "api",
+		Service:   "api",
+		Status:    imagewatch.StatusInvalid,
+		LastError: "registry unreachable",
+	}}
+	m := updated(t, newTestModel(), overviewMsg{data: data})
+	content := m.View().Content
+	if !strings.Contains(content, "registry unreachable") {
+		t.Fatalf("expected invalid cursor error inline:\n%s", content)
+	}
+}
+
+func TestUpdatesSectionSummarizesPending(t *testing.T) {
+	m := updated(t, newTestModel(), overviewMsg{data: testOverview()})
+	content := m.View().Content
+	if !strings.Contains(content, "1 semver update pending — see Apps section") {
+		t.Fatalf("expected pending update summary:\n%s", content)
+	}
+	if strings.Contains(content, "api/api              1.2.0") {
+		t.Fatalf("expected pending updates section to avoid per-service duplicate lines:\n%s", content)
+	}
+}
+
+func TestAppsSectionShowsNotDeployedLabel(t *testing.T) {
+	data := testOverview()
+	data.stack.LastHealthy.Releases = map[string]string{}
+	data.baselineReleases = nil
+	data.apps = []configrepo.AppSnapshot{{Name: "api"}, {Name: "worker"}}
+	data.appServices = []usecase.AppReleaseServices{
+		{
+			Name: "api",
+			Services: []usecase.AppReleaseService{
+				{Name: "api", Image: "ghcr.io/acme/api", ImageTag: "1.2.0"},
+			},
+		},
+		{
+			Name: "worker",
+			Services: []usecase.AppReleaseService{
+				{Name: "worker", Image: "ghcr.io/acme/worker", ImageTag: "1.0.0"},
+			},
+		},
+	}
+	m := updated(t, newTestModel(), overviewMsg{data: data})
+	content := m.View().Content
+	if !strings.Contains(content, "not in baseline") {
+		t.Fatalf("expected not in baseline label:\n%s", content)
+	}
+	if !strings.Contains(content, "ghcr.io/acme/worker:1.0.0 (not deployed)") {
+		t.Fatalf("expected not deployed label on desired service:\n%s", content)
+	}
+}
+
+func TestAppsSectionRendersParseError(t *testing.T) {
+	data := testOverview()
+	data.stack.LastHealthy.Releases = map[string]string{}
+	data.baselineReleases = nil
+	data.appServices = []usecase.AppReleaseServices{{
+		Name:       "api",
+		ParseError: "yaml: unmarshal errors",
+	}}
+	m := updated(t, newTestModel(), overviewMsg{data: data})
+	content := m.View().Content
+	if !strings.Contains(content, "config error: yaml: unmarshal errors") {
+		t.Fatalf("expected parse error in apps section:\n%s", content)
 	}
 }
 

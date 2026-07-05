@@ -191,6 +191,33 @@ func releaseManifestApp(name, composeRef string) *config.AppConfig {
 	}
 }
 
+func TestParseManifestJSONRoundTrip(t *testing.T) {
+	raw := `{
+  "id": "rel-1",
+  "app": "api",
+  "image_ref": "ghcr.io/acme/api:v1.0.0",
+  "image_tag": "v1.0.0",
+  "services": {
+    "api": {
+      "image_ref": "ghcr.io/acme/api:v1.0.0",
+      "image_tag": "v1.0.0",
+      "env_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}`
+
+	manifest, err := ParseManifestJSON([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseManifestJSON() error = %v", err)
+	}
+	if manifest.App != "api" {
+		t.Fatalf("app = %q, want api", manifest.App)
+	}
+	if manifest.Services["api"].ImageRef != "ghcr.io/acme/api:v1.0.0" {
+		t.Fatalf("api image ref = %q", manifest.Services["api"].ImageRef)
+	}
+}
+
 func TestSaveAndLoadReleaseManifest(t *testing.T) {
 	dir := t.TempDir()
 	manifest := &Manifest{
