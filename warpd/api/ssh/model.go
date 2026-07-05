@@ -318,77 +318,112 @@ func (m model) updatesSection() string {
 	return b.String()
 }
 
+type appsSectionLookups struct {
+	servicesByApp       map[string]usecase.AppReleaseServices
+	cursorsByAppService map[string]imagewatch.Cursor
+	baselineByApp       map[string]usecase.AppBaselineRelease
+}
+
+type appServiceRow struct {
+	Name     string
+	ImageRef string
+}
+
+func (m model) appsSectionLookups() appsSectionLookups {
+	lookups := appsSectionLookups{
+		servicesByApp:       make(map[string]usecase.AppReleaseServices, len(m.data.appServices)),
+		cursorsByAppService: make(map[string]imagewatch.Cursor, len(m.data.cursors)),
+		baselineByApp:       make(map[string]usecase.AppBaselineRelease, len(m.data.baselineReleases)),
+	}
+	for _, entry := range m.data.appServices {
+		lookups.servicesByApp[entry.Name] = entry
+	}
+	for _, cursor := range m.data.cursors {
+		lookups.cursorsByAppService[cursor.App+"/"+cursor.Service] = cursor
+	}
+	for _, entry := range m.data.baselineReleases {
+		lookups.baselineByApp[entry.Name] = entry
+	}
+	return lookups
+}
+
 func (m model) appsSection() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render(fmt.Sprintf("Apps (%d)", len(m.data.apps))) + "\n")
-	stack := m.data.stack
-	servicesByApp := make(map[string]usecase.AppReleaseServices, len(m.data.appServices))
-	for _, entry := range m.data.appServices {
-		servicesByApp[entry.Name] = entry
-	}
-	cursorsByAppService := make(map[string]imagewatch.Cursor, len(m.data.cursors))
-	for _, cursor := range m.data.cursors {
-		cursorsByAppService[cursor.App+"/"+cursor.Service] = cursor
-	}
-	baselineByApp := make(map[string]usecase.AppBaselineRelease, len(m.data.baselineReleases))
-	for _, entry := range m.data.baselineReleases {
-		baselineByApp[entry.Name] = entry
-	}
-	for _, app := range m.data.apps {
-		releaseID := stack.LastHealthy.Releases[app.Name]
-		if releaseID != "" {
-			baseline := baselineByApp[app.Name]
-			appLabel := usecase.BaselineReleaseLabel(baseline)
-			if baseline.ReleaseMissing {
-				appLabel = errStyle.Render("release record missing")
-			} else if baseline.ManifestError != "" {
-				appLabel = errStyle.Render("manifest error: " + baseline.ManifestError)
-			}
-			b.WriteString(fmt.Sprintf("  %-24s %s\n", app.Name, appLabel))
-			if baseline.ReleaseMissing || baseline.ManifestError != "" {
-				continue
-			}
-			if len(baseline.Services) == 0 {
-				b.WriteString("    " + dimStyle.Render("no release services") + "\n")
-				continue
-			}
-			for _, service := range baseline.Services {
-				imageRef := dimStyle.Render(service.ImageRef)
-				suffix := ""
-				if cursor, ok := cursorsByAppService[app.Name+"/"+service.Name]; ok {
-					suffix = formatServicePendingSuffix(cursor)
-				}
-				b.WriteString(fmt.Sprintf("    %-22s %s%s\n", service.Name, imageRef, suffix))
-			}
-			continue
-		}
-		b.WriteString(fmt.Sprintf("  %-24s %s\n", app.Name, dimStyle.Render("not in baseline")))
-		entry, ok := servicesByApp[app.Name]
-		if !ok {
-			b.WriteString("    " + dimStyle.Render("no release services") + "\n")
-			continue
-		}
-		if entry.ParseError != "" {
-			b.WriteString("    " + errStyle.Render("config error: "+entry.ParseError) + "\n")
-			continue
-		}
-		if len(entry.Services) == 0 {
-			b.WriteString("    " + dimStyle.Render("no release services") + "\n")
-			continue
-		}
-		for _, service := range entry.Services {
-			imageRef := dimStyle.Render(usecase.ReleaseServiceImageRef(service) + " (not deployed)")
-			suffix := ""
-			if cursor, ok := cursorsByAppService[app.Name+"/"+service.Name]; ok {
-				suffix = formatServicePendingSuffix(cursor)
-			}
-			b.WriteString(fmt.Sprintf("    %-22s %s%s\n", service.Name, imageRef, suffix))
-		}
-	}
 	if len(m.data.apps) == 0 {
 		b.WriteString("  " + dimStyle.Render("no apps synced") + "\n")
+		return b.String()
+	}
+	lookups := m.appsSectionLookups()
+	for _, app := range m.data.apps {
+		if m.data.stack.LastHealthy.Releases[app.Name] != "" {
+			writeBaselineApp(&b, app.Name, lookups.baselineByApp[app.Name], lookups)
+			continue
+		}
+		writeDesiredApp(&b, app.Name, lookups.servicesByApp[app.Name], lookups)
 	}
 	return b.String()
+}
+
+func formatBaselineAppLabel(baseline usecase.AppBaselineRelease) string {
+	if baseline.ReleaseMissing {
+		return errStyle.Render("release record missing")
+	}
+	if baseline.ManifestError != "" {
+		return errStyle.Render("manifest error: " + baseline.ManifestError)
+	}
+	return usecase.BaselineReleaseLabel(baseline)
+}
+
+func writeBaselineApp(b *strings.Builder, appName string, baseline usecase.AppBaselineRelease, lookups appsSectionLookups) {
+	b.WriteString(fmt.Sprintf("  %-24s %s\n", appName, formatBaselineAppLabel(baseline)))
+	if baseline.ReleaseMissing || baseline.ManifestError != "" {
+		return
+	}
+	if len(baseline.Services) == 0 {
+		b.WriteString("    " + dimStyle.Render("no release services") + "\n")
+		return
+	}
+	rows := make([]appServiceRow, len(baseline.Services))
+	for i, service := range baseline.Services {
+		rows[i] = appServiceRow{Name: service.Name, ImageRef: service.ImageRef}
+	}
+	writeAppServiceRows(b, appName, rows, lookups)
+}
+
+func writeDesiredApp(b *strings.Builder, appName string, entry usecase.AppReleaseServices, lookups appsSectionLookups) {
+	b.WriteString(fmt.Sprintf("  %-24s %s\n", appName, dimStyle.Render("not in baseline")))
+	if entry.Name == "" {
+		b.WriteString("    " + dimStyle.Render("no release services") + "\n")
+		return
+	}
+	if entry.ParseError != "" {
+		b.WriteString("    " + errStyle.Render("config error: "+entry.ParseError) + "\n")
+		return
+	}
+	if len(entry.Services) == 0 {
+		b.WriteString("    " + dimStyle.Render("no release services") + "\n")
+		return
+	}
+	rows := make([]appServiceRow, len(entry.Services))
+	for i, service := range entry.Services {
+		rows[i] = appServiceRow{
+			Name:     service.Name,
+			ImageRef: usecase.ReleaseServiceImageRef(service) + " (not deployed)",
+		}
+	}
+	writeAppServiceRows(b, appName, rows, lookups)
+}
+
+func writeAppServiceRows(b *strings.Builder, appName string, rows []appServiceRow, lookups appsSectionLookups) {
+	for _, row := range rows {
+		imageRef := dimStyle.Render(row.ImageRef)
+		suffix := ""
+		if cursor, ok := lookups.cursorsByAppService[appName+"/"+row.Name]; ok {
+			suffix = formatServicePendingSuffix(cursor)
+		}
+		b.WriteString(fmt.Sprintf("    %-22s %s%s\n", row.Name, imageRef, suffix))
+	}
 }
 
 func (m model) auditView() string {
