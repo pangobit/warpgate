@@ -3,7 +3,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +31,7 @@ var rootCmd = &cobra.Command{
 It provides a simpler alternative to k3s + Flux for deploying containerized applications
 using Docker Compose, Traefik, Tailscale, and your own infrastructure.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if cmd.Name() == "init" || cmd.Name() == "ui" || cmd.Name() == "serve" {
+		if cmd.Name() == "init" || cmd.Name() == "ui" || cmd.Name() == "serve" || cmd.Name() == "preview" {
 			return nil
 		}
 
@@ -92,6 +94,7 @@ func Setup() {
 
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(serveCmd)
+	rootCmd.AddCommand(previewCmd)
 	rootCmd.AddCommand(bootstrapCmd)
 	rootCmd.AddCommand(cleanupCmd)
 	rootCmd.AddCommand(shadowCmd)
@@ -104,6 +107,7 @@ func Setup() {
 	serveCmd.Flags().BoolVar(&serveTailscaleSSH, "tailscale-ssh", true, "Use Tailscale SSH for node deploys")
 	serveCmd.Flags().StringVar(&serveSSHKey, "ssh-key", "", "Path to SSH private key for node deploys")
 	serveCmd.Flags().StringVar(&serveUser, "user", "", "SSH user for node deploys")
+	previewCmd.Flags().String("scenario", warpd.PreviewScenarioMixed, "Preview fixture to show: mixed, failure, or empty")
 
 	bootstrapCmd.Flags().StringVar(&bootstrapHost, "host", "", "Target host IP or hostname (ad-hoc mode)")
 	bootstrapCmd.Flags().StringVar(&bootstrapUser, "user", "", "SSH user (defaults to current user)")
@@ -226,19 +230,30 @@ release:
 			return fmt.Errorf("failed to create compose.yml: %w", err)
 		}
 
-		fmt.Printf("Created project '%s'\n", projectName)
-		fmt.Println("\nFiles created:")
-		fmt.Println("  cluster.yml              - Cluster configuration")
-		fmt.Println("  apps/example-app/app.yml - Example app deployment config")
-		fmt.Println("  apps/example-app/compose.yml - Example Docker Compose file")
-		fmt.Println("\nNext steps:")
-		fmt.Println("1. Edit cluster.yml with your node details")
-		fmt.Println("2. Edit apps/example-app/ or create new app directories")
-		fmt.Println("3. Run 'warpgate bootstrap <node-id>' to prepare a node")
-		fmt.Println("4. Run 'warpgate deploy <app-name>' to deploy")
-
-		return nil
+		return printInitSummary(projectName)
 	},
+}
+
+func printInitSummary(projectName string) error {
+	if err := stdoutf("Created project '%s'\n", projectName); err != nil {
+		return err
+	}
+	for _, line := range []string{
+		"\nFiles created:",
+		"  cluster.yml              - Cluster configuration",
+		"  apps/example-app/app.yml - Example app deployment config",
+		"  apps/example-app/compose.yml - Example Docker Compose file",
+		"\nNext steps:",
+		"1. Edit cluster.yml with your node details",
+		"2. Edit apps/example-app/ or create new app directories",
+		"3. Run 'warpgate bootstrap <node-id>' to prepare a node",
+		"4. Run 'warpgate deploy <app-name>' to deploy",
+	} {
+		if err := stdoutln(line); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 var serveCmd = &cobra.Command{
@@ -272,6 +287,29 @@ ACLs are the access control layer for both.`,
 		cfg.Deploy.SSHKey = serveSSHKey
 		cfg.Deploy.User = serveUser
 		return warpd.RunServe(context.Background(), cfg)
+	},
+}
+
+var previewCmd = &cobra.Command{
+	Use:   "preview",
+	Short: "Run the operator TUI locally with sample data",
+	Long: `Run the operator TUI directly in the local terminal with seeded preview
+state. Preview mode does not start the daemon, listen on SSH or HTTP, read
+GitHub credentials, connect to GHCR, or deploy to real nodes.
+
+Scenarios:
+  mixed    normal dashboard with apps, pending updates, baseline, and audit
+  failure  long errors and a stack state requiring operator attention
+	empty    first-run state with no repository attached`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		scenario, err := cmd.Flags().GetString("scenario")
+		if err != nil {
+			return err
+		}
+		return warpd.RunPreview(context.Background(), warpd.PreviewConfig{
+			Scenario: scenario,
+		})
 	},
 }
 
@@ -395,18 +433,14 @@ Examples:
 		}
 
 		if !cleanupForce {
-			fmt.Println("This will remove Warpgate dependencies from the target node.")
-			if cleanupRemoveGo {
-				fmt.Println("  - Go installation will be removed")
+			confirmed, err := confirmCleanup(cleanupRemoveGo, cleanupRemoveDocker)
+			if err != nil {
+				return err
 			}
-			if cleanupRemoveDocker {
-				fmt.Println("  - Docker will be removed (other services may depend on it)")
-			}
-			fmt.Print("\nContinue? [y/N] ")
-			var answer string
-			fmt.Scanln(&answer)
-			if answer != "y" && answer != "Y" {
-				fmt.Println("Aborted.")
+			if !confirmed {
+				if err := stdoutln("Aborted."); err != nil {
+					return err
+				}
 				return nil
 			}
 		}
@@ -439,6 +473,30 @@ Examples:
 
 		return fmt.Errorf("specify node-id from config, or use --host for ad-hoc cleanup")
 	},
+}
+
+func confirmCleanup(removeGo bool, removeDocker bool) (bool, error) {
+	if err := stdoutln("This will remove Warpgate dependencies from the target node."); err != nil {
+		return false, err
+	}
+	if removeGo {
+		if err := stdoutln("  - Go installation will be removed"); err != nil {
+			return false, err
+		}
+	}
+	if removeDocker {
+		if err := stdoutln("  - Docker will be removed (other services may depend on it)"); err != nil {
+			return false, err
+		}
+	}
+	if err := stdout("\nContinue? [y/N] "); err != nil {
+		return false, err
+	}
+	var answer string
+	if _, err := fmt.Scanln(&answer); err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("read confirmation: %w", err)
+	}
+	return answer == "y" || answer == "Y", nil
 }
 
 var shadowCmd = &cobra.Command{
@@ -511,21 +569,31 @@ var shadowStatusCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("Shadow: %s\n\n", args[0])
+		if err := stdoutf("Shadow: %s\n\n", args[0]); err != nil {
+			return err
+		}
 		for _, s := range statuses {
 			if s.Error != "" {
-				fmt.Printf("  %s: error — %s\n", s.NodeID, s.Error)
+				if err := stdoutf("  %s: error — %s\n", s.NodeID, s.Error); err != nil {
+					return err
+				}
 				continue
 			}
 			if s.Version == "" {
-				fmt.Printf("  %s: no shadow\n", s.NodeID)
+				if err := stdoutf("  %s: no shadow\n", s.NodeID); err != nil {
+					return err
+				}
 				continue
 			}
-			fmt.Printf("  %s: %s (version: %s)\n", s.NodeID, s.State, s.Version)
+			if err := stdoutf("  %s: %s (version: %s)\n", s.NodeID, s.State, s.Version); err != nil {
+				return err
+			}
 			if s.Containers != "" {
 				for _, line := range strings.Split(s.Containers, "\n") {
 					if line != "" {
-						fmt.Printf("    %s\n", line)
+						if err := stdoutf("    %s\n", line); err != nil {
+							return err
+						}
 					}
 				}
 			}
@@ -549,18 +617,39 @@ func showShadowClusterStatus() error {
 		for _, s := range statuses {
 			if s.Version != "" {
 				if !hasShadow {
-					fmt.Println("Active shadows:")
+					if err := stdoutln("Active shadows:"); err != nil {
+						return err
+					}
 					hasShadow = true
 				}
-				fmt.Printf("  %s on %s: %s (version: %s)\n", app.Name, s.NodeID, s.State, s.Version)
+				if err := stdoutf("  %s on %s: %s (version: %s)\n", app.Name, s.NodeID, s.State, s.Version); err != nil {
+					return err
+				}
 			}
 		}
 	}
 
 	if !hasShadow {
-		fmt.Println("No active shadow deployments.")
+		if err := stdoutln("No active shadow deployments."); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func stdout(args ...any) error {
+	_, err := fmt.Print(args...)
+	return err
+}
+
+func stdoutln(args ...any) error {
+	_, err := fmt.Println(args...)
+	return err
+}
+
+func stdoutf(format string, args ...any) error {
+	_, err := fmt.Printf(format, args...)
+	return err
 }
 
 // Execute registers all commands and runs the root cobra command.

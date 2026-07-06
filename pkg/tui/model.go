@@ -8,6 +8,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+const (
+	defaultStepWidth = 100
+	minStepWidth     = 20
+)
+
 // StepStatus represents the current state of a step.
 type StepStatus int
 
@@ -65,6 +70,7 @@ type Model struct {
 	spinner spinner.Model
 	done    bool
 	err     error
+	width   int
 }
 
 // New creates a new step-runner model.
@@ -81,6 +87,7 @@ func New(title string, defs []StepDef) Model {
 		steps:   steps,
 		defs:    defs,
 		spinner: s,
+		width:   defaultStepWidth,
 	}
 }
 
@@ -93,10 +100,9 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		if msg.String() == "ctrl+c" || msg.String() == "q" {
-			m.done = true
-			return m, tea.Quit
-		}
+		return m.handleKey(msg)
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		return m, nil
 
 	case spinner.TickMsg:
@@ -132,6 +138,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" || msg.String() == "q" {
+		m.done = true
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
 // View renders the step list.
 func (m Model) View() tea.View {
 	var b strings.Builder
@@ -152,7 +166,7 @@ func (m Model) View() tea.View {
 		case StepFailed:
 			b.WriteString(failIcon + " " + stepStyle.Render(step.Name))
 			if step.Error != nil {
-				b.WriteString("\n" + errorStyle.Render(step.Error.Error()))
+				b.WriteString("\n" + errorStyle.Render(wrapText(step.Error.Error(), m.errorWidth())))
 			}
 		default:
 			b.WriteString(pendingIcon + " " + pendingStyle.Render(step.Name))
@@ -171,6 +185,44 @@ func (m Model) View() tea.View {
 // Err returns the error if a step failed.
 func (m Model) Err() error {
 	return m.err
+}
+
+func (m Model) errorWidth() int {
+	if m.width <= 0 {
+		return defaultStepWidth
+	}
+	return max(minStepWidth, m.width-6)
+}
+
+func wrapText(text string, width int) string {
+	text = strings.TrimSpace(text)
+	if len([]rune(text)) <= width {
+		return text
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return text
+	}
+	var lines []string
+	var line strings.Builder
+	for _, word := range words {
+		if line.Len() == 0 {
+			line.WriteString(word)
+			continue
+		}
+		if len([]rune(line.String()))+1+len([]rune(word)) > width {
+			lines = append(lines, line.String())
+			line.Reset()
+			line.WriteString(word)
+			continue
+		}
+		line.WriteString(" ")
+		line.WriteString(word)
+	}
+	if line.Len() > 0 {
+		lines = append(lines, line.String())
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) runStep(idx int) tea.Cmd {

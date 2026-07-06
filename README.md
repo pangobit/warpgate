@@ -342,6 +342,18 @@ ssh -p 7422 <daemon-tailnet-addr>
 
 Keys: `d` deploy stack (with confirmation), `r` rollback to baseline (with confirmation), `s` schedule an immediate daemon poll, `a` audit log, `u` reload the view, `q` quit. Quitting is disabled while a deploy or rollback is running.
 
+To explore the TUI locally without daemon credentials, SSH, GitHub, GHCR, or a
+real stack, run:
+
+```bash
+warpgate preview
+warpgate preview --scenario failure
+warpgate preview --scenario empty
+```
+
+Preview mode uses in-memory fixture data and a fake deployer, so deploy and
+rollback confirmations are safe to exercise.
+
 ## Shadow Deployments
 
 A shadow deployment runs a version of an app alongside the live deployment on the same node(s). The shadow is not wired to the public Traefik proxy, so it is only reachable over the internal (Tailscale) network. This lets you test a release candidate before promoting it to live.
