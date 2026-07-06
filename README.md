@@ -167,6 +167,7 @@ Install CLI: `go install github.com/pangobit/warpgate/cmd/warpgate@latest`
 warpgate init myapp                    # scaffold infra repo
 warpgate version
 warpgate upgrade                       # daemon host only
+warpgate preview                       # local TUI with fixture data
 
 warpgate bootstrap node-1 --tailscale-ssh
 warpgate cleanup node-1 --tailscale-ssh
@@ -190,6 +191,18 @@ ssh -p 7422 <daemon-tailnet-addr>
 | `a` | Audit log |
 | `u` | Refresh view |
 | `q` | Quit |
+
+To explore the TUI locally without daemon credentials, SSH, GitHub, GHCR, or a
+real stack, run:
+
+```bash
+warpgate preview
+warpgate preview --scenario failure
+warpgate preview --scenario empty
+```
+
+Preview mode uses in-memory fixture data and a fake deployer, so deploy and
+rollback confirmations are safe to exercise.
 
 Shadow deploys run a candidate alongside live on the internal network (`shadow-<hostname>` when `expose.internal.hostname` is set). One shadow per app; requires an existing live deployment.
 

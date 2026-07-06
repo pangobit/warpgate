@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/pangobit/warpgate/warpd/internal/audit"
@@ -27,6 +28,29 @@ const (
 	opTimeout      = 30 * time.Minute
 	loadTimeout    = 30 * time.Second
 	auditPageLimit = 50
+	defaultWidth   = 100
+	defaultHeight  = 32
+	minPanelHeight = 4
+
+	terminalSideMargin = 2
+	ellipsisReserve    = 3
+
+	loadErrorPrefix         = "Error: "
+	syncErrorPrefix         = "  sync error: "
+	failedAppLinePrefix     = "    failed app: "
+	failedAppLineSeparator  = " — "
+	revertFailedPrefix      = "    REVERT FAILED — operator attention required: "
+	configErrorPrefix       = "    config error: "
+	manifestErrorPrefix     = "manifest error: "
+	invalidStatusPrefix     = " — "
+	pendingUpdateLineIndent = 2
+	pendingUpdateNameWidth  = 20
+
+	appRowIndent           = 2
+	appNameColumnWidth     = 24
+	serviceRowIndent       = 4
+	serviceNameColumnWidth = 22
+	serviceImageSeparator  = " "
 )
 
 type overview struct {
@@ -63,24 +87,38 @@ type model struct {
 	actor   identity.User
 	refresh func()
 
-	view     string
-	confirm  string
-	busy     bool
-	busyWhat string
-	spinner  spinner.Model
-	data     *overview
-	audit    []audit.Event
-	notice   string
-	loadErr  error
+	view            string
+	confirm         string
+	busy            bool
+	busyWhat        string
+	spinner         spinner.Model
+	data            *overview
+	audit           []audit.Event
+	notice          string
+	loadErr         error
+	width           int
+	height          int
+	compact         bool
+	scrollDashboard bool
+	panel           viewport.Model
+	bodyPanel       viewport.Model
 }
 
 func newModel(service *usecase.Service, actor identity.User, refresh func()) model {
+	panel := viewport.New(viewport.WithWidth(defaultWidth), viewport.WithHeight(defaultHeight))
+	panel.SoftWrap = true
+	bodyPanel := viewport.New(viewport.WithWidth(defaultWidth), viewport.WithHeight(defaultHeight))
+	bodyPanel.SoftWrap = true
 	return model{
-		service: service,
-		actor:   actor,
-		refresh: refresh,
-		view:    viewDashboard,
-		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		service:   service,
+		actor:     actor,
+		refresh:   refresh,
+		view:      viewDashboard,
+		spinner:   spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		width:     defaultWidth,
+		height:    defaultHeight,
+		panel:     panel,
+		bodyPanel: bodyPanel,
 	}
 }
 
@@ -94,6 +132,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.updatePanelContent()
+		m.resizePanel()
+		return m, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -102,13 +146,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		data := msg.data
 		m.data = &data
 		m.loadErr = nil
+		m.updatePanelContent()
+		m.resizePanel()
 		return m, nil
 	case auditMsg:
 		m.audit = msg.events
 		m.loadErr = nil
+		m.updatePanelContent()
+		m.resizePanel()
 		return m, nil
 	case loadErrMsg:
 		m.loadErr = msg.err
+		m.updatePanelContent()
+		m.resizePanel()
 		return m, nil
 	case opDoneMsg:
 		m.busy = false
@@ -118,6 +168,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.notice = msg.label + " finished: " + string(msg.attempt.Status)
 		}
+		m.updatePanelContent()
+		m.resizePanel()
 		return m, m.loadOverview()
 	}
 	return m, nil
@@ -139,7 +191,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		return m.armConfirm(confirmRollback), nil
 	default:
-		return m.handleViewKey(key)
+		return m.handleViewKey(msg)
 	}
 }
 
@@ -150,7 +202,8 @@ func (m model) armConfirm(action string) model {
 	return m
 }
 
-func (m model) handleViewKey(key string) (tea.Model, tea.Cmd) {
+func (m model) handleViewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
 	switch key {
 	case "s":
 		if m.refresh != nil {
@@ -163,12 +216,27 @@ func (m model) handleViewKey(key string) (tea.Model, tea.Cmd) {
 	case "a":
 		if m.view == viewAudit {
 			m.view = viewDashboard
+			m.updatePanelContent()
+			m.resizePanel()
 			return m, nil
 		}
 		m.view = viewAudit
+		m.updatePanelContent()
+		m.resizePanel()
 		return m, m.loadAudit()
 	case "esc":
 		m.view = viewDashboard
+		m.updatePanelContent()
+		m.resizePanel()
+	}
+	if m.scrollPanelActive() {
+		var cmd tea.Cmd
+		if m.scrollDashboard {
+			m.bodyPanel, cmd = m.bodyPanel.Update(msg)
+			return m, cmd
+		}
+		m.panel, cmd = m.panel.Update(msg)
+		return m, cmd
 	}
 	return m, nil
 }
@@ -196,15 +264,13 @@ func (m model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 func (m model) View() tea.View {
 	var b strings.Builder
 	b.WriteString(m.header())
-	if m.loadErr != nil {
-		b.WriteString(errStyle.Render("Error: "+m.loadErr.Error()) + "\n\n")
-	}
-	if m.notice != "" {
-		b.WriteString(noticeStyle.Render(m.notice) + "\n\n")
-	}
+	b.WriteString(m.loadErrorBlock())
+	b.WriteString(m.noticeBlock())
 	switch {
 	case m.busy:
 		b.WriteString("  " + m.spinner.View() + " " + m.busyWhat + "...\n")
+	case m.scrollDashboard:
+		b.WriteString(m.bodyPanel.View())
 	case m.view == viewAudit:
 		b.WriteString(m.auditView())
 	default:
@@ -240,7 +306,10 @@ func (m model) footer() string {
 		return dimStyle.Render("  operation in progress — quitting is disabled") + "\n"
 	}
 	if m.view == viewAudit {
-		return dimStyle.Render("  [a/esc] back  [u] reload  [q] quit") + "\n"
+		return dimStyle.Render("  [j/k] scroll  [pgup/pgdn] page  [a/esc] back  [u] reload  [q] quit") + "\n"
+	}
+	if m.scrollDashboard || m.hasDetailPanel() {
+		return dimStyle.Render("  [j/k] scroll details  [d] deploy stack  [r] rollback  [s] sync now  [a] audit  [u] reload  [q] quit") + "\n"
 	}
 	return dimStyle.Render("  [d] deploy stack  [r] rollback  [s] sync now  [a] audit  [u] reload  [q] quit") + "\n"
 }
@@ -263,12 +332,24 @@ func (m model) configSection() string {
 	}
 	line := "  commit " + shortSHA(m.data.cursor.LastObservedCommit) + "  checked " + relativeTime(m.data.cursor.LastCheckedAt)
 	if m.data.cursor.LastError != "" {
-		line += "\n  " + errStyle.Render("sync error: "+m.data.cursor.LastError)
+		line += "\n" + errStyle.Render(syncErrorPrefix+m.shortText(m.data.cursor.LastError, m.contentWidth()-len(syncErrorPrefix)))
 	}
 	return headerStyle.Render("Config") + "\n" + line + "\n\n"
 }
 
 func (m model) stackSection() string {
+	var b strings.Builder
+	b.WriteString(m.stackSummary())
+	if m.hasDetailPanel() && !m.scrollDashboard {
+		b.WriteString(m.detailPanelHeader())
+		b.WriteString(m.panel.View())
+		return b.String() + "\n"
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func (m model) stackSummary() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Stack") + "\n")
 	stack := m.data.stack
@@ -281,14 +362,16 @@ func (m model) stackSection() string {
 		attempt := stack.LastAttempt
 		line := "  last attempt: " + styleAttemptStatus(attempt.Status) + dimStyle.Render("  by "+attempt.ActorEmail+" "+relativeTime(attempt.StartedAt))
 		b.WriteString(line + "\n")
-		if attempt.FailedApp != "" {
-			b.WriteString("    " + errStyle.Render("failed app: "+attempt.FailedApp+" — "+attempt.Error) + "\n")
-		}
-		if attempt.RevertError != "" {
-			b.WriteString("    " + errStyle.Render("REVERT FAILED — operator attention required: "+attempt.RevertError) + "\n")
+		if !m.compact {
+			if attempt.FailedApp != "" {
+				failedAppWidth := m.contentWidth() - len(failedAppLinePrefix) - len(failedAppLineSeparator) - len(attempt.FailedApp)
+				b.WriteString(errStyle.Render(failedAppLinePrefix+attempt.FailedApp+failedAppLineSeparator+m.shortText(attempt.Error, failedAppWidth)) + "\n")
+			}
+			if attempt.RevertError != "" {
+				b.WriteString(errStyle.Render(revertFailedPrefix+m.shortText(attempt.RevertError, m.contentWidth()-len(revertFailedPrefix))) + "\n")
+			}
 		}
 	}
-	b.WriteString("\n")
 	return b.String()
 }
 
@@ -303,8 +386,17 @@ func (m model) updatesSection() string {
 			updatePending++
 		case imagewatch.StatusInvalid:
 			invalid++
-			b.WriteString("  " + errStyle.Render(fmt.Sprintf("%-20s %s", cursor.App+"/"+cursor.Service, cursor.LastError)) + "\n")
+			if !m.compact {
+				prefix := fmt.Sprintf("%-*s ", pendingUpdateNameWidth, cursor.App+"/"+cursor.Service)
+				linePrefix := strings.Repeat(" ", pendingUpdateLineIndent) + prefix
+				b.WriteString(errStyle.Render(linePrefix+m.shortText(cursor.LastError, m.contentWidth()-len(linePrefix))) + "\n")
+			}
 		}
+	}
+	if invalid == 1 {
+		b.WriteString("  " + dimStyle.Render("1 invalid image constraint — see Details") + "\n")
+	} else if invalid > 1 {
+		b.WriteString("  " + dimStyle.Render(fmt.Sprintf("%d invalid image constraints — see Details", invalid)) + "\n")
 	}
 	if updatePending == 1 {
 		b.WriteString("  " + dimStyle.Render("1 semver update pending — see Apps section") + "\n")
@@ -354,29 +446,34 @@ func (m model) appsSection() string {
 		b.WriteString("  " + dimStyle.Render("no apps synced") + "\n")
 		return b.String()
 	}
+	if m.compact {
+		b.WriteString("  " + dimStyle.Render("collapsed — scroll Details for per-app output") + "\n")
+		return b.String() + "\n"
+	}
 	lookups := m.appsSectionLookups()
 	for _, app := range m.data.apps {
 		if m.data.stack.LastHealthy.Releases[app.Name] != "" {
-			writeBaselineApp(&b, app.Name, lookups.baselineByApp[app.Name], lookups)
+			m.writeBaselineApp(&b, app.Name, lookups.baselineByApp[app.Name], lookups)
 			continue
 		}
-		writeDesiredApp(&b, app.Name, lookups.servicesByApp[app.Name], lookups)
+		m.writeDesiredApp(&b, app.Name, lookups.servicesByApp[app.Name], lookups)
 	}
 	return b.String()
 }
 
-func formatBaselineAppLabel(baseline usecase.AppBaselineRelease) string {
+func (m model) formatBaselineAppLabel(baseline usecase.AppBaselineRelease) string {
 	if baseline.ReleaseMissing {
 		return errStyle.Render("release record missing")
 	}
 	if baseline.ManifestError != "" {
-		return errStyle.Render("manifest error: " + baseline.ManifestError)
+		manifestWidth := m.contentWidth() - appRowIndent - appNameColumnWidth - len(manifestErrorPrefix)
+		return errStyle.Render(manifestErrorPrefix + m.shortText(baseline.ManifestError, manifestWidth))
 	}
 	return usecase.BaselineReleaseLabel(baseline)
 }
 
-func writeBaselineApp(b *strings.Builder, appName string, baseline usecase.AppBaselineRelease, lookups appsSectionLookups) {
-	b.WriteString(fmt.Sprintf("  %-24s %s\n", appName, formatBaselineAppLabel(baseline)))
+func (m model) writeBaselineApp(b *strings.Builder, appName string, baseline usecase.AppBaselineRelease, lookups appsSectionLookups) {
+	b.WriteString(fmt.Sprintf("  %-*s %s\n", appNameColumnWidth, appName, m.formatBaselineAppLabel(baseline)))
 	if baseline.ReleaseMissing || baseline.ManifestError != "" {
 		return
 	}
@@ -388,17 +485,17 @@ func writeBaselineApp(b *strings.Builder, appName string, baseline usecase.AppBa
 	for i, service := range baseline.Services {
 		rows[i] = appServiceRow{Name: service.Name, ImageRef: service.ImageRef}
 	}
-	writeAppServiceRows(b, appName, rows, lookups)
+	m.writeAppServiceRows(b, appName, rows, lookups)
 }
 
-func writeDesiredApp(b *strings.Builder, appName string, entry usecase.AppReleaseServices, lookups appsSectionLookups) {
-	b.WriteString(fmt.Sprintf("  %-24s %s\n", appName, dimStyle.Render("not in baseline")))
+func (m model) writeDesiredApp(b *strings.Builder, appName string, entry usecase.AppReleaseServices, lookups appsSectionLookups) {
+	b.WriteString(fmt.Sprintf("  %-*s %s\n", appNameColumnWidth, appName, dimStyle.Render("not in baseline")))
 	if entry.Name == "" {
 		b.WriteString("    " + dimStyle.Render("no release services") + "\n")
 		return
 	}
 	if entry.ParseError != "" {
-		b.WriteString("    " + errStyle.Render("config error: "+entry.ParseError) + "\n")
+		b.WriteString(errStyle.Render(configErrorPrefix+m.shortText(entry.ParseError, m.contentWidth()-len(configErrorPrefix))) + "\n")
 		return
 	}
 	if len(entry.Services) == 0 {
@@ -412,31 +509,225 @@ func writeDesiredApp(b *strings.Builder, appName string, entry usecase.AppReleas
 			ImageRef: usecase.ReleaseServiceImageRef(service) + " (not deployed)",
 		}
 	}
-	writeAppServiceRows(b, appName, rows, lookups)
+	m.writeAppServiceRows(b, appName, rows, lookups)
 }
 
-func writeAppServiceRows(b *strings.Builder, appName string, rows []appServiceRow, lookups appsSectionLookups) {
+func (m model) writeAppServiceRows(b *strings.Builder, appName string, rows []appServiceRow, lookups appsSectionLookups) {
 	for _, row := range rows {
 		imageRef := dimStyle.Render(row.ImageRef)
 		suffix := ""
 		if cursor, ok := lookups.cursorsByAppService[appName+"/"+row.Name]; ok {
-			suffix = formatServicePendingSuffix(cursor)
+			suffix = m.formatServicePendingSuffix(cursor, row)
 		}
-		b.WriteString(fmt.Sprintf("    %-22s %s%s\n", row.Name, imageRef, suffix))
+		b.WriteString(fmt.Sprintf("    %-*s %s%s\n", serviceNameColumnWidth, row.Name, imageRef, suffix))
 	}
 }
 
 func (m model) auditView() string {
+	if len(m.audit) == 0 {
+		return headerStyle.Render("Audit log") + "\n  " + dimStyle.Render("no events") + "\n"
+	}
+	return headerStyle.Render("Audit log") + "\n" + m.panel.View() + "\n"
+}
+
+func (m *model) resizePanel() {
+	m.panel.SetWidth(m.contentWidth())
+	m.bodyPanel.SetWidth(m.contentWidth())
+	m.compact = false
+	m.scrollDashboard = false
+
+	if m.view == viewAudit {
+		m.fitPanelToTerminal(lineCount(m.auditContent()))
+		return
+	}
+	if m.view != viewDashboard || m.busy || m.data == nil {
+		m.panel.SetHeight(minPanelHeight)
+		return
+	}
+	if m.hasDetailPanel() {
+		m.fitPanelToTerminal(lineCount(m.detailContent()))
+		if m.height > 0 && m.visibleViewLines() > m.height {
+			m.compact = true
+			m.fitPanelToTerminal(lineCount(m.detailContent()))
+		}
+	}
+	if m.height > 0 && m.visibleViewLines() > m.height {
+		m.scrollDashboard = true
+		m.bodyPanel.SetHeight(m.bodyPanelHeight())
+		m.bodyPanel.SetContent(m.dashboardScrollContent())
+	}
+}
+
+func (m *model) fitPanelToTerminal(contentLines int) {
+	m.panel.SetHeight(max(1, contentLines))
+	for m.height > 0 && m.visibleViewLines() > m.height && m.panel.Height() > 1 {
+		m.panel.SetHeight(m.panel.Height() - 1)
+	}
+}
+
+func (m model) bodyPanelHeight() int {
+	used := lineCount(m.header())
+	used += lineCount(m.loadErrorBlock())
+	used += lineCount(m.noticeBlock())
+	used += 1
+	used += lineCount(m.footer())
+	return max(1, m.height-used)
+}
+
+func (m model) dashboardScrollContent() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("Audit log") + "\n")
+	b.WriteString(m.configSection())
+	b.WriteString(m.stackSummary())
+	if m.detailContent() != "" {
+		b.WriteString(m.detailPanelHeader())
+		b.WriteString(m.detailContent())
+		b.WriteString("\n")
+	}
+	b.WriteString(m.updatesSection())
+	b.WriteString(m.appsSection())
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m model) visibleViewLines() int {
+	return len(strings.Split(strings.TrimRight(m.View().Content, "\n"), "\n"))
+}
+
+func (m *model) updatePanelContent() {
+	if m.view == viewAudit {
+		m.panel.SetContent(m.auditContent())
+		return
+	}
+	m.panel.SetContent(m.detailContent())
+}
+
+func (m model) loadErrorBlock() string {
+	if m.loadErr == nil {
+		return ""
+	}
+	return errStyle.Render(loadErrorPrefix+m.shortText(m.loadErr.Error(), m.contentWidth()-len(loadErrorPrefix))) + "\n\n"
+}
+
+func (m model) noticeBlock() string {
+	if m.notice == "" {
+		return ""
+	}
+	return noticeStyle.Render(m.shortText(m.notice, m.contentWidth())) + "\n\n"
+}
+
+func (m model) detailPanelHeader() string {
+	return headerStyle.Render("Details") + "\n"
+}
+
+func (m model) auditContent() string {
+	var b strings.Builder
 	for _, event := range m.audit {
 		b.WriteString(fmt.Sprintf("  %s  %-24s %-20s %s\n",
 			event.CreatedAt.Format("01-02 15:04"), event.Type, event.ActorEmail, event.Message))
 	}
-	if len(m.audit) == 0 {
-		b.WriteString("  " + dimStyle.Render("no events") + "\n")
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m model) detailContent() string {
+	var details []string
+	if m.loadErr != nil {
+		details = append(details, "load error:\n"+m.loadErr.Error())
 	}
-	return b.String()
+	if m.notice != "" && textWasShortened(m.notice, m.contentWidth()) {
+		details = append(details, m.notice)
+	}
+	if m.data != nil {
+		details = append(details, m.overviewDetails()...)
+	}
+	return strings.Join(details, "\n\n")
+}
+
+func (m model) overviewDetails() []string {
+	var details []string
+	if m.data.cursor.LastError != "" {
+		details = append(details, "sync error:\n"+m.data.cursor.LastError)
+	}
+	if m.data.stack.LastAttempt != nil {
+		attempt := m.data.stack.LastAttempt
+		if attempt.Error != "" {
+			label := "last attempt error"
+			if attempt.FailedApp != "" {
+				label += " for " + attempt.FailedApp
+			}
+			details = append(details, label+":\n"+attempt.Error)
+		}
+		if attempt.RevertError != "" {
+			details = append(details, "revert error:\n"+attempt.RevertError)
+		}
+	}
+	for _, cursor := range m.data.cursors {
+		if cursor.Status == imagewatch.StatusInvalid && cursor.LastError != "" {
+			details = append(details, "image watch error for "+cursor.App+"/"+cursor.Service+":\n"+cursor.LastError)
+		}
+	}
+	for _, entry := range m.data.appServices {
+		if entry.ParseError != "" {
+			details = append(details, "config error for "+entry.Name+":\n"+entry.ParseError)
+		}
+	}
+	for _, baseline := range m.data.baselineReleases {
+		if baseline.ManifestError != "" {
+			details = append(details, "manifest error for "+baseline.Name+":\n"+baseline.ManifestError)
+		}
+	}
+	return details
+}
+
+func (m model) hasDetailPanel() bool {
+	return m.view == viewDashboard && m.detailContent() != ""
+}
+
+func (m model) scrollPanelActive() bool {
+	if m.scrollDashboard {
+		return true
+	}
+	return m.view == viewAudit || m.hasDetailPanel()
+}
+
+func (m model) contentWidth() int {
+	if m.width <= 0 {
+		return defaultWidth
+	}
+	return max(20, m.width-terminalSideMargin)
+}
+
+func (m model) panelContent() string {
+	if m.view == viewAudit {
+		return m.auditContent()
+	}
+	return m.detailContent()
+}
+
+func lineCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
+}
+
+func (m model) shortText(text string, width int) string {
+	return shortenText(text, width)
+}
+
+func shortenText(text string, width int) string {
+	trimmed := strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+	if !textWasShortened(trimmed, width) {
+		return trimmed
+	}
+	if width <= ellipsisReserve {
+		return "..."
+	}
+	runes := []rune(trimmed)
+	return strings.TrimSpace(string(runes[:width-ellipsisReserve])) + "..."
+}
+
+func textWasShortened(text string, width int) bool {
+	trimmed := strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+	return len([]rune(trimmed)) > max(1, width)
 }
 
 func (m model) loadOverview() tea.Cmd {
@@ -514,12 +805,13 @@ func (m model) rollbackStack() tea.Cmd {
 	}
 }
 
-func formatServicePendingSuffix(cursor imagewatch.Cursor) string {
+func (m model) formatServicePendingSuffix(cursor imagewatch.Cursor, row appServiceRow) string {
 	switch cursor.Status {
 	case imagewatch.StatusUpdateAvailable:
 		return noticeStyle.Render(" → " + cursor.CandidateTag + " (commit pending)")
 	case imagewatch.StatusInvalid:
-		return errStyle.Render(" — " + cursor.LastError)
+		fixed := serviceRowIndent + serviceNameColumnWidth + len(serviceImageSeparator) + len(row.ImageRef) + len(invalidStatusPrefix)
+		return errStyle.Render(invalidStatusPrefix + m.shortText(cursor.LastError, m.contentWidth()-fixed))
 	default:
 		return ""
 	}
