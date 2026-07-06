@@ -59,6 +59,7 @@ type overview struct {
 	cursor           configrepo.SyncCursor
 	cursors          []imagewatch.Cursor
 	stack            stackstate.State
+	deployPlan       usecase.StackDeployPlan
 	apps             []configrepo.AppSnapshot
 	appServices      []usecase.AppReleaseServices
 	baselineReleases []usecase.AppBaselineRelease
@@ -165,6 +166,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busyWhat = ""
 		if msg.err != nil {
 			m.notice = msg.label + " failed: " + msg.err.Error()
+		} else if msg.label == "stack deploy" {
+			m.notice = msg.label + " finished: " + formatStackDeployNotice(msg.attempt)
 		} else {
 			m.notice = msg.label + " finished: " + string(msg.attempt.Status)
 		}
@@ -250,10 +253,19 @@ func (m model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 		m.notice = ""
 		if action == confirmDeploy {
 			m.busyWhat = "deploying stack"
-			return m, tea.Batch(m.spinner.Tick, m.deployStack())
+			return m, tea.Batch(m.spinner.Tick, m.deployStack(false))
 		}
 		m.busyWhat = "rolling back to last healthy baseline"
 		return m, tea.Batch(m.spinner.Tick, m.rollbackStack())
+	case "f":
+		if action != confirmDeploy {
+			return m, nil
+		}
+		m.confirm = ""
+		m.busy = true
+		m.notice = ""
+		m.busyWhat = "force redeploying stack"
+		return m, tea.Batch(m.spinner.Tick, m.deployStack(true))
 	case "n", "esc", "q":
 		m.confirm = ""
 	}
@@ -297,7 +309,7 @@ func (m model) header() string {
 
 func (m model) footer() string {
 	if m.confirm == confirmDeploy {
-		return confirmStyle.Render("Deploy the stack now? [y/n]") + "\n"
+		return confirmStyle.Render(m.deployConfirmPrompt()) + "\n"
 	}
 	if m.confirm == confirmRollback {
 		return confirmStyle.Render("Roll back to the last healthy baseline? [y/n]") + "\n"
@@ -766,6 +778,10 @@ func (m model) loadOverview() tea.Cmd {
 		if err != nil {
 			return loadErrMsg{err: err}
 		}
+		data.deployPlan, err = service.StackDeployPlan(ctx, false)
+		if err != nil {
+			return loadErrMsg{err: err}
+		}
 		return overviewMsg{data: data}
 	}
 }
@@ -783,15 +799,50 @@ func (m model) loadAudit() tea.Cmd {
 	}
 }
 
-func (m model) deployStack() tea.Cmd {
+func (m model) deployStack(force bool) tea.Cmd {
 	service := m.service
 	actor := m.actor
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 		defer cancel()
-		attempt, err := service.DeployStack(ctx, actor)
+		attempt, err := service.DeployStack(ctx, actor, force)
 		return opDoneMsg{label: "stack deploy", attempt: attempt, err: err}
 	}
+}
+
+func (m model) deployConfirmPrompt() string {
+	if m.data == nil {
+		return "Deploy the stack? [y] changed only  [f] force all  [n] cancel"
+	}
+	plan := m.data.deployPlan
+	changed := len(plan.ToDeploy)
+	unchanged := len(plan.Skipped)
+	total := len(plan.Targets)
+	if changed == 0 {
+		return fmt.Sprintf("Stack is up to date (%d unchanged).\n  [y] finish (no-op)  [f] force redeploy all (%d apps)  [n] cancel", unchanged, total)
+	}
+	if unchanged == 0 {
+		return fmt.Sprintf("Deploy %d changed app(s)?\n  [y] deploy changed only  [f] force redeploy all (%d apps)  [n] cancel", changed, total)
+	}
+	return fmt.Sprintf("Deploy %d changed app(s) (%d unchanged)?\n  [y] deploy changed only  [f] force redeploy all (%d apps)  [n] cancel", changed, unchanged, total)
+}
+
+func formatStackDeployNotice(attempt stackstate.Attempt) string {
+	if attempt.Status != stackstate.StatusSucceeded {
+		return string(attempt.Status)
+	}
+	deployed := len(attempt.DeployedApps)
+	skipped := len(attempt.SkippedApps)
+	if deployed == 0 && skipped > 0 {
+		return "succeeded (up to date, " + fmt.Sprintf("%d", skipped) + " unchanged)"
+	}
+	if attempt.Forced {
+		return fmt.Sprintf("succeeded (%d deployed, forced)", deployed)
+	}
+	if skipped == 0 {
+		return fmt.Sprintf("succeeded (%d deployed)", deployed)
+	}
+	return fmt.Sprintf("succeeded (%d deployed, %d unchanged)", deployed, skipped)
 }
 
 func (m model) rollbackStack() tea.Cmd {

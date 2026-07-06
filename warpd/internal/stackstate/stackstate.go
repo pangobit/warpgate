@@ -23,6 +23,10 @@ type Status string
 type Snapshot struct {
 	// Releases maps app names to deployed release IDs.
 	Releases map[string]string
+	// ClusterFileSHA is the cluster.yml blob SHA from the last healthy deploy.
+	ClusterFileSHA string
+	// AppConfigSHAs maps app names to app.yml blob SHAs from the last healthy deploy.
+	AppConfigSHAs map[string]string
 	// UpdatedAt is when the baseline advanced.
 	UpdatedAt time.Time
 }
@@ -47,6 +51,12 @@ type Attempt struct {
 	Error string
 	// RevertError is the revert failure message when reverting also failed.
 	RevertError string
+	// DeployedApps lists apps that ran DeployRelease during this attempt.
+	DeployedApps []string
+	// SkippedApps lists apps left unchanged during a selective deploy.
+	SkippedApps []string
+	// Forced reports whether the operator forced a full stack redeploy.
+	Forced bool
 }
 
 // State is the persisted whole-stack deploy state.

@@ -240,7 +240,12 @@ func seedPreviewStack(ctx context.Context, store *tursoconn.MemoryStore, scenari
 	}
 	return store.SaveStackState(ctx, stackstate.State{
 		LastHealthy: stackstate.Snapshot{
-			Releases:  map[string]string{"api": "rel-api-1", "web": "rel-web-1"},
+			Releases:       map[string]string{"api": "rel-api-1", "web": "rel-web-1"},
+			ClusterFileSHA: "cluster-sha",
+			AppConfigSHAs: map[string]string{
+				"api": "api-sha",
+				"web": "web-sha",
+			},
 			UpdatedAt: now.Add(-2 * time.Hour),
 		},
 		LastAttempt: attempt,

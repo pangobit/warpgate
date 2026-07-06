@@ -844,7 +844,7 @@ func seedStackApps(t *testing.T, store *tursoconn.MemoryStore, releases map[stri
 	}
 	sort.Strings(apps)
 	for _, app := range apps {
-		if err := store.UpsertApp(ctx, configrepo.AppSnapshot{Name: app, RawYAML: appYAML("v1.0.0")}); err != nil {
+		if err := store.UpsertApp(ctx, configrepo.AppSnapshot{Name: app, FileSHA: app + "-sha", RawYAML: appYAML("v1.0.0")}); err != nil {
 			t.Fatalf("UpsertApp(%s) error = %v", app, err)
 		}
 		if err := store.CreateRelease(ctx, release.Record{
@@ -867,7 +867,7 @@ func TestDeployStackAdvancesBaselineOnSuccess(t *testing.T) {
 	deployer := &fakeDeployer{targets: []string{"node-1"}}
 	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
 
-	attempt, err := service.DeployStack(ctx, adminUser())
+	attempt, err := service.DeployStack(ctx, adminUser(), false)
 	if err != nil {
 		t.Fatalf("DeployStack() error = %v", err)
 	}
@@ -883,6 +883,9 @@ func TestDeployStackAdvancesBaselineOnSuccess(t *testing.T) {
 	}
 	if state.LastHealthy.Releases["api"] != "rel-api-1" || state.LastHealthy.Releases["worker"] != "rel-worker-1" {
 		t.Fatalf("baseline = %+v, want both releases", state.LastHealthy.Releases)
+	}
+	if state.LastHealthy.ClusterFileSHA == "" {
+		t.Fatal("baseline cluster file sha must be recorded")
 	}
 	if state.LastAttempt == nil || state.LastAttempt.FinishedAt == nil {
 		t.Fatalf("last attempt = %+v, want finished attempt", state.LastAttempt)
@@ -911,7 +914,7 @@ func TestDeployStackRevertsToBaselineOnFailure(t *testing.T) {
 	}
 	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
 
-	attempt, err := service.DeployStack(ctx, adminUser())
+	attempt, err := service.DeployStack(ctx, adminUser(), false)
 	if err == nil {
 		t.Fatal("DeployStack() expected error, got nil")
 	}
@@ -949,7 +952,7 @@ func TestDeployStackHaltsWithoutBaseline(t *testing.T) {
 	}
 	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
 
-	attempt, err := service.DeployStack(ctx, adminUser())
+	attempt, err := service.DeployStack(ctx, adminUser(), false)
 	if err == nil {
 		t.Fatal("DeployStack() expected error, got nil")
 	}
@@ -985,7 +988,7 @@ func TestDeployStackFlagsRevertFailure(t *testing.T) {
 	}
 	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
 
-	attempt, err := service.DeployStack(ctx, adminUser())
+	attempt, err := service.DeployStack(ctx, adminUser(), false)
 	if err == nil {
 		t.Fatal("DeployStack() expected error, got nil")
 	}
@@ -1018,6 +1021,182 @@ func TestRollbackStackRedeploysBaseline(t *testing.T) {
 	}
 	if len(deployer.deployed) != 2 || deployer.deployed[0] != "rel-api-1" || deployer.deployed[1] != "rel-worker-1" {
 		t.Fatalf("deployed = %v, want baseline releases in app order", deployer.deployed)
+	}
+}
+
+func TestBuildStackDeployPlanSkipsUnchangedRelease(t *testing.T) {
+	plan := usecase.BuildStackDeployPlanForTest(
+		map[string]string{"api": "rel-2", "web": "rel-1"},
+		stackstate.Snapshot{
+			Releases:       map[string]string{"api": "rel-1", "web": "rel-1"},
+			ClusterFileSHA: "cluster-sha",
+			AppConfigSHAs:  map[string]string{"api": "api-sha", "web": "web-sha"},
+		},
+		"cluster-sha",
+		[]configrepo.AppSnapshot{
+			{Name: "api", FileSHA: "api-sha"},
+			{Name: "web", FileSHA: "web-sha"},
+		},
+		false,
+	)
+	if len(plan.ToDeploy) != 1 || plan.ToDeploy["api"] != "rel-2" {
+		t.Fatalf("to deploy = %#v, want only api rel-2", plan.ToDeploy)
+	}
+	if len(plan.Skipped) != 1 || plan.Skipped[0] != "web" {
+		t.Fatalf("skipped = %#v, want [web]", plan.Skipped)
+	}
+}
+
+func TestBuildStackDeployPlanClusterChangeDeploysAll(t *testing.T) {
+	plan := usecase.BuildStackDeployPlanForTest(
+		map[string]string{"api": "rel-1", "web": "rel-1"},
+		stackstate.Snapshot{
+			Releases:       map[string]string{"api": "rel-1", "web": "rel-1"},
+			ClusterFileSHA: "cluster-sha-old",
+			AppConfigSHAs:  map[string]string{"api": "api-sha", "web": "web-sha"},
+		},
+		"cluster-sha-new",
+		[]configrepo.AppSnapshot{
+			{Name: "api", FileSHA: "api-sha"},
+			{Name: "web", FileSHA: "web-sha"},
+		},
+		false,
+	)
+	if len(plan.ToDeploy) != 2 {
+		t.Fatalf("to deploy = %#v, want both apps", plan.ToDeploy)
+	}
+	if len(plan.Skipped) != 0 {
+		t.Fatalf("skipped = %#v, want none", plan.Skipped)
+	}
+}
+
+func TestBuildStackDeployPlanAppConfigChange(t *testing.T) {
+	plan := usecase.BuildStackDeployPlanForTest(
+		map[string]string{"api": "rel-1"},
+		stackstate.Snapshot{
+			Releases:       map[string]string{"api": "rel-1"},
+			ClusterFileSHA: "cluster-sha",
+			AppConfigSHAs:  map[string]string{"api": "api-sha-old"},
+		},
+		"cluster-sha",
+		[]configrepo.AppSnapshot{{Name: "api", FileSHA: "api-sha-new"}},
+		false,
+	)
+	if len(plan.ToDeploy) != 1 {
+		t.Fatalf("to deploy = %#v, want api", plan.ToDeploy)
+	}
+}
+
+func TestDeployStackSkipsUnchangedAppsOnSecondRun(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	seedStackApps(t, store, map[string]string{"api": "rel-api-1", "worker": "rel-worker-1"})
+	deployer := &fakeDeployer{targets: []string{"node-1"}}
+	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
+
+	if _, err := service.DeployStack(ctx, adminUser(), false); err != nil {
+		t.Fatalf("first DeployStack() error = %v", err)
+	}
+	deployer.deployed = nil
+	attempt, err := service.DeployStack(ctx, adminUser(), false)
+	if err != nil {
+		t.Fatalf("second DeployStack() error = %v", err)
+	}
+	if attempt.Status != stackstate.StatusSucceeded {
+		t.Fatalf("attempt status = %q, want succeeded", attempt.Status)
+	}
+	if len(deployer.deployed) != 0 {
+		t.Fatalf("deployed = %v, want no deploy calls on unchanged stack", deployer.deployed)
+	}
+}
+
+func TestDeployStackNoOpWhenUnchanged(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	seedStackApps(t, store, map[string]string{"api": "rel-api-1"})
+	if err := store.SaveStackState(ctx, stackstate.State{
+		LastHealthy: stackstate.Snapshot{
+			Releases:       map[string]string{"api": "rel-api-1"},
+			ClusterFileSHA: "cluster-sha",
+			AppConfigSHAs:  map[string]string{"api": "api-sha"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveStackState() error = %v", err)
+	}
+	deployer := &fakeDeployer{targets: []string{"node-1"}}
+	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
+
+	attempt, err := service.DeployStack(ctx, adminUser(), false)
+	if err != nil {
+		t.Fatalf("DeployStack() error = %v", err)
+	}
+	if len(deployer.deployed) != 0 {
+		t.Fatalf("deployed = %v, want no-op", deployer.deployed)
+	}
+	if len(attempt.SkippedApps) != 1 || attempt.SkippedApps[0] != "api" {
+		t.Fatalf("skipped apps = %v, want [api]", attempt.SkippedApps)
+	}
+}
+
+func TestDeployStackForceRedeploysAll(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	seedStackApps(t, store, map[string]string{"api": "rel-api-1", "worker": "rel-worker-1"})
+	if err := store.SaveStackState(ctx, stackstate.State{
+		LastHealthy: stackstate.Snapshot{
+			Releases:       map[string]string{"api": "rel-api-1", "worker": "rel-worker-1"},
+			ClusterFileSHA: "cluster-sha",
+			AppConfigSHAs:  map[string]string{"api": "api-sha", "worker": "worker-sha"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveStackState() error = %v", err)
+	}
+	deployer := &fakeDeployer{targets: []string{"node-1"}}
+	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
+
+	attempt, err := service.DeployStack(ctx, adminUser(), true)
+	if err != nil {
+		t.Fatalf("DeployStack() error = %v", err)
+	}
+	if len(deployer.deployed) != 2 {
+		t.Fatalf("deployed = %v, want both apps forced", deployer.deployed)
+	}
+	if !attempt.Forced {
+		t.Fatal("attempt.Forced must be true for forced deploy")
+	}
+	if len(attempt.SkippedApps) != 0 {
+		t.Fatalf("skipped apps = %v, want none when forced", attempt.SkippedApps)
+	}
+}
+
+func TestDeployStackClusterChangeRedeploysAll(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	seedStackApps(t, store, map[string]string{"api": "rel-api-1", "worker": "rel-worker-1"})
+	if err := store.SaveStackState(ctx, stackstate.State{
+		LastHealthy: stackstate.Snapshot{
+			Releases:       map[string]string{"api": "rel-api-1", "worker": "rel-worker-1"},
+			ClusterFileSHA: "cluster-sha-old",
+			AppConfigSHAs:  map[string]string{"api": "api-sha", "worker": "worker-sha"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveStackState() error = %v", err)
+	}
+	if err := store.SaveClusterConfig(ctx, configrepo.ClusterSnapshot{
+		Path:    "prod/cluster.yml",
+		FileSHA: "cluster-sha-new",
+		RawYAML: clusterYAML(),
+	}); err != nil {
+		t.Fatalf("SaveClusterConfig() error = %v", err)
+	}
+	deployer := &fakeDeployer{targets: []string{"node-1"}}
+	service := usecase.NewService(store, newFakeGitHub(), fakeRegistry{}, deployer)
+
+	if _, err := service.DeployStack(ctx, adminUser(), false); err != nil {
+		t.Fatalf("DeployStack() error = %v", err)
+	}
+	if len(deployer.deployed) != 2 {
+		t.Fatalf("deployed = %v, want both apps after cluster change", deployer.deployed)
 	}
 }
 
@@ -1376,6 +1555,7 @@ func seedRuntimeConfig(t *testing.T, store *tursoconn.MemoryStore) {
 	}
 	if err := store.SaveClusterConfig(context.Background(), configrepo.ClusterSnapshot{
 		Path:    "prod/cluster.yml",
+		FileSHA: "cluster-sha",
 		RawYAML: clusterYAML(),
 	}); err != nil {
 		t.Fatalf("SaveClusterConfig() error = %v", err)
