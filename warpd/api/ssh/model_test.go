@@ -1,12 +1,14 @@
 package ssh
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	tursoconn "github.com/pangobit/warpgate/warpd/connectors/turso"
+	"github.com/pangobit/warpgate/warpd/internal/audit"
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
 	"github.com/pangobit/warpgate/warpd/internal/identity"
 	"github.com/pangobit/warpgate/warpd/internal/imagewatch"
@@ -133,5 +135,91 @@ func TestOpDoneShowsResultAndReloads(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("op completion should reload the overview")
+	}
+}
+
+func TestDashboardLongErrorsUseDetailsPanel(t *testing.T) {
+	data := testOverview()
+	longError := strings.Repeat("config sync failed at validation step ", 8)
+	data.cursor.LastError = longError
+	data.stack.LastAttempt.Error = strings.Repeat("deploy log line\n", 12)
+	data.stack.LastAttempt.FailedApp = "api"
+
+	m := updated(t, newTestModel(), tea.WindowSizeMsg{Width: 60, Height: 16})
+	m = updated(t, m, overviewMsg{data: data})
+
+	content := m.View().Content
+	for _, want := range []string{
+		"Details",
+		"scroll details",
+		"config sync failed at validation step",
+		"...",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("view missing %q:\n%s", want, content)
+		}
+	}
+	if !strings.Contains(m.detailContent(), longError) {
+		t.Fatal("detail panel content must retain the full sync error")
+	}
+}
+
+func TestDashboardDetailsCanScrollWithoutTakingDeployKey(t *testing.T) {
+	data := testOverview()
+	data.cursor.LastError = strings.Repeat("sync line\n", 20)
+
+	m := updated(t, newTestModel(), tea.WindowSizeMsg{Width: 50, Height: 12})
+	m = updated(t, m, overviewMsg{data: data})
+	before := m.panel.YOffset()
+
+	m = updated(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if m.panel.YOffset() <= before {
+		t.Fatalf("expected details panel to scroll from %d, got %d", before, m.panel.YOffset())
+	}
+
+	m = updated(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if m.confirm != confirmDeploy {
+		t.Fatal("deploy key should still arm deployment on the dashboard")
+	}
+}
+
+func TestAuditViewUsesScrollablePanel(t *testing.T) {
+	events := make([]audit.Event, 20)
+	for i := range events {
+		events[i] = audit.Event{
+			CreatedAt:  time.Date(2026, time.January, 2, 3, i, 0, 0, time.UTC),
+			Type:       "deploy",
+			ActorEmail: "ray@ssh",
+			Message:    strings.Repeat("event message ", 6),
+		}
+	}
+
+	m := updated(t, newTestModel(), tea.WindowSizeMsg{Width: 72, Height: 12})
+	m.view = viewAudit
+	m = updated(t, m, auditMsg{events: events})
+	content := m.View().Content
+	if !strings.Contains(content, "Audit log") || !strings.Contains(content, "pgup/pgdn") {
+		t.Fatalf("audit view missing panel chrome:\n%s", content)
+	}
+
+	before := m.panel.YOffset()
+	m = updated(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if m.panel.YOffset() <= before {
+		t.Fatalf("expected audit panel to scroll from %d, got %d", before, m.panel.YOffset())
+	}
+}
+
+func TestLoadErrorSummaryKeepsFullDetails(t *testing.T) {
+	longError := strings.Repeat("repository unavailable ", 8)
+
+	m := updated(t, newTestModel(), tea.WindowSizeMsg{Width: 48, Height: 12})
+	m = updated(t, m, loadErrMsg{err: errors.New(longError)})
+
+	content := m.View().Content
+	if !strings.Contains(content, "Error: repository unavailable") || !strings.Contains(content, "...") {
+		t.Fatalf("load error should be summarized:\n%s", content)
+	}
+	if !strings.Contains(m.detailContent(), longError) {
+		t.Fatal("detail content must retain the full load error")
 	}
 }

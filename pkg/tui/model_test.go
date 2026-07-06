@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -76,6 +77,31 @@ func TestModelStepError(t *testing.T) {
 	}
 	if m.Err() == nil {
 		t.Error("Err() should return the error")
+	}
+}
+
+func TestModelWrapsStepErrorToTerminalWidth(t *testing.T) {
+	message := "first failure message second failure message third failure message"
+	wrapped := wrapText(message, 28)
+	if !strings.Contains(wrapped, "\n") {
+		t.Fatalf("expected helper to wrap text, got %q", wrapped)
+	}
+
+	defs := []StepDef{
+		{Name: "Step 1", Run: func() (string, error) { return "", fmt.Errorf("boom") }},
+	}
+	m := New("Test", defs)
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 34, Height: 12})
+	m = result.(Model)
+	result, _ = m.Update(stepErrorMsg{
+		index: 0,
+		err:   fmt.Errorf("%s", message),
+	})
+	m = result.(Model)
+
+	content := m.View().Content
+	if !strings.Contains(content, "first failure message second") || !strings.Contains(content, "failure message third") {
+		t.Fatalf("expected wrapped error output:\n%s", content)
 	}
 }
 

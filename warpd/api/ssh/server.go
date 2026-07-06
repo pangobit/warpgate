@@ -2,6 +2,8 @@
 package ssh
 
 import (
+	"fmt"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/wish/v2"
 	"charm.land/wish/v2/activeterm"
@@ -35,6 +37,15 @@ func NewServer(service *usecase.Service, cfg Config) (*ssh.Server, error) {
 			activeterm.Middleware(),
 		),
 	)
+}
+
+// RunLocal runs the operator TUI directly in the current terminal.
+func RunLocal(service *usecase.Service, actor identity.User, refresh func()) error {
+	program := tea.NewProgram(newModel(service, actor, refresh))
+	if _, err := program.Run(); err != nil {
+		return fmt.Errorf("run operator TUI: %w", err)
+	}
+	return nil
 }
 
 func sessionActor(sess ssh.Session) identity.User {
