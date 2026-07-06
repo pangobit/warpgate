@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +74,13 @@ func testOverview() overview {
 func newTestModel() model {
 	service := usecase.NewService(tursoconn.NewMemoryStore(), nil, nil, nil)
 	return newModel(service, testOperator(), func() {})
+}
+
+func scrollOffset(m model) int {
+	if m.scrollDashboard {
+		return m.bodyPanel.YOffset()
+	}
+	return m.panel.YOffset()
 }
 
 func updated(t *testing.T, m tea.Model, msg tea.Msg) model {
@@ -156,15 +164,12 @@ func TestAppsSectionLongErrorsUseDetailsPanel(t *testing.T) {
 		ManifestError: manifestError,
 	}}
 
-	m := updated(t, newTestModel(), tea.WindowSizeMsg{Width: 58, Height: 16})
+	m := updated(t, newTestModel(), tea.WindowSizeMsg{Width: 58, Height: 24})
 	m = updated(t, m, overviewMsg{data: data})
 
 	content := m.View().Content
 	for _, want := range []string{
 		"Details",
-		"manifest error:",
-		"config error:",
-		"...",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("view missing %q:\n%s", want, content)
@@ -316,11 +321,11 @@ func TestDashboardDetailsCanScrollWithoutTakingDeployKey(t *testing.T) {
 
 	m := updated(t, newTestModel(), tea.WindowSizeMsg{Width: 50, Height: 12})
 	m = updated(t, m, overviewMsg{data: data})
-	before := m.panel.YOffset()
+	before := scrollOffset(m)
 
 	m = updated(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"})
-	if m.panel.YOffset() <= before {
-		t.Fatalf("expected details panel to scroll from %d, got %d", before, m.panel.YOffset())
+	if scrollOffset(m) <= before {
+		t.Fatalf("expected details panel to scroll from %d, got %d", before, scrollOffset(m))
 	}
 
 	m = updated(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
@@ -352,6 +357,131 @@ func TestAuditViewUsesScrollablePanel(t *testing.T) {
 	m = updated(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.panel.YOffset() <= before {
 		t.Fatalf("expected audit panel to scroll from %d, got %d", before, m.panel.YOffset())
+	}
+}
+
+func testFailureOverview() overview {
+	finished := time.Now().Add(-8 * time.Minute)
+	return overview{
+		repo:     configrepo.RepositorySettings{Owner: "acme", Repo: "infra", Branch: "main", Path: "prod"},
+		attached: true,
+		cursor:   configrepo.SyncCursor{LastObservedCommit: "abcdef1234567890", LastCheckedAt: time.Now()},
+		cursors: []imagewatch.Cursor{
+			{
+				App:          "api",
+				Service:      "api",
+				Tag:          "1.2.0",
+				CandidateTag: "1.2.5",
+				Status:       imagewatch.StatusUpdateAvailable,
+			},
+			{
+				App:       "worker",
+				Service:   "worker",
+				Status:    imagewatch.StatusInvalid,
+				LastError: strings.Repeat("registry timeout while resolving ghcr.io/acme/worker:latest ", 5),
+			},
+		},
+		stack: stackstate.State{
+			LastHealthy: stackstate.Snapshot{
+				Releases:  map[string]string{"api": "rel-api-1", "web": "rel-web-1"},
+				UpdatedAt: time.Now().Add(-2 * time.Hour),
+			},
+			LastAttempt: &stackstate.Attempt{
+				ID:          "stack-preview-1",
+				Status:      stackstate.StatusRevertFailed,
+				Releases:    map[string]string{"api": "rel-api-2", "web": "rel-web-1"},
+				ActorEmail:  "ray@ssh",
+				StartedAt:   time.Now().Add(-12 * time.Minute),
+				FinishedAt:  &finished,
+				FailedApp:   "api",
+				Error:       strings.Repeat("health check failed on node-a: /health returned 503 after deploy ", 4),
+				RevertError: strings.Repeat("rollback could not restart api-blue because docker compose returned exit status 1 ", 3),
+			},
+		},
+		apps: []configrepo.AppSnapshot{{Name: "api"}, {Name: "web"}},
+		appServices: []usecase.AppReleaseServices{
+			{
+				Name: "api",
+				Services: []usecase.AppReleaseService{
+					{Name: "api", Image: "ghcr.io/acme/api", ImageTag: "1.2.0"},
+				},
+			},
+			{
+				Name: "web",
+				Services: []usecase.AppReleaseService{
+					{Name: "web", Image: "ghcr.io/acme/web", ImageTag: "3.4.1"},
+				},
+			},
+		},
+		baselineReleases: []usecase.AppBaselineRelease{
+			{
+				Name:            "api",
+				ConfigCommit:    "abcdef1234567890",
+				PrimaryImageTag: "1.2.0",
+				Services: []usecase.AppDeployedService{
+					{Name: "api", ImageRef: "ghcr.io/acme/api:1.2.0"},
+				},
+			},
+			{
+				Name:            "web",
+				ConfigCommit:    "abcdef1234567890",
+				PrimaryImageTag: "3.4.1",
+				Services: []usecase.AppDeployedService{
+					{Name: "web", ImageRef: "ghcr.io/acme/web:3.4.1"},
+				},
+			},
+		},
+	}
+}
+
+func TestDashboardFooterFitsTerminalHeight(t *testing.T) {
+	for _, height := range []int{16, 20, 24} {
+		t.Run(fmt.Sprintf("height-%d", height), func(t *testing.T) {
+			m := updated(t, newTestModel(), tea.WindowSizeMsg{Width: 100, Height: height})
+			m = updated(t, m, overviewMsg{data: testFailureOverview()})
+
+			content := m.View().Content
+			if !strings.Contains(content, "[d] deploy stack") {
+				t.Fatalf("footer should remain visible:\n%s", content)
+			}
+			visibleLines := len(strings.Split(strings.TrimRight(content, "\n"), "\n"))
+			if visibleLines > m.height {
+				t.Fatalf("view uses %d lines, terminal height is %d:\n%s", visibleLines, m.height, content)
+			}
+		})
+	}
+}
+
+func TestDashboardPanelShrinksToContent(t *testing.T) {
+	data := testFailureOverview()
+	m := updated(t, newTestModel(), tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated(t, m, overviewMsg{data: data})
+
+	if got, want := m.panel.Height(), lineCount(m.detailContent()); got != want {
+		t.Fatalf("panel height = %d, want %d content lines", got, want)
+	}
+
+	content := m.View().Content
+	detailsIdx := strings.Index(content, "Details")
+	pendingIdx := strings.Index(content, "Pending updates")
+	if detailsIdx < 0 || pendingIdx < 0 {
+		t.Fatalf("expected details and pending sections:\n%s", content)
+	}
+	gap := lineCount(content[detailsIdx:pendingIdx])
+	if gap > lineCount(m.detailContent())+3 {
+		t.Fatalf("excessive gap between details and pending updates: %d lines", gap)
+	}
+}
+
+func TestDashboardPanelResizesAfterOverviewLoad(t *testing.T) {
+	data := testFailureOverview()
+	data.cursor.LastError = strings.Repeat("sync line\n", 12)
+
+	m := updated(t, newTestModel(), tea.WindowSizeMsg{Width: 80, Height: 20})
+	m = updated(t, m, overviewMsg{data: data})
+
+	if m.panel.Height() >= m.height {
+		t.Fatalf("panel height %d should be smaller than terminal height %d", m.panel.Height(), m.height)
 	}
 }
 

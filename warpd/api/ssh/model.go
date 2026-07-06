@@ -31,6 +31,26 @@ const (
 	defaultWidth   = 100
 	defaultHeight  = 32
 	minPanelHeight = 4
+
+	terminalSideMargin = 2
+	ellipsisReserve    = 3
+
+	loadErrorPrefix         = "Error: "
+	syncErrorPrefix         = "  sync error: "
+	failedAppLinePrefix     = "    failed app: "
+	failedAppLineSeparator  = " — "
+	revertFailedPrefix      = "    REVERT FAILED — operator attention required: "
+	configErrorPrefix       = "    config error: "
+	manifestErrorPrefix     = "manifest error: "
+	invalidStatusPrefix     = " — "
+	pendingUpdateLineIndent = 2
+	pendingUpdateNameWidth  = 20
+
+	appRowIndent           = 2
+	appNameColumnWidth     = 24
+	serviceRowIndent       = 4
+	serviceNameColumnWidth = 22
+	serviceImageSeparator  = " "
 )
 
 type overview struct {
@@ -67,32 +87,38 @@ type model struct {
 	actor   identity.User
 	refresh func()
 
-	view     string
-	confirm  string
-	busy     bool
-	busyWhat string
-	spinner  spinner.Model
-	data     *overview
-	audit    []audit.Event
-	notice   string
-	loadErr  error
-	width    int
-	height   int
-	panel    viewport.Model
+	view            string
+	confirm         string
+	busy            bool
+	busyWhat        string
+	spinner         spinner.Model
+	data            *overview
+	audit           []audit.Event
+	notice          string
+	loadErr         error
+	width           int
+	height          int
+	compact         bool
+	scrollDashboard bool
+	panel           viewport.Model
+	bodyPanel       viewport.Model
 }
 
 func newModel(service *usecase.Service, actor identity.User, refresh func()) model {
 	panel := viewport.New(viewport.WithWidth(defaultWidth), viewport.WithHeight(defaultHeight))
 	panel.SoftWrap = true
+	bodyPanel := viewport.New(viewport.WithWidth(defaultWidth), viewport.WithHeight(defaultHeight))
+	bodyPanel.SoftWrap = true
 	return model{
-		service: service,
-		actor:   actor,
-		refresh: refresh,
-		view:    viewDashboard,
-		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		width:   defaultWidth,
-		height:  defaultHeight,
-		panel:   panel,
+		service:   service,
+		actor:     actor,
+		refresh:   refresh,
+		view:      viewDashboard,
+		spinner:   spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		width:     defaultWidth,
+		height:    defaultHeight,
+		panel:     panel,
+		bodyPanel: bodyPanel,
 	}
 }
 
@@ -109,8 +135,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.resizePanel()
 		m.updatePanelContent()
+		m.resizePanel()
 		return m, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -121,15 +147,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.data = &data
 		m.loadErr = nil
 		m.updatePanelContent()
+		m.resizePanel()
 		return m, nil
 	case auditMsg:
 		m.audit = msg.events
 		m.loadErr = nil
 		m.updatePanelContent()
+		m.resizePanel()
 		return m, nil
 	case loadErrMsg:
 		m.loadErr = msg.err
 		m.updatePanelContent()
+		m.resizePanel()
 		return m, nil
 	case opDoneMsg:
 		m.busy = false
@@ -140,6 +169,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = msg.label + " finished: " + string(msg.attempt.Status)
 		}
 		m.updatePanelContent()
+		m.resizePanel()
 		return m, m.loadOverview()
 	}
 	return m, nil
@@ -187,17 +217,24 @@ func (m model) handleViewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.view == viewAudit {
 			m.view = viewDashboard
 			m.updatePanelContent()
+			m.resizePanel()
 			return m, nil
 		}
 		m.view = viewAudit
 		m.updatePanelContent()
+		m.resizePanel()
 		return m, m.loadAudit()
 	case "esc":
 		m.view = viewDashboard
 		m.updatePanelContent()
+		m.resizePanel()
 	}
 	if m.scrollPanelActive() {
 		var cmd tea.Cmd
+		if m.scrollDashboard {
+			m.bodyPanel, cmd = m.bodyPanel.Update(msg)
+			return m, cmd
+		}
 		m.panel, cmd = m.panel.Update(msg)
 		return m, cmd
 	}
@@ -227,15 +264,13 @@ func (m model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 func (m model) View() tea.View {
 	var b strings.Builder
 	b.WriteString(m.header())
-	if m.loadErr != nil {
-		b.WriteString(errStyle.Render("Error: "+m.shortText(m.loadErr.Error(), m.contentWidth()-7)) + "\n\n")
-	}
-	if m.notice != "" {
-		b.WriteString(noticeStyle.Render(m.shortText(m.notice, m.contentWidth())) + "\n\n")
-	}
+	b.WriteString(m.loadErrorBlock())
+	b.WriteString(m.noticeBlock())
 	switch {
 	case m.busy:
 		b.WriteString("  " + m.spinner.View() + " " + m.busyWhat + "...\n")
+	case m.scrollDashboard:
+		b.WriteString(m.bodyPanel.View())
 	case m.view == viewAudit:
 		b.WriteString(m.auditView())
 	default:
@@ -273,7 +308,7 @@ func (m model) footer() string {
 	if m.view == viewAudit {
 		return dimStyle.Render("  [j/k] scroll  [pgup/pgdn] page  [a/esc] back  [u] reload  [q] quit") + "\n"
 	}
-	if m.hasDetailPanel() {
+	if m.scrollDashboard || m.hasDetailPanel() {
 		return dimStyle.Render("  [j/k] scroll details  [d] deploy stack  [r] rollback  [s] sync now  [a] audit  [u] reload  [q] quit") + "\n"
 	}
 	return dimStyle.Render("  [d] deploy stack  [r] rollback  [s] sync now  [a] audit  [u] reload  [q] quit") + "\n"
@@ -297,12 +332,24 @@ func (m model) configSection() string {
 	}
 	line := "  commit " + shortSHA(m.data.cursor.LastObservedCommit) + "  checked " + relativeTime(m.data.cursor.LastCheckedAt)
 	if m.data.cursor.LastError != "" {
-		line += "\n  " + errStyle.Render("sync error: "+m.shortText(m.data.cursor.LastError, m.contentWidth()-14))
+		line += "\n" + errStyle.Render(syncErrorPrefix+m.shortText(m.data.cursor.LastError, m.contentWidth()-len(syncErrorPrefix)))
 	}
 	return headerStyle.Render("Config") + "\n" + line + "\n\n"
 }
 
 func (m model) stackSection() string {
+	var b strings.Builder
+	b.WriteString(m.stackSummary())
+	if m.hasDetailPanel() && !m.scrollDashboard {
+		b.WriteString(m.detailPanelHeader())
+		b.WriteString(m.panel.View())
+		return b.String() + "\n"
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func (m model) stackSummary() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Stack") + "\n")
 	stack := m.data.stack
@@ -315,17 +362,16 @@ func (m model) stackSection() string {
 		attempt := stack.LastAttempt
 		line := "  last attempt: " + styleAttemptStatus(attempt.Status) + dimStyle.Render("  by "+attempt.ActorEmail+" "+relativeTime(attempt.StartedAt))
 		b.WriteString(line + "\n")
-		if attempt.FailedApp != "" {
-			b.WriteString("    " + errStyle.Render("failed app: "+attempt.FailedApp+" — "+m.shortText(attempt.Error, m.contentWidth()-18-len(attempt.FailedApp))) + "\n")
-		}
-		if attempt.RevertError != "" {
-			b.WriteString("    " + errStyle.Render("REVERT FAILED — operator attention required: "+m.shortText(attempt.RevertError, m.contentWidth()-45)) + "\n")
+		if !m.compact {
+			if attempt.FailedApp != "" {
+				failedAppWidth := m.contentWidth() - len(failedAppLinePrefix) - len(failedAppLineSeparator) - len(attempt.FailedApp)
+				b.WriteString(errStyle.Render(failedAppLinePrefix+attempt.FailedApp+failedAppLineSeparator+m.shortText(attempt.Error, failedAppWidth)) + "\n")
+			}
+			if attempt.RevertError != "" {
+				b.WriteString(errStyle.Render(revertFailedPrefix+m.shortText(attempt.RevertError, m.contentWidth()-len(revertFailedPrefix))) + "\n")
+			}
 		}
 	}
-	if m.hasDetailPanel() {
-		b.WriteString(m.detailPanelView())
-	}
-	b.WriteString("\n")
 	return b.String()
 }
 
@@ -340,9 +386,17 @@ func (m model) updatesSection() string {
 			updatePending++
 		case imagewatch.StatusInvalid:
 			invalid++
-			prefix := fmt.Sprintf("%-20s ", cursor.App+"/"+cursor.Service)
-			b.WriteString("  " + errStyle.Render(prefix+m.shortText(cursor.LastError, m.contentWidth()-len(prefix)-2)) + "\n")
+			if !m.compact {
+				prefix := fmt.Sprintf("%-*s ", pendingUpdateNameWidth, cursor.App+"/"+cursor.Service)
+				linePrefix := strings.Repeat(" ", pendingUpdateLineIndent) + prefix
+				b.WriteString(errStyle.Render(linePrefix+m.shortText(cursor.LastError, m.contentWidth()-len(linePrefix))) + "\n")
+			}
 		}
+	}
+	if invalid == 1 {
+		b.WriteString("  " + dimStyle.Render("1 invalid image constraint — see Details") + "\n")
+	} else if invalid > 1 {
+		b.WriteString("  " + dimStyle.Render(fmt.Sprintf("%d invalid image constraints — see Details", invalid)) + "\n")
 	}
 	if updatePending == 1 {
 		b.WriteString("  " + dimStyle.Render("1 semver update pending — see Apps section") + "\n")
@@ -392,6 +446,10 @@ func (m model) appsSection() string {
 		b.WriteString("  " + dimStyle.Render("no apps synced") + "\n")
 		return b.String()
 	}
+	if m.compact {
+		b.WriteString("  " + dimStyle.Render("collapsed — scroll Details for per-app output") + "\n")
+		return b.String() + "\n"
+	}
 	lookups := m.appsSectionLookups()
 	for _, app := range m.data.apps {
 		if m.data.stack.LastHealthy.Releases[app.Name] != "" {
@@ -408,13 +466,14 @@ func (m model) formatBaselineAppLabel(baseline usecase.AppBaselineRelease) strin
 		return errStyle.Render("release record missing")
 	}
 	if baseline.ManifestError != "" {
-		return errStyle.Render("manifest error: " + m.shortText(baseline.ManifestError, m.contentWidth()-42))
+		manifestWidth := m.contentWidth() - appRowIndent - appNameColumnWidth - len(manifestErrorPrefix)
+		return errStyle.Render(manifestErrorPrefix + m.shortText(baseline.ManifestError, manifestWidth))
 	}
 	return usecase.BaselineReleaseLabel(baseline)
 }
 
 func (m model) writeBaselineApp(b *strings.Builder, appName string, baseline usecase.AppBaselineRelease, lookups appsSectionLookups) {
-	b.WriteString(fmt.Sprintf("  %-24s %s\n", appName, m.formatBaselineAppLabel(baseline)))
+	b.WriteString(fmt.Sprintf("  %-*s %s\n", appNameColumnWidth, appName, m.formatBaselineAppLabel(baseline)))
 	if baseline.ReleaseMissing || baseline.ManifestError != "" {
 		return
 	}
@@ -430,13 +489,13 @@ func (m model) writeBaselineApp(b *strings.Builder, appName string, baseline use
 }
 
 func (m model) writeDesiredApp(b *strings.Builder, appName string, entry usecase.AppReleaseServices, lookups appsSectionLookups) {
-	b.WriteString(fmt.Sprintf("  %-24s %s\n", appName, dimStyle.Render("not in baseline")))
+	b.WriteString(fmt.Sprintf("  %-*s %s\n", appNameColumnWidth, appName, dimStyle.Render("not in baseline")))
 	if entry.Name == "" {
 		b.WriteString("    " + dimStyle.Render("no release services") + "\n")
 		return
 	}
 	if entry.ParseError != "" {
-		b.WriteString("    " + errStyle.Render("config error: "+m.shortText(entry.ParseError, m.contentWidth()-18)) + "\n")
+		b.WriteString(errStyle.Render(configErrorPrefix+m.shortText(entry.ParseError, m.contentWidth()-len(configErrorPrefix))) + "\n")
 		return
 	}
 	if len(entry.Services) == 0 {
@@ -460,7 +519,7 @@ func (m model) writeAppServiceRows(b *strings.Builder, appName string, rows []ap
 		if cursor, ok := lookups.cursorsByAppService[appName+"/"+row.Name]; ok {
 			suffix = m.formatServicePendingSuffix(cursor, row)
 		}
-		b.WriteString(fmt.Sprintf("    %-22s %s%s\n", row.Name, imageRef, suffix))
+		b.WriteString(fmt.Sprintf("    %-*s %s%s\n", serviceNameColumnWidth, row.Name, imageRef, suffix))
 	}
 }
 
@@ -473,7 +532,64 @@ func (m model) auditView() string {
 
 func (m *model) resizePanel() {
 	m.panel.SetWidth(m.contentWidth())
-	m.panel.SetHeight(m.panelHeight())
+	m.bodyPanel.SetWidth(m.contentWidth())
+	m.compact = false
+	m.scrollDashboard = false
+
+	if m.view == viewAudit {
+		m.fitPanelToTerminal(lineCount(m.auditContent()))
+		return
+	}
+	if m.view != viewDashboard || m.busy || m.data == nil {
+		m.panel.SetHeight(minPanelHeight)
+		return
+	}
+	if m.hasDetailPanel() {
+		m.fitPanelToTerminal(lineCount(m.detailContent()))
+		if m.height > 0 && m.visibleViewLines() > m.height {
+			m.compact = true
+			m.fitPanelToTerminal(lineCount(m.detailContent()))
+		}
+	}
+	if m.height > 0 && m.visibleViewLines() > m.height {
+		m.scrollDashboard = true
+		m.bodyPanel.SetHeight(m.bodyPanelHeight())
+		m.bodyPanel.SetContent(m.dashboardScrollContent())
+	}
+}
+
+func (m *model) fitPanelToTerminal(contentLines int) {
+	m.panel.SetHeight(max(1, contentLines))
+	for m.height > 0 && m.visibleViewLines() > m.height && m.panel.Height() > 1 {
+		m.panel.SetHeight(m.panel.Height() - 1)
+	}
+}
+
+func (m model) bodyPanelHeight() int {
+	used := lineCount(m.header())
+	used += lineCount(m.loadErrorBlock())
+	used += lineCount(m.noticeBlock())
+	used += 1
+	used += lineCount(m.footer())
+	return max(1, m.height-used)
+}
+
+func (m model) dashboardScrollContent() string {
+	var b strings.Builder
+	b.WriteString(m.configSection())
+	b.WriteString(m.stackSummary())
+	if m.detailContent() != "" {
+		b.WriteString(m.detailPanelHeader())
+		b.WriteString(m.detailContent())
+		b.WriteString("\n")
+	}
+	b.WriteString(m.updatesSection())
+	b.WriteString(m.appsSection())
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m model) visibleViewLines() int {
+	return len(strings.Split(strings.TrimRight(m.View().Content, "\n"), "\n"))
 }
 
 func (m *model) updatePanelContent() {
@@ -484,12 +600,22 @@ func (m *model) updatePanelContent() {
 	m.panel.SetContent(m.detailContent())
 }
 
-func (m model) detailPanelView() string {
-	content := m.detailContent()
-	if content == "" {
+func (m model) loadErrorBlock() string {
+	if m.loadErr == nil {
 		return ""
 	}
-	return headerStyle.Render("Details") + "\n" + m.panel.View() + "\n"
+	return errStyle.Render(loadErrorPrefix+m.shortText(m.loadErr.Error(), m.contentWidth()-len(loadErrorPrefix))) + "\n\n"
+}
+
+func (m model) noticeBlock() string {
+	if m.notice == "" {
+		return ""
+	}
+	return noticeStyle.Render(m.shortText(m.notice, m.contentWidth())) + "\n\n"
+}
+
+func (m model) detailPanelHeader() string {
+	return headerStyle.Render("Details") + "\n"
 }
 
 func (m model) auditContent() string {
@@ -556,6 +682,9 @@ func (m model) hasDetailPanel() bool {
 }
 
 func (m model) scrollPanelActive() bool {
+	if m.scrollDashboard {
+		return true
+	}
 	return m.view == viewAudit || m.hasDetailPanel()
 }
 
@@ -563,18 +692,21 @@ func (m model) contentWidth() int {
 	if m.width <= 0 {
 		return defaultWidth
 	}
-	return max(20, m.width-2)
+	return max(20, m.width-terminalSideMargin)
 }
 
-func (m model) panelHeight() int {
-	if m.height <= 0 {
-		return minPanelHeight
-	}
-	reserved := 18
+func (m model) panelContent() string {
 	if m.view == viewAudit {
-		reserved = 7
+		return m.auditContent()
 	}
-	return max(minPanelHeight, m.height-reserved)
+	return m.detailContent()
+}
+
+func lineCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
 }
 
 func (m model) shortText(text string, width int) string {
@@ -586,11 +718,11 @@ func shortenText(text string, width int) string {
 	if !textWasShortened(trimmed, width) {
 		return trimmed
 	}
-	if width <= 3 {
+	if width <= ellipsisReserve {
 		return "..."
 	}
 	runes := []rune(trimmed)
-	return strings.TrimSpace(string(runes[:width-3])) + "..."
+	return strings.TrimSpace(string(runes[:width-ellipsisReserve])) + "..."
 }
 
 func textWasShortened(text string, width int) bool {
@@ -678,8 +810,8 @@ func (m model) formatServicePendingSuffix(cursor imagewatch.Cursor, row appServi
 	case imagewatch.StatusUpdateAvailable:
 		return noticeStyle.Render(" → " + cursor.CandidateTag + " (commit pending)")
 	case imagewatch.StatusInvalid:
-		width := m.contentWidth() - 31 - len(row.ImageRef)
-		return errStyle.Render(" — " + m.shortText(cursor.LastError, width))
+		fixed := serviceRowIndent + serviceNameColumnWidth + len(serviceImageSeparator) + len(row.ImageRef) + len(invalidStatusPrefix)
+		return errStyle.Render(invalidStatusPrefix + m.shortText(cursor.LastError, m.contentWidth()-fixed))
 	default:
 		return ""
 	}
