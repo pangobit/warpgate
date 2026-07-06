@@ -35,15 +35,18 @@ func TestPreviewMixedDeployUsesFakeDeployer(t *testing.T) {
 		t.Fatalf("newPreviewService() error = %v", err)
 	}
 
-	attempt, err := service.DeployStack(context.Background(), previewActor())
+	attempt, err := service.DeployStack(context.Background(), previewActor(), false)
 	if err != nil {
 		t.Fatalf("DeployStack() error = %v", err)
 	}
 	if attempt.Status != stackstate.StatusSucceeded {
 		t.Fatalf("status = %s, want %s", attempt.Status, stackstate.StatusSucceeded)
 	}
-	if strings.Join(deployer.deployed, ",") != "api,web" {
-		t.Fatalf("deployed = %v, want api and web", deployer.deployed)
+	if strings.Join(deployer.deployed, ",") != "api" {
+		t.Fatalf("deployed = %v, want only changed app api", deployer.deployed)
+	}
+	if len(attempt.SkippedApps) != 1 || attempt.SkippedApps[0] != "web" {
+		t.Fatalf("skipped apps = %v, want [web]", attempt.SkippedApps)
 	}
 }
 
@@ -53,7 +56,7 @@ func TestPreviewFailureScenarioExercisesFailedDeploy(t *testing.T) {
 		t.Fatalf("newPreviewService() error = %v", err)
 	}
 
-	attempt, err := service.DeployStack(context.Background(), previewActor())
+	attempt, err := service.DeployStack(context.Background(), previewActor(), false)
 	if err == nil {
 		t.Fatal("DeployStack() error = nil, want preview failure")
 	}

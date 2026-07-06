@@ -68,6 +68,10 @@ func testOverview() overview {
 				{Name: "worker", ImageRef: "ghcr.io/acme/worker:v1.1.0"},
 			},
 		}},
+		deployPlan: usecase.StackDeployPlan{
+			Targets:  map[string]string{"api": "rel-api-2"},
+			ToDeploy: map[string]string{"api": "rel-api-2"},
+		},
 	}
 }
 
@@ -241,15 +245,69 @@ func TestAppsSectionRendersParseError(t *testing.T) {
 func TestDeployRequiresConfirmation(t *testing.T) {
 	m := updated(t, newTestModel(), overviewMsg{data: testOverview()})
 	m = updated(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
-	if !strings.Contains(m.View().Content, "Deploy the stack now? [y/n]") {
+	if !strings.Contains(m.View().Content, "[y] deploy changed only") {
 		t.Fatalf("expected confirmation prompt:\n%s", m.View().Content)
 	}
 	m = updated(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
-	if strings.Contains(m.View().Content, "[y/n]") {
+	if strings.Contains(m.View().Content, "[n] cancel") {
 		t.Fatal("confirmation prompt should clear after 'n'")
 	}
 	if m.busy {
 		t.Fatal("declined confirmation must not start a deploy")
+	}
+}
+
+func TestDeployConfirmPromptShowsChangedCounts(t *testing.T) {
+	m := updated(t, newTestModel(), overviewMsg{data: testOverview()})
+	m = updated(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
+	content := m.View().Content
+	for _, want := range []string{
+		"Deploy 1 changed app(s)",
+		"[y] deploy changed only",
+		"[f] force redeploy all",
+		"[n] cancel",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("confirm prompt missing %q:\n%s", want, content)
+		}
+	}
+}
+
+func TestDeployConfirmPromptShowsNoOpState(t *testing.T) {
+	data := testOverview()
+	data.deployPlan = usecase.StackDeployPlan{
+		Targets: map[string]string{"api": "rel-api-1"},
+		Skipped: []string{"api"},
+	}
+	m := updated(t, newTestModel(), overviewMsg{data: data})
+	m = updated(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
+	content := m.View().Content
+	for _, want := range []string{
+		"Stack is up to date (1 unchanged)",
+		"[y] finish (no-op)",
+		"[f] force redeploy all (1 apps)",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("no-op confirm prompt missing %q:\n%s", want, content)
+		}
+	}
+}
+
+func TestFormatStackDeployNotice(t *testing.T) {
+	got := formatStackDeployNotice(stackstate.Attempt{
+		Status:       stackstate.StatusSucceeded,
+		DeployedApps: []string{"api"},
+		SkippedApps:  []string{"web"},
+	})
+	if got != "succeeded (1 deployed, 1 unchanged)" {
+		t.Fatalf("notice = %q, want selective success copy", got)
+	}
+	got = formatStackDeployNotice(stackstate.Attempt{
+		Status:      stackstate.StatusSucceeded,
+		SkippedApps: []string{"api", "web"},
+	})
+	if got != "succeeded (up to date, 2 unchanged)" {
+		t.Fatalf("notice = %q, want no-op success copy", got)
 	}
 }
 

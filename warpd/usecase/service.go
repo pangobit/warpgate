@@ -443,18 +443,36 @@ func (s *Service) StackState(ctx context.Context) (stackstate.State, error) {
 	return s.store.StackState(ctx)
 }
 
-// DeployStack deploys the latest release of every app as one operation.
+// StackDeployPlan describes what a stack deploy would change.
+type StackDeployPlan struct {
+	// Targets maps every app to its newest committed release.
+	Targets map[string]string
+	// ToDeploy maps apps that need deploy to their target release.
+	ToDeploy map[string]string
+	// Skipped lists unchanged apps in sorted order.
+	Skipped []string
+	// Force reports whether the plan was built for a forced redeploy.
+	Force bool
+}
+
+// StackDeployPlan returns the deploy plan for the current stack targets.
+func (s *Service) StackDeployPlan(ctx context.Context, force bool) (StackDeployPlan, error) {
+	return s.buildStackDeployPlan(ctx, force)
+}
+
+// DeployStack deploys changed apps from the latest committed releases.
+// When force is true, every target app is redeployed regardless of change detection.
 // If any app fails, every app deployed by this attempt is reverted to the
 // last healthy baseline; the baseline advances only when all apps succeed.
-func (s *Service) DeployStack(ctx context.Context, actor identity.User) (stackstate.Attempt, error) {
+func (s *Service) DeployStack(ctx context.Context, actor identity.User, force bool) (stackstate.Attempt, error) {
 	if err := identity.RequireAdmin(actor); err != nil {
 		return stackstate.Attempt{}, err
 	}
-	targets, err := s.stackTargets(ctx)
+	plan, err := s.buildStackDeployPlan(ctx, force)
 	if err != nil {
 		return stackstate.Attempt{}, err
 	}
-	if len(targets) == 0 {
+	if len(plan.Targets) == 0 {
 		return stackstate.Attempt{}, fmt.Errorf("no committed releases to deploy")
 	}
 	state, err := s.store.StackState(ctx)
@@ -462,38 +480,50 @@ func (s *Service) DeployStack(ctx context.Context, actor identity.User) (stackst
 		return stackstate.Attempt{}, err
 	}
 	attempt := stackstate.Attempt{
-		ID:         newID("stack"),
-		Status:     stackstate.StatusRunning,
-		Releases:   targets,
-		ActorEmail: actor.Email,
-		StartedAt:  s.now(),
+		ID:          newID("stack"),
+		Status:      stackstate.StatusRunning,
+		Releases:    plan.Targets,
+		ActorEmail:  actor.Email,
+		StartedAt:   s.now(),
+		SkippedApps: append([]string(nil), plan.Skipped...),
+		Forced:      force,
 	}
 	state.LastAttempt = &attempt
 	if err := s.store.SaveStackState(ctx, state); err != nil {
 		return stackstate.Attempt{}, err
 	}
-	apps := make([]string, 0, len(targets))
-	for app := range targets {
-		apps = append(apps, app)
+	toDeploy := stackDeployApps(plan)
+	if len(toDeploy) == 0 {
+		attempt.Status = stackstate.StatusSucceeded
+		if err := s.finishStackAttempt(ctx, state, &attempt); err != nil {
+			return attempt, err
+		}
+		message := fmt.Sprintf("stack up to date (%d unchanged)", len(plan.Skipped))
+		return attempt, s.audit(ctx, "stack.deploy.noop", actor.Email, message)
 	}
-	sort.Strings(apps)
 	var attempted []string
 	var deployErr error
-	for _, app := range apps {
+	for _, app := range toDeploy {
 		attempted = append(attempted, app)
-		if _, err := s.DeployRelease(ctx, actor, targets[app]); err != nil {
+		if _, err := s.DeployRelease(ctx, actor, plan.Targets[app]); err != nil {
 			attempt.FailedApp = app
 			deployErr = err
 			break
 		}
 	}
+	attempt.DeployedApps = append([]string(nil), attempted...)
 	if deployErr == nil {
 		attempt.Status = stackstate.StatusSucceeded
-		state.LastHealthy = stackstate.Snapshot{Releases: targets, UpdatedAt: s.now()}
+		healthy, err := s.buildHealthySnapshot(ctx, plan.Targets)
+		if err != nil {
+			return attempt, err
+		}
+		state.LastHealthy = healthy
 		if err := s.finishStackAttempt(ctx, state, &attempt); err != nil {
 			return attempt, err
 		}
-		return attempt, s.audit(ctx, "stack.deploy.succeeded", actor.Email, fmt.Sprintf("%d apps deployed", len(apps)))
+		message := stackDeploySuccessMessage(attempt)
+		return attempt, s.audit(ctx, "stack.deploy.succeeded", actor.Email, message)
 	}
 	attempt.Error = deployErr.Error()
 	if len(state.LastHealthy.Releases) == 0 {
@@ -504,7 +534,7 @@ func (s *Service) DeployStack(ctx context.Context, actor identity.User) (stackst
 		auditErr := s.audit(ctx, "stack.deploy.failed", actor.Email, attempt.FailedApp+": "+deployErr.Error()+" (no healthy baseline to revert to)")
 		return attempt, errors.Join(deployErr, auditErr)
 	}
-	revertErr := s.revertStack(ctx, actor, attempted, targets, state.LastHealthy)
+	revertErr := s.revertStack(ctx, actor, attempted, plan.Targets, state.LastHealthy)
 	if revertErr != nil {
 		attempt.Status = stackstate.StatusRevertFailed
 		attempt.RevertError = revertErr.Error()
@@ -573,6 +603,114 @@ func (s *Service) RollbackStack(ctx context.Context, actor identity.User) (stack
 		return attempt, err
 	}
 	return attempt, s.audit(ctx, "stack.rollback", actor.Email, fmt.Sprintf("%d apps redeployed at baseline", len(apps)))
+}
+
+func (s *Service) buildStackDeployPlan(ctx context.Context, force bool) (StackDeployPlan, error) {
+	targets, err := s.stackTargets(ctx)
+	if err != nil {
+		return StackDeployPlan{}, err
+	}
+	state, err := s.store.StackState(ctx)
+	if err != nil {
+		return StackDeployPlan{}, err
+	}
+	cluster, ok, err := s.store.ClusterConfig(ctx)
+	if err != nil {
+		return StackDeployPlan{}, err
+	}
+	if !ok {
+		return StackDeployPlan{}, fmt.Errorf("cluster config has not been synced")
+	}
+	apps, err := s.store.ListApps(ctx)
+	if err != nil {
+		return StackDeployPlan{}, err
+	}
+	return buildStackDeployPlan(targets, state.LastHealthy, cluster.FileSHA, apps, force), nil
+}
+
+func buildStackDeployPlan(targets map[string]string, baseline stackstate.Snapshot, clusterFileSHA string, apps []configrepo.AppSnapshot, force bool) StackDeployPlan {
+	plan := StackDeployPlan{
+		Targets:  targets,
+		ToDeploy: make(map[string]string),
+		Force:    force,
+	}
+	if len(targets) == 0 {
+		return plan
+	}
+	appSHAs := make(map[string]string, len(apps))
+	for _, app := range apps {
+		appSHAs[app.Name] = app.FileSHA
+	}
+	clusterChanged := baseline.ClusterFileSHA == "" || baseline.ClusterFileSHA != clusterFileSHA
+	for app, releaseID := range targets {
+		if force || stackAppNeedsDeploy(app, releaseID, baseline, clusterChanged, appSHAs[app]) {
+			plan.ToDeploy[app] = releaseID
+			continue
+		}
+		plan.Skipped = append(plan.Skipped, app)
+	}
+	sort.Strings(plan.Skipped)
+	return plan
+}
+
+func stackAppNeedsDeploy(app string, releaseID string, baseline stackstate.Snapshot, clusterChanged bool, appFileSHA string) bool {
+	if clusterChanged {
+		return true
+	}
+	baselineRelease, hasRelease := baseline.Releases[app]
+	if !hasRelease || baselineRelease != releaseID {
+		return true
+	}
+	baselineSHA, hasSHA := baseline.AppConfigSHAs[app]
+	return !hasSHA || baselineSHA != appFileSHA
+}
+
+func stackDeployApps(plan StackDeployPlan) []string {
+	apps := make([]string, 0, len(plan.ToDeploy))
+	for app := range plan.ToDeploy {
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+	return apps
+}
+
+func stackDeploySuccessMessage(attempt stackstate.Attempt) string {
+	deployed := len(attempt.DeployedApps)
+	skipped := len(attempt.SkippedApps)
+	if attempt.Forced {
+		return fmt.Sprintf("%d apps deployed (forced)", deployed)
+	}
+	if skipped == 0 {
+		return fmt.Sprintf("%d apps deployed", deployed)
+	}
+	return fmt.Sprintf("%d apps deployed, %d unchanged", deployed, skipped)
+}
+
+func (s *Service) buildHealthySnapshot(ctx context.Context, targets map[string]string) (stackstate.Snapshot, error) {
+	cluster, ok, err := s.store.ClusterConfig(ctx)
+	if err != nil {
+		return stackstate.Snapshot{}, err
+	}
+	if !ok {
+		return stackstate.Snapshot{}, fmt.Errorf("cluster config has not been synced")
+	}
+	apps, err := s.store.ListApps(ctx)
+	if err != nil {
+		return stackstate.Snapshot{}, err
+	}
+	appSHAs := make(map[string]string, len(targets))
+	for _, app := range apps {
+		if _, ok := targets[app.Name]; !ok {
+			continue
+		}
+		appSHAs[app.Name] = app.FileSHA
+	}
+	return stackstate.Snapshot{
+		Releases:       targets,
+		ClusterFileSHA: cluster.FileSHA,
+		AppConfigSHAs:  appSHAs,
+		UpdatedAt:      s.now(),
+	}, nil
 }
 
 // stackTargets maps every app to its newest committed release.
