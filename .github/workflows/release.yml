@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+          - goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build \
+            -ldflags "-X github.com/pangobit/warpgate/pkg/version.Version=${GITHUB_REF_NAME}" \
+            -o "warpgate-linux-${{ matrix.goarch }}" \
+            ./cmd/warpgate
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: warpgate-linux-${{ matrix.goarch }}
+          path: warpgate-linux-${{ matrix.goarch }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: warpgate-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum warpgate-linux-* > checksums.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/warpgate-linux-amd64
+            dist/warpgate-linux-arm64
+            dist/checksums.txt

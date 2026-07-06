@@ -14,6 +14,8 @@ import (
 	"github.com/pangobit/warpgate/pkg/cleanup"
 	"github.com/pangobit/warpgate/pkg/config"
 	"github.com/pangobit/warpgate/pkg/deploy"
+	"github.com/pangobit/warpgate/pkg/upgrade"
+	"github.com/pangobit/warpgate/pkg/version"
 	"github.com/pangobit/warpgate/warpd"
 	"github.com/spf13/cobra"
 )
@@ -31,7 +33,7 @@ var rootCmd = &cobra.Command{
 It provides a simpler alternative to k3s + Flux for deploying containerized applications
 using Docker Compose, Traefik, Tailscale, and your own infrastructure.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if cmd.Name() == "init" || cmd.Name() == "ui" || cmd.Name() == "serve" || cmd.Name() == "preview" {
+		if cmd.Name() == "init" || cmd.Name() == "ui" || cmd.Name() == "serve" || cmd.Name() == "preview" || cmd.Name() == "upgrade" || cmd.Name() == "version" {
 			return nil
 		}
 
@@ -87,6 +89,15 @@ var (
 	shadowUser         string
 )
 
+// Upgrade flags
+var (
+	upgradeVersion     string
+	upgradeInstallPath string
+	upgradeService     string
+	upgradeNoRestart   bool
+	upgradeDryRun      bool
+)
+
 // Setup registers all commands and flags on the root command tree.
 // Called from Execute before running the CLI.
 func Setup() {
@@ -94,6 +105,8 @@ func Setup() {
 
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(serveCmd)
+	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(upgradeCmd)
 	rootCmd.AddCommand(previewCmd)
 	rootCmd.AddCommand(bootstrapCmd)
 	rootCmd.AddCommand(cleanupCmd)
@@ -108,6 +121,12 @@ func Setup() {
 	serveCmd.Flags().StringVar(&serveSSHKey, "ssh-key", "", "Path to SSH private key for node deploys")
 	serveCmd.Flags().StringVar(&serveUser, "user", "", "SSH user for node deploys")
 	previewCmd.Flags().String("scenario", warpd.PreviewScenarioMixed, "Preview fixture to show: mixed, failure, or empty")
+
+	upgradeCmd.Flags().StringVar(&upgradeVersion, "version", "latest", "Release tag to install, or latest")
+	upgradeCmd.Flags().StringVar(&upgradeInstallPath, "install-path", "", "Binary install path (default: current executable)")
+	upgradeCmd.Flags().StringVar(&upgradeService, "service", "warpgate", "Systemd service name without .service suffix")
+	upgradeCmd.Flags().BoolVar(&upgradeNoRestart, "no-restart", false, "Install the binary without restarting systemd")
+	upgradeCmd.Flags().BoolVar(&upgradeDryRun, "dry-run", false, "Show the planned upgrade without making changes")
 
 	bootstrapCmd.Flags().StringVar(&bootstrapHost, "host", "", "Target host IP or hostname (ad-hoc mode)")
 	bootstrapCmd.Flags().StringVar(&bootstrapUser, "user", "", "SSH user (defaults to current user)")
@@ -254,6 +273,45 @@ func printInitSummary(projectName string) error {
 		}
 	}
 	return nil
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print the Warpgate version",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		fmt.Printf("warpgate %s (%s)\n", version.Current(), version.Platform())
+		return nil
+	},
+}
+
+var upgradeCmd = &cobra.Command{
+	Use:   "upgrade",
+	Short: "Upgrade the Warpgate daemon binary",
+	Long: `Download a release binary from GitHub Releases, replace the installed
+warpgate binary, and restart the systemd service.
+
+Production hosts usually install the daemon to /usr/local/bin/warpgate and run
+it as warpgate.service. Use sudo when the install path or systemd unit requires
+root privileges.
+
+Set GITHUB_TOKEN or GH_TOKEN when downloading from a private repository.
+
+Examples:
+  sudo warpgate upgrade
+  sudo warpgate upgrade --version v1.2.3
+  warpgate upgrade --dry-run`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		upgrader := upgrade.Upgrader{}
+		return upgrader.Run(context.Background(), upgrade.Options{
+			Version:     upgradeVersion,
+			InstallPath: upgradeInstallPath,
+			ServiceName: upgradeService,
+			NoRestart:   upgradeNoRestart,
+			DryRun:      upgradeDryRun,
+		})
+	},
 }
 
 var serveCmd = &cobra.Command{
