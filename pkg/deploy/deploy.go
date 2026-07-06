@@ -842,9 +842,8 @@ func (d *Deployer) uploadExtraFiles(uploader fileUploader, appDir, remoteDir str
 		return fmt.Errorf("failed to read app directory: %w", err)
 	}
 
-	skip := map[string]bool{"app.yml": true, "compose.yml": true}
 	for _, entry := range entries {
-		if entry.IsDir() || skip[entry.Name()] {
+		if entry.IsDir() || !config.IsDeployExtraFile(entry.Name()) {
 			continue
 		}
 		localPath := filepath.Join(appDir, entry.Name())
@@ -994,6 +993,7 @@ type deploymentFileSnapshot struct {
 	compose     string
 	override    string
 	envFiles    map[string]string
+	extraFiles  map[string]string
 	hasCompose  bool
 	hasOverride bool
 }
@@ -1176,11 +1176,16 @@ func captureDeploymentFiles(runner commandRunner, remoteDir string) (deploymentF
 	if err != nil {
 		return deploymentFileSnapshot{}, fmt.Errorf("read previous env files: %w", err)
 	}
+	extraFiles, err := captureRemoteExtraFiles(runner, remoteDir)
+	if err != nil {
+		return deploymentFileSnapshot{}, fmt.Errorf("read previous extra files: %w", err)
+	}
 
 	return deploymentFileSnapshot{
 		compose:     composeContent,
 		override:    overrideContent,
 		envFiles:    envFiles,
+		extraFiles:  extraFiles,
 		hasCompose:  hasCompose,
 		hasOverride: hasOverride,
 	}, nil
@@ -1213,6 +1218,35 @@ func captureRemoteEnvFiles(runner commandRunner, remoteDir string) (map[string]s
 func listRemoteEnvFilesCommand(remoteDir string) string {
 	quotedDir := shellQuote(remoteDir)
 	return "for f in " + quotedDir + "/.env " + quotedDir + "/.env.*; do [ -f \"$f\" ] && basename \"$f\"; done; true"
+}
+
+func listRemoteExtraFilesCommand(remoteDir string) string {
+	quotedDir := shellQuote(remoteDir)
+	return "find " + quotedDir + " -maxdepth 1 -type f -printf '%f\\n'"
+}
+
+func captureRemoteExtraFiles(runner commandRunner, remoteDir string) (map[string]string, error) {
+	stdout, stderr, err := runner.RunCommand(listRemoteExtraFilesCommand(remoteDir))
+	if err != nil {
+		if stderr != "" {
+			return nil, fmt.Errorf("%w\n%s", err, stderr)
+		}
+		return nil, err
+	}
+	files := make(map[string]string)
+	for _, name := range strings.Fields(stdout) {
+		if !config.IsDeployExtraFile(name) {
+			continue
+		}
+		content, ok, err := readRemoteTextFile(runner, remoteDir+"/"+name)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			files[name] = content
+		}
+	}
+	return files, nil
 }
 
 func validEnvFileName(name string) bool {
@@ -1331,6 +1365,11 @@ func (d *Deployer) restorePreviousRecreateDeployment(runner deploymentRunner, re
 	}
 	if err := runner.WriteFile(remoteDir+"/docker-compose.override.yml", restorePlan.files.override); err != nil {
 		return fmt.Errorf("restore docker-compose.override.yml: %w", err)
+	}
+	for _, name := range sortedMapKeys(restorePlan.files.extraFiles) {
+		if err := runner.WriteFile(remoteDir+"/"+name, restorePlan.files.extraFiles[name]); err != nil {
+			return fmt.Errorf("restore %s: %w", name, err)
+		}
 	}
 
 	hasEnvFile := fallbackHasEnvFile

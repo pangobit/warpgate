@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pangobit/warpgate/pkg/config"
 	tursoconn "github.com/pangobit/warpgate/warpd/connectors/turso"
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
 	"github.com/pangobit/warpgate/warpd/internal/deployment"
@@ -83,6 +84,9 @@ func TestAttachRepositoryImportsRepositorySubpath(t *testing.T) {
 	}
 	if apps[0].Path != "prod/apps/api/app.yml" {
 		t.Fatalf("app path = %q, want prod/apps/api/app.yml", apps[0].Path)
+	}
+	if apps[0].ExtraFiles["vector.yaml"] != "sources: {}\n" {
+		t.Fatalf("extra files = %#v, want vector.yaml synced", apps[0].ExtraFiles)
 	}
 }
 
@@ -214,6 +218,191 @@ func TestAppDetailReturnsAllReleaseServices(t *testing.T) {
 	}
 	if detail.Services[0].Name != "api" || detail.Services[1].Name != "worker" {
 		t.Fatalf("services = %+v", detail.Services)
+	}
+}
+
+func TestListAppReleaseServicesReturnsSortedServices(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	if err := store.UpsertApp(ctx, configrepo.AppSnapshot{
+		Name:    "api",
+		RawYAML: multiServiceAppYAML("v1.0.0", "v1.1.0"),
+	}); err != nil {
+		t.Fatalf("UpsertApp() error = %v", err)
+	}
+	service := usecase.NewService(store, nil, nil, nil)
+
+	entries, err := service.ListAppReleaseServices(ctx)
+	if err != nil {
+		t.Fatalf("ListAppReleaseServices() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	if entries[0].Name != "api" {
+		t.Fatalf("name = %q, want api", entries[0].Name)
+	}
+	if len(entries[0].Services) != 2 {
+		t.Fatalf("services = %d, want 2", len(entries[0].Services))
+	}
+	if entries[0].Services[0].Name != "api" || entries[0].Services[1].Name != "worker" {
+		t.Fatalf("services = %+v", entries[0].Services)
+	}
+	if got := usecase.ReleaseServiceImageRef(entries[0].Services[0]); got != "ghcr.io/acme/api:v1.0.0" {
+		t.Fatalf("api image ref = %q, want ghcr.io/acme/api:v1.0.0", got)
+	}
+	if got := usecase.ReleaseServiceImageRef(entries[0].Services[1]); got != "ghcr.io/acme/worker:v1.1.0" {
+		t.Fatalf("worker image ref = %q, want ghcr.io/acme/worker:v1.1.0", got)
+	}
+}
+
+func TestListAppReleaseServicesContinuesAfterParseError(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	if err := store.UpsertApp(ctx, configrepo.AppSnapshot{Name: "broken", RawYAML: "not yaml"}); err != nil {
+		t.Fatalf("UpsertApp(broken) error = %v", err)
+	}
+	if err := store.UpsertApp(ctx, configrepo.AppSnapshot{Name: "api", RawYAML: appYAML("v1.0.0")}); err != nil {
+		t.Fatalf("UpsertApp(api) error = %v", err)
+	}
+	service := usecase.NewService(store, nil, nil, nil)
+
+	entries, err := service.ListAppReleaseServices(ctx)
+	if err != nil {
+		t.Fatalf("ListAppReleaseServices() error = %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	if entries[0].Name != "api" {
+		t.Fatalf("first entry = %q, want api", entries[0].Name)
+	}
+	if len(entries[0].Services) != 1 {
+		t.Fatalf("api services = %d, want 1", len(entries[0].Services))
+	}
+	if entries[1].Name != "broken" {
+		t.Fatalf("second entry = %q, want broken", entries[1].Name)
+	}
+	if entries[1].ParseError == "" {
+		t.Fatal("expected parse error for broken app")
+	}
+}
+
+func TestReleaseServiceImageRefPrefersTagOverDigest(t *testing.T) {
+	ref := usecase.ReleaseServiceImageRef(usecase.AppReleaseService{
+		Image:       "ghcr.io/acme/api",
+		ImageTag:    "v1.0.0",
+		ImageDigest: "sha256:abcdef1234567890abcdef1234567890abcdef12",
+	})
+	if ref != "ghcr.io/acme/api:v1.0.0" {
+		t.Fatalf("image ref = %q, want ghcr.io/acme/api:v1.0.0", ref)
+	}
+}
+
+func TestReleaseServiceImageRefUsesShortDigestWithoutTag(t *testing.T) {
+	ref := usecase.ReleaseServiceImageRef(usecase.AppReleaseService{
+		Image:       "ghcr.io/acme/api",
+		ImageDigest: "sha256:abcdef1234567890abcdef1234567890abcdef12",
+	})
+	if ref != "ghcr.io/acme/api@sha256:abcdef123456" {
+		t.Fatalf("image ref = %q, want ghcr.io/acme/api@sha256:abcdef123456", ref)
+	}
+}
+
+func TestResolveBaselineReleasesReturnsDeployedServices(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	manifestJSON := `{
+  "id": "rel-api-1",
+  "app": "api",
+  "image_ref": "ghcr.io/acme/api:v1.2.0",
+  "image_tag": "v1.2.0",
+  "services": {
+    "api": {
+      "image_ref": "ghcr.io/acme/api:v1.2.0",
+      "image_tag": "v1.2.0",
+      "env_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "worker": {
+      "image_ref": "ghcr.io/acme/worker:v1.1.0",
+      "image_tag": "v1.1.0",
+      "env_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}`
+	if err := store.CreateRelease(ctx, release.Record{
+		ID:           "rel-api-1",
+		App:          "api",
+		ConfigCommit: "abcdef1234567890",
+		ManifestJSON: manifestJSON,
+	}); err != nil {
+		t.Fatalf("CreateRelease() error = %v", err)
+	}
+	service := usecase.NewService(store, nil, nil, nil)
+
+	entries, err := service.ResolveBaselineReleases(ctx, map[string]string{"api": "rel-api-1"})
+	if err != nil {
+		t.Fatalf("ResolveBaselineReleases() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	if got := usecase.BaselineReleaseLabel(entries[0]); got != "commit abcdef12 · v1.2.0" {
+		t.Fatalf("label = %q, want commit abcdef12 · v1.2.0", got)
+	}
+	if len(entries[0].Services) != 2 {
+		t.Fatalf("services = %d, want 2", len(entries[0].Services))
+	}
+	if entries[0].Services[0].ImageRef != "ghcr.io/acme/api:v1.2.0" {
+		t.Fatalf("api image ref = %q", entries[0].Services[0].ImageRef)
+	}
+}
+
+func TestResolveBaselineReleasesMarksMissingRelease(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	service := usecase.NewService(store, nil, nil, nil)
+
+	entries, err := service.ResolveBaselineReleases(ctx, map[string]string{"api": "missing"})
+	if err != nil {
+		t.Fatalf("ResolveBaselineReleases() error = %v", err)
+	}
+	if len(entries) != 1 || !entries[0].ReleaseMissing {
+		t.Fatalf("entries = %+v, want missing release", entries)
+	}
+}
+
+func TestResolveBaselineReleasesContinuesAfterManifestError(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	if err := store.CreateRelease(ctx, release.Record{
+		ID: "rel-broken", App: "broken", ConfigCommit: "commit-1", ManifestJSON: "not json",
+	}); err != nil {
+		t.Fatalf("CreateRelease(broken) error = %v", err)
+	}
+	if err := store.CreateRelease(ctx, release.Record{
+		ID: "rel-api-1", App: "api", ConfigCommit: "commit-2",
+		ManifestJSON: `{"id":"rel-api-1","app":"api","image_ref":"ghcr.io/acme/api:v1.0.0","image_tag":"v1.0.0","services":{"api":{"image_ref":"ghcr.io/acme/api:v1.0.0","image_tag":"v1.0.0","env_hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}}`,
+	}); err != nil {
+		t.Fatalf("CreateRelease(api) error = %v", err)
+	}
+	service := usecase.NewService(store, nil, nil, nil)
+
+	entries, err := service.ResolveBaselineReleases(ctx, map[string]string{
+		"api":    "rel-api-1",
+		"broken": "rel-broken",
+	})
+	if err != nil {
+		t.Fatalf("ResolveBaselineReleases() error = %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	if entries[0].Name != "api" || len(entries[0].Services) != 1 {
+		t.Fatalf("api entry = %+v", entries[0])
+	}
+	if entries[1].Name != "broken" || entries[1].ManifestError == "" {
+		t.Fatalf("broken entry = %+v", entries[1])
 	}
 }
 
@@ -975,6 +1164,12 @@ func newFakeGitHub() *fakeGitHub {
 				SHA:       "prod-compose-sha",
 				CommitSHA: "commit-1",
 			},
+			"prod/apps/api/vector.yaml": {
+				Path:      "prod/apps/api/vector.yaml",
+				Content:   "sources: {}\n",
+				SHA:       "prod-vector-sha",
+				CommitSHA: "commit-1",
+			},
 		},
 	}
 }
@@ -1005,6 +1200,31 @@ func (f *fakeGitHub) ListAppConfigFiles(_ context.Context, settings configrepo.R
 		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, "/app.yml") {
 			files = append(files, file)
 		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files, nil
+}
+
+// ListAppExtraFiles returns fake flat app config files under the configured root.
+func (f *fakeGitHub) ListAppExtraFiles(_ context.Context, settings configrepo.RepositorySettings, appName string, _ string) ([]usecase.GitHubFile, error) {
+	prefix := "apps/" + appName + "/"
+	root := strings.Trim(strings.TrimSpace(settings.Path), "/")
+	if root != "" {
+		prefix = root + "/" + prefix
+	}
+	var files []usecase.GitHubFile
+	for name, file := range f.files {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		rel := strings.TrimPrefix(name, prefix)
+		if strings.Contains(rel, "/") {
+			continue
+		}
+		if !config.IsDeployExtraFile(rel) {
+			continue
+		}
+		files = append(files, file)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, nil

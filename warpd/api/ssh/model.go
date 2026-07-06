@@ -34,12 +34,14 @@ const (
 )
 
 type overview struct {
-	repo     configrepo.RepositorySettings
-	attached bool
-	cursor   configrepo.SyncCursor
-	cursors  []imagewatch.Cursor
-	stack    stackstate.State
-	apps     []configrepo.AppSnapshot
+	repo             configrepo.RepositorySettings
+	attached         bool
+	cursor           configrepo.SyncCursor
+	cursors          []imagewatch.Cursor
+	stack            stackstate.State
+	apps             []configrepo.AppSnapshot
+	appServices      []usecase.AppReleaseServices
+	baselineReleases []usecase.AppBaselineRelease
 }
 
 type overviewMsg struct {
@@ -330,40 +332,136 @@ func (m model) stackSection() string {
 func (m model) updatesSection() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Pending updates") + "\n")
-	pending := 0
+	updatePending := 0
+	invalid := 0
 	for _, cursor := range m.data.cursors {
 		switch cursor.Status {
 		case imagewatch.StatusUpdateAvailable:
-			pending++
-			b.WriteString(fmt.Sprintf("  %-20s %-12s %s → %s\n", cursor.App+"/"+cursor.Service, cursor.Tag, cursor.CandidateTag, dimStyle.Render("(commit pending)")))
+			updatePending++
 		case imagewatch.StatusInvalid:
-			pending++
+			invalid++
 			prefix := fmt.Sprintf("%-20s ", cursor.App+"/"+cursor.Service)
 			b.WriteString("  " + errStyle.Render(prefix+m.shortText(cursor.LastError, m.contentWidth()-len(prefix)-2)) + "\n")
 		}
 	}
-	if pending == 0 {
+	if updatePending == 1 {
+		b.WriteString("  " + dimStyle.Render("1 semver update pending — see Apps section") + "\n")
+	} else if updatePending > 1 {
+		b.WriteString("  " + dimStyle.Render(fmt.Sprintf("%d semver updates pending — see Apps section", updatePending)) + "\n")
+	}
+	if updatePending == 0 && invalid == 0 {
 		b.WriteString("  " + dimStyle.Render("none — stack matches the registry") + "\n")
 	}
 	b.WriteString("\n")
 	return b.String()
 }
 
+type appsSectionLookups struct {
+	servicesByApp       map[string]usecase.AppReleaseServices
+	cursorsByAppService map[string]imagewatch.Cursor
+	baselineByApp       map[string]usecase.AppBaselineRelease
+}
+
+type appServiceRow struct {
+	Name     string
+	ImageRef string
+}
+
+func (m model) appsSectionLookups() appsSectionLookups {
+	lookups := appsSectionLookups{
+		servicesByApp:       make(map[string]usecase.AppReleaseServices, len(m.data.appServices)),
+		cursorsByAppService: make(map[string]imagewatch.Cursor, len(m.data.cursors)),
+		baselineByApp:       make(map[string]usecase.AppBaselineRelease, len(m.data.baselineReleases)),
+	}
+	for _, entry := range m.data.appServices {
+		lookups.servicesByApp[entry.Name] = entry
+	}
+	for _, cursor := range m.data.cursors {
+		lookups.cursorsByAppService[cursor.App+"/"+cursor.Service] = cursor
+	}
+	for _, entry := range m.data.baselineReleases {
+		lookups.baselineByApp[entry.Name] = entry
+	}
+	return lookups
+}
+
 func (m model) appsSection() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render(fmt.Sprintf("Apps (%d)", len(m.data.apps))) + "\n")
-	stack := m.data.stack
-	for _, app := range m.data.apps {
-		release := stack.LastHealthy.Releases[app.Name]
-		if release == "" {
-			release = dimStyle.Render("not in baseline")
-		}
-		b.WriteString(fmt.Sprintf("  %-24s %s\n", app.Name, release))
-	}
 	if len(m.data.apps) == 0 {
 		b.WriteString("  " + dimStyle.Render("no apps synced") + "\n")
+		return b.String()
+	}
+	lookups := m.appsSectionLookups()
+	for _, app := range m.data.apps {
+		if m.data.stack.LastHealthy.Releases[app.Name] != "" {
+			m.writeBaselineApp(&b, app.Name, lookups.baselineByApp[app.Name], lookups)
+			continue
+		}
+		m.writeDesiredApp(&b, app.Name, lookups.servicesByApp[app.Name], lookups)
 	}
 	return b.String()
+}
+
+func (m model) formatBaselineAppLabel(baseline usecase.AppBaselineRelease) string {
+	if baseline.ReleaseMissing {
+		return errStyle.Render("release record missing")
+	}
+	if baseline.ManifestError != "" {
+		return errStyle.Render("manifest error: " + m.shortText(baseline.ManifestError, m.contentWidth()-42))
+	}
+	return usecase.BaselineReleaseLabel(baseline)
+}
+
+func (m model) writeBaselineApp(b *strings.Builder, appName string, baseline usecase.AppBaselineRelease, lookups appsSectionLookups) {
+	b.WriteString(fmt.Sprintf("  %-24s %s\n", appName, m.formatBaselineAppLabel(baseline)))
+	if baseline.ReleaseMissing || baseline.ManifestError != "" {
+		return
+	}
+	if len(baseline.Services) == 0 {
+		b.WriteString("    " + dimStyle.Render("no release services") + "\n")
+		return
+	}
+	rows := make([]appServiceRow, len(baseline.Services))
+	for i, service := range baseline.Services {
+		rows[i] = appServiceRow{Name: service.Name, ImageRef: service.ImageRef}
+	}
+	m.writeAppServiceRows(b, appName, rows, lookups)
+}
+
+func (m model) writeDesiredApp(b *strings.Builder, appName string, entry usecase.AppReleaseServices, lookups appsSectionLookups) {
+	b.WriteString(fmt.Sprintf("  %-24s %s\n", appName, dimStyle.Render("not in baseline")))
+	if entry.Name == "" {
+		b.WriteString("    " + dimStyle.Render("no release services") + "\n")
+		return
+	}
+	if entry.ParseError != "" {
+		b.WriteString("    " + errStyle.Render("config error: "+m.shortText(entry.ParseError, m.contentWidth()-18)) + "\n")
+		return
+	}
+	if len(entry.Services) == 0 {
+		b.WriteString("    " + dimStyle.Render("no release services") + "\n")
+		return
+	}
+	rows := make([]appServiceRow, len(entry.Services))
+	for i, service := range entry.Services {
+		rows[i] = appServiceRow{
+			Name:     service.Name,
+			ImageRef: usecase.ReleaseServiceImageRef(service) + " (not deployed)",
+		}
+	}
+	m.writeAppServiceRows(b, appName, rows, lookups)
+}
+
+func (m model) writeAppServiceRows(b *strings.Builder, appName string, rows []appServiceRow, lookups appsSectionLookups) {
+	for _, row := range rows {
+		imageRef := dimStyle.Render(row.ImageRef)
+		suffix := ""
+		if cursor, ok := lookups.cursorsByAppService[appName+"/"+row.Name]; ok {
+			suffix = m.formatServicePendingSuffix(cursor, row)
+		}
+		b.WriteString(fmt.Sprintf("    %-22s %s%s\n", row.Name, imageRef, suffix))
+	}
 }
 
 func (m model) auditView() string {
@@ -438,6 +536,16 @@ func (m model) overviewDetails() []string {
 	for _, cursor := range m.data.cursors {
 		if cursor.Status == imagewatch.StatusInvalid && cursor.LastError != "" {
 			details = append(details, "image watch error for "+cursor.App+"/"+cursor.Service+":\n"+cursor.LastError)
+		}
+	}
+	for _, entry := range m.data.appServices {
+		if entry.ParseError != "" {
+			details = append(details, "config error for "+entry.Name+":\n"+entry.ParseError)
+		}
+	}
+	for _, baseline := range m.data.baselineReleases {
+		if baseline.ManifestError != "" {
+			details = append(details, "manifest error for "+baseline.Name+":\n"+baseline.ManifestError)
 		}
 	}
 	return details
@@ -518,6 +626,14 @@ func (m model) loadOverview() tea.Cmd {
 		if err != nil {
 			return loadErrMsg{err: err}
 		}
+		data.appServices, err = service.ListAppReleaseServices(ctx)
+		if err != nil {
+			return loadErrMsg{err: err}
+		}
+		data.baselineReleases, err = service.ResolveBaselineReleases(ctx, data.stack.LastHealthy.Releases)
+		if err != nil {
+			return loadErrMsg{err: err}
+		}
 		return overviewMsg{data: data}
 	}
 }
@@ -554,6 +670,18 @@ func (m model) rollbackStack() tea.Cmd {
 		defer cancel()
 		attempt, err := service.RollbackStack(ctx, actor)
 		return opDoneMsg{label: "stack rollback", attempt: attempt, err: err}
+	}
+}
+
+func (m model) formatServicePendingSuffix(cursor imagewatch.Cursor, row appServiceRow) string {
+	switch cursor.Status {
+	case imagewatch.StatusUpdateAvailable:
+		return noticeStyle.Render(" → " + cursor.CandidateTag + " (commit pending)")
+	case imagewatch.StatusInvalid:
+		width := m.contentWidth() - 31 - len(row.ImageRef)
+		return errStyle.Render(" — " + m.shortText(cursor.LastError, width))
+	default:
+		return ""
 	}
 }
 

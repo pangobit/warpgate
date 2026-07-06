@@ -133,6 +133,37 @@ func TestSyncedRepoForReleaseWritesReleaseInputs(t *testing.T) {
 	}
 }
 
+func TestSyncedRepoForReleaseWritesExtraFiles(t *testing.T) {
+	repo, cleanup, err := syncedRepoForRelease(usecase.DeployReleaseInput{
+		App:          "api",
+		ReleaseID:    "rel-1",
+		ManifestJSON: `{"id":"rel-1","app":"api"}`,
+		Config: usecase.RuntimeConfigInput{
+			Cluster: usecaseClusterSnapshot("100.95.30.69"),
+			Apps: []configrepo.AppSnapshot{{
+				Name:        "api",
+				RawYAML:     "kind: warpgate/app\nrelease:\n  services:\n    api:\n      image: ghcr.io/acme/api\n",
+				ComposeYAML: "services:\n  api:\n    image: ghcr.io/acme/api\n",
+				ExtraFiles: map[string]string{
+					"vector.yaml": "sources: {}\n",
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("syncedRepoForRelease() error = %v", err)
+	}
+	defer cleanup()
+
+	got, err := os.ReadFile(filepath.Join(repo.AppDir("api"), "vector.yaml"))
+	if err != nil {
+		t.Fatalf("extra file missing: %v", err)
+	}
+	if string(got) != "sources: {}\n" {
+		t.Fatalf("extra file = %q, want vector config", string(got))
+	}
+}
+
 func TestSyncedRepoForReleaseUsesResolvedSourceCompose(t *testing.T) {
 	repo, cleanup, err := syncedRepoForRelease(usecase.DeployReleaseInput{
 		App:          "api",

@@ -33,6 +33,8 @@ type AppSnapshot struct {
 	RawYAML string
 	// ComposeYAML is the optional compose.yml content.
 	ComposeYAML string
+	// ExtraFiles maps flat filenames beside app.yml to file content synced from the infra repo.
+	ExtraFiles map[string]string
 	// UpdatedAt is when this snapshot was persisted.
 	UpdatedAt time.Time
 }

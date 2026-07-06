@@ -769,6 +769,185 @@ func (s *Service) Apps(ctx context.Context) ([]configrepo.AppSnapshot, error) {
 	return s.store.ListApps(ctx)
 }
 
+// ListAppReleaseServices returns release services parsed from each observed app.
+func (s *Service) ListAppReleaseServices(ctx context.Context) ([]AppReleaseServices, error) {
+	apps, err := s.store.ListApps(ctx)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]AppReleaseServices, 0, len(apps))
+	for _, snapshot := range apps {
+		entry := AppReleaseServices{Name: snapshot.Name}
+		parsed, err := parseApp(snapshot.Name, snapshot.RawYAML)
+		if err != nil {
+			entry.ParseError = err.Error()
+			entries = append(entries, entry)
+			continue
+		}
+		entry.Services = releaseServices(parsed)
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// AppReleaseServices is the release-service breakdown for one app.
+type AppReleaseServices struct {
+	// Name is the app name.
+	Name string
+	// Services are the release services declared by app.yml.
+	Services []AppReleaseService
+	// ParseError is set when app.yml could not be parsed or validated.
+	ParseError string
+}
+
+// ReleaseServiceImageRef formats the configured image reference for display.
+func ReleaseServiceImageRef(service AppReleaseService) string {
+	if service.ImageTag != "" {
+		return service.Image + ":" + service.ImageTag
+	}
+	if service.ImageDigest != "" {
+		return service.Image + "@" + shortDigest(service.ImageDigest)
+	}
+	return service.Image
+}
+
+func shortDigest(digest string) string {
+	if len(digest) > 19 {
+		return digest[:19]
+	}
+	if digest == "" {
+		return "-"
+	}
+	return digest
+}
+
+// ResolveBaselineReleases resolves deployed release metadata for a stack baseline.
+func (s *Service) ResolveBaselineReleases(ctx context.Context, baseline map[string]string) ([]AppBaselineRelease, error) {
+	apps := make([]string, 0, len(baseline))
+	for app := range baseline {
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+	entries := make([]AppBaselineRelease, 0, len(apps))
+	for _, app := range apps {
+		entry := AppBaselineRelease{Name: app}
+		record, ok, err := s.store.Release(ctx, baseline[app])
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			entry.ReleaseMissing = true
+			entries = append(entries, entry)
+			continue
+		}
+		entry.ConfigCommit = record.ConfigCommit
+		manifest, err := pkgrelease.ParseManifestJSON([]byte(record.ManifestJSON))
+		if err != nil {
+			entry.ManifestError = err.Error()
+			entries = append(entries, entry)
+			continue
+		}
+		entry.PrimaryImageTag = primaryImageTagFromManifest(manifest)
+		entry.Services = deployedServicesFromManifest(manifest)
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// AppBaselineRelease is deployed release metadata for one baseline app.
+type AppBaselineRelease struct {
+	// Name is the app name.
+	Name string
+	// ConfigCommit is the Git commit SHA that produced the deployed release.
+	ConfigCommit string
+	// PrimaryImageTag is the primary deployed image tag or digest label.
+	PrimaryImageTag string
+	// Services are the deployed release services from the release manifest.
+	Services []AppDeployedService
+	// ReleaseMissing is set when the baseline release record could not be loaded.
+	ReleaseMissing bool
+	// ManifestError is set when the release manifest could not be parsed.
+	ManifestError string
+}
+
+// AppDeployedService is one deployed release service from a release manifest.
+type AppDeployedService struct {
+	// Name is the release service name.
+	Name string
+	// ImageRef is the deployed image reference from the release manifest.
+	ImageRef string
+}
+
+// BaselineReleaseLabel formats the deployed release label for operator display.
+func BaselineReleaseLabel(release AppBaselineRelease) string {
+	tag := release.PrimaryImageTag
+	if tag == "" {
+		tag = "-"
+	}
+	return "commit " + shortConfigCommit(release.ConfigCommit) + " · " + tag
+}
+
+func shortConfigCommit(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	if sha == "" {
+		return "-"
+	}
+	return sha
+}
+
+func primaryImageTagFromManifest(manifest *pkgrelease.Manifest) string {
+	if manifest.ImageTag != "" {
+		return manifest.ImageTag
+	}
+	for _, name := range sortedManifestServiceNames(manifest.Services) {
+		if tag := manifest.Services[name].ImageTag; tag != "" {
+			return tag
+		}
+	}
+	for _, name := range sortedManifestServiceNames(manifest.Services) {
+		if ref := manifest.Services[name].ImageRef; ref != "" {
+			return primaryLabelFromImageRef(ref)
+		}
+	}
+	if manifest.ImageRef != "" {
+		return primaryLabelFromImageRef(manifest.ImageRef)
+	}
+	return ""
+}
+
+func deployedServicesFromManifest(manifest *pkgrelease.Manifest) []AppDeployedService {
+	names := sortedManifestServiceNames(manifest.Services)
+	services := make([]AppDeployedService, 0, len(names))
+	for _, name := range names {
+		services = append(services, AppDeployedService{
+			Name:     name,
+			ImageRef: manifest.Services[name].ImageRef,
+		})
+	}
+	return services
+}
+
+func sortedManifestServiceNames(services map[string]pkgrelease.ServiceManifest) []string {
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func primaryLabelFromImageRef(ref string) string {
+	if at := strings.LastIndex(ref, "@"); at >= 0 {
+		return shortDigest(ref[at+1:])
+	}
+	if colon := strings.LastIndex(ref, ":"); colon >= 0 {
+		return ref[colon+1:]
+	}
+	return ref
+}
+
 // RepositorySettings returns the attached repository settings.
 func (s *Service) RepositorySettings(ctx context.Context) (configrepo.RepositorySettings, bool, error) {
 	return s.store.RepositorySettings(ctx)
@@ -876,6 +1055,10 @@ func (s *Service) importRepoAtRef(ctx context.Context, settings configrepo.Repos
 		if err != nil {
 			return err
 		}
+		extraFiles, err := s.appExtraFiles(ctx, settings, appName, ref)
+		if err != nil {
+			return err
+		}
 		snapshot := configrepo.AppSnapshot{
 			Name:         appName,
 			Path:         file.Path,
@@ -883,6 +1066,7 @@ func (s *Service) importRepoAtRef(ctx context.Context, settings configrepo.Repos
 			FileSHA:      file.SHA,
 			RawYAML:      file.Content,
 			ComposeYAML:  composeContent,
+			ExtraFiles:   extraFiles,
 			UpdatedAt:    observedAt,
 		}
 		if err := s.store.UpsertApp(ctx, snapshot); err != nil {
@@ -946,6 +1130,22 @@ func (s *Service) appComposeContent(ctx context.Context, settings configrepo.Rep
 		return "", fmt.Errorf("app %s: compose.yml is required when source is not set", appName)
 	}
 	return compose.Content, nil
+}
+
+func (s *Service) appExtraFiles(ctx context.Context, settings configrepo.RepositorySettings, appName string, ref string) (map[string]string, error) {
+	files, err := s.github.ListAppExtraFiles(ctx, settings, appName, ref)
+	if err != nil {
+		return nil, fmt.Errorf("app %s: list extra files: %w", appName, err)
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+	extraFiles := make(map[string]string, len(files))
+	for _, file := range files {
+		name := path.Base(file.Path)
+		extraFiles[name] = file.Content
+	}
+	return extraFiles, nil
 }
 
 func sourceRepositorySettings(source *config.SourceConfig, ref string) (configrepo.RepositorySettings, error) {

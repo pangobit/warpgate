@@ -102,6 +102,15 @@ func Save(dir string, manifest *Manifest) error {
 	return nil
 }
 
+// ParseManifestJSON decodes a persisted release manifest.
+func ParseManifestJSON(data []byte) (*Manifest, error) {
+	var manifest Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parse release manifest: %w", err)
+	}
+	return &manifest, nil
+}
+
 // Load reads a release manifest by ID or "latest".
 func Load(dir, id string) (*Manifest, error) {
 	if id == "" {
