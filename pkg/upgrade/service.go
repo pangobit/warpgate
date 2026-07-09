@@ -17,11 +17,12 @@ func (SystemdServiceManager) State(serviceName string) (exists bool, active bool
 	}
 
 	unit := serviceName + ".service"
-	if err := runSystemctl("status", unit); err != nil {
-		if isMissingUnit(err) {
-			return false, false, nil
-		}
+	loadState, err := runSystemctlOutput("show", "-p", "LoadState", "--value", unit)
+	if err != nil {
 		return false, false, err
+	}
+	if !unitExistsFromLoadState(loadState) {
+		return false, false, nil
 	}
 
 	output, err := runSystemctlOutput("is-active", unit)
@@ -87,11 +88,9 @@ func runSystemctlOutput(args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-func isMissingUnit(err error) bool {
-	message := err.Error()
-	return strings.Contains(message, "could not be found") ||
-		strings.Contains(message, "Unit") && strings.Contains(message, "not found") ||
-		strings.Contains(message, "Load state not-found")
+func unitExistsFromLoadState(loadState string) bool {
+	loadState = strings.TrimSpace(loadState)
+	return loadState != "" && loadState != "not-found"
 }
 
 func isInactiveUnit(err error) bool {
