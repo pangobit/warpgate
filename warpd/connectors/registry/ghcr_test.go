@@ -3,9 +3,12 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/pangobit/warpgate/warpd/usecase"
 )
 
 type staticTokenProvider struct {
@@ -68,8 +71,12 @@ func TestListTagsPaginates(t *testing.T) {
 
 func TestListTagsRejectsForeignRegistry(t *testing.T) {
 	connector := NewGHCR()
-	if _, err := connector.ListTags(t.Context(), "docker.io/library/nginx"); err == nil {
+	_, err := connector.ListTags(t.Context(), "docker.io/library/nginx")
+	if err == nil {
 		t.Fatal("expected error for non-GHCR image")
+	}
+	if !errors.Is(err, usecase.ErrUnsupportedRegistry) {
+		t.Fatalf("error = %v, want ErrUnsupportedRegistry", err)
 	}
 }
 

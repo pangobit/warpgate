@@ -12,6 +12,8 @@ const (
 	StatusUpdateAvailable Status = "update-available"
 	// StatusInvalid means the image reference could not be checked.
 	StatusInvalid Status = "invalid"
+	// StatusUntracked means the image registry is not watched by Warpgate.
+	StatusUntracked Status = "untracked"
 )
 
 // Status is the image watch state shown in the UI.

@@ -590,6 +590,64 @@ func TestCheckImagesMarksSemverCursorInvalidOnRegistryError(t *testing.T) {
 	}
 }
 
+func TestCheckImagesMarksUnsupportedRegistryAsUntracked(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	github := newFakeGitHub()
+	github.files["apps/api/app.yml"] = usecase.GitHubFile{
+		Path:      "apps/api/app.yml",
+		Content:   appYAML("v1.0.0"),
+		SHA:       "app-sha",
+		CommitSHA: "commit-1",
+	}
+	service := usecase.NewService(store, github, fakeRegistry{err: usecase.ErrUnsupportedRegistry}, &fakeDeployer{})
+	if err := service.AttachRepository(ctx, adminUser(), configrepo.RepositorySettings{Owner: "acme", Repo: "infra", Branch: "main"}); err != nil {
+		t.Fatalf("AttachRepository() error = %v", err)
+	}
+	if err := service.CheckImages(ctx, adminUser()); err != nil {
+		t.Fatalf("CheckImages() error = %v", err)
+	}
+	cursors, err := store.ListImageCursors(ctx)
+	if err != nil {
+		t.Fatalf("ListImageCursors() error = %v", err)
+	}
+	if len(cursors) != 1 || cursors[0].Status != imagewatch.StatusUntracked {
+		t.Fatalf("cursors = %+v, want one untracked cursor", cursors)
+	}
+	if cursors[0].LastError != "" {
+		t.Fatalf("LastError = %q, want empty", cursors[0].LastError)
+	}
+}
+
+func TestCheckImagesMarksSemverUnsupportedRegistryAsUntracked(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	github := newFakeGitHub()
+	github.files["apps/api/app.yml"] = usecase.GitHubFile{
+		Path:      "apps/api/app.yml",
+		Content:   semverAppYAML("~1.2", "1.2.0"),
+		SHA:       "app-sha",
+		CommitSHA: "commit-1",
+	}
+	service := usecase.NewService(store, github, fakeRegistry{err: usecase.ErrUnsupportedRegistry}, &fakeDeployer{})
+	if err := service.AttachRepository(ctx, adminUser(), configrepo.RepositorySettings{Owner: "acme", Repo: "infra", Branch: "main"}); err != nil {
+		t.Fatalf("AttachRepository() error = %v", err)
+	}
+	if err := service.CheckImages(ctx, adminUser()); err != nil {
+		t.Fatalf("CheckImages() error = %v", err)
+	}
+	cursors, err := store.ListImageCursors(ctx)
+	if err != nil {
+		t.Fatalf("ListImageCursors() error = %v", err)
+	}
+	if len(cursors) != 1 || cursors[0].Status != imagewatch.StatusUntracked {
+		t.Fatalf("cursors = %+v, want one untracked cursor", cursors)
+	}
+	if cursors[0].LastError != "" {
+		t.Fatalf("LastError = %q, want empty", cursors[0].LastError)
+	}
+}
+
 func TestCommitImageBumpsCommitsPendingUpdates(t *testing.T) {
 	ctx := context.Background()
 	store := tursoconn.NewMemoryStore()
@@ -1446,10 +1504,14 @@ func (f *fakeGitHub) WriteFiles(_ context.Context, input usecase.WriteFilesInput
 type fakeRegistry struct {
 	digests map[string]string
 	tags    map[string][]string
+	err     error
 }
 
 // ResolveDigest returns a fake image digest.
 func (f fakeRegistry) ResolveDigest(_ context.Context, image string, tag string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
 	digest, ok := f.digests[image+":"+tag]
 	if !ok {
 		return "", errors.New("digest not found")
@@ -1459,6 +1521,9 @@ func (f fakeRegistry) ResolveDigest(_ context.Context, image string, tag string)
 
 // ListTags returns fake registry tags.
 func (f fakeRegistry) ListTags(_ context.Context, image string) ([]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	tags, ok := f.tags[image]
 	if !ok {
 		return nil, errors.New("tags not found")

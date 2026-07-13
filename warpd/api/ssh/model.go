@@ -860,6 +860,8 @@ func (m model) formatServicePendingSuffix(cursor imagewatch.Cursor, row appServi
 	switch cursor.Status {
 	case imagewatch.StatusUpdateAvailable:
 		return noticeStyle.Render(" → " + cursor.CandidateTag + " (commit pending)")
+	case imagewatch.StatusUntracked:
+		return dimStyle.Render(" [untracked]")
 	case imagewatch.StatusInvalid:
 		fixed := serviceRowIndent + serviceNameColumnWidth + len(serviceImageSeparator) + len(row.ImageRef) + len(invalidStatusPrefix)
 		return errStyle.Render(invalidStatusPrefix + m.shortText(cursor.LastError, m.contentWidth()-fixed))

@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/pangobit/warpgate/warpd/usecase"
 )
 
 const (
@@ -176,7 +178,7 @@ func (g *GHCR) registryToken(ctx context.Context, repo string) (string, error) {
 
 func ghcrRepository(image string) (string, error) {
 	if !strings.HasPrefix(image, "ghcr.io/") {
-		return "", fmt.Errorf("unsupported registry for %s", image)
+		return "", fmt.Errorf("%w for %s", usecase.ErrUnsupportedRegistry, image)
 	}
 	return strings.TrimPrefix(image, "ghcr.io/"), nil
 }
