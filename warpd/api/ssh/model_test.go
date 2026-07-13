@@ -146,6 +146,32 @@ func TestAppsSectionShowsInvalidCursorInline(t *testing.T) {
 	}
 }
 
+func TestUntrackedCursorShowsCalmAppsLabel(t *testing.T) {
+	data := testOverview()
+	data.cursors = []imagewatch.Cursor{{
+		App:     "api",
+		Service: "api",
+		Status:  imagewatch.StatusUntracked,
+	}}
+	m := updated(t, newTestModel(), overviewMsg{data: data})
+	content := m.View().Content
+	if !strings.Contains(content, "[untracked]") {
+		t.Fatalf("expected untracked label in apps section:\n%s", content)
+	}
+	if strings.Contains(content, "invalid image constraint") {
+		t.Fatalf("pending updates should not report untracked as invalid:\n%s", content)
+	}
+	if strings.Contains(content, "image watch error") {
+		t.Fatalf("details should not include untracked image watch error:\n%s", content)
+	}
+	if strings.Contains(m.detailContent(), "image watch error") {
+		t.Fatalf("detailContent should omit untracked cursor:\n%s", m.detailContent())
+	}
+	if !strings.Contains(content, "none — stack matches the registry") {
+		t.Fatalf("pending updates should show none when only untracked:\n%s", content)
+	}
+}
+
 func TestAppsSectionLongErrorsUseDetailsPanel(t *testing.T) {
 	data := testOverview()
 	imageWatchError := strings.Repeat("registry rejected token ", 6)

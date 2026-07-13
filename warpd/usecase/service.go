@@ -28,6 +28,9 @@ import (
 // ErrConflict indicates that the desired-state repository moved before a write.
 var ErrConflict = errors.New("repository conflict: refresh before retrying")
 
+// ErrUnsupportedRegistry indicates that the image registry is not watched.
+var ErrUnsupportedRegistry = errors.New("unsupported registry")
+
 const maxLogTail = 2000
 
 // Service coordinates Warpgate daemon workflows.
@@ -172,8 +175,7 @@ func (s *Service) checkServiceImage(ctx context.Context, appName string, service
 func (s *Service) refreshDigestCursor(ctx context.Context, cursor *imagewatch.Cursor, service config.ReleaseServiceConfig) {
 	digest, err := s.registry.ResolveDigest(ctx, service.Image, cursor.Tag)
 	if err != nil {
-		cursor.Status = imagewatch.StatusInvalid
-		cursor.LastError = err.Error()
+		s.markImageCursorError(cursor, err)
 		return
 	}
 	cursor.LastError = ""
@@ -197,8 +199,7 @@ func (s *Service) refreshSemverCursor(ctx context.Context, cursor *imagewatch.Cu
 	}
 	tags, err := s.registry.ListTags(ctx, service.Image)
 	if err != nil {
-		cursor.Status = imagewatch.StatusInvalid
-		cursor.LastError = err.Error()
+		s.markImageCursorError(cursor, err)
 		return
 	}
 	candidate, ok := semver.HighestMatch(tags, constraint)
@@ -216,6 +217,17 @@ func (s *Service) refreshSemverCursor(ctx context.Context, cursor *imagewatch.Cu
 		return
 	}
 	cursor.Status = imagewatch.StatusReady
+}
+
+// markImageCursorError records a registry check failure on the cursor.
+func (s *Service) markImageCursorError(cursor *imagewatch.Cursor, err error) {
+	if errors.Is(err, ErrUnsupportedRegistry) {
+		cursor.Status = imagewatch.StatusUntracked
+		cursor.LastError = ""
+		return
+	}
+	cursor.Status = imagewatch.StatusInvalid
+	cursor.LastError = err.Error()
 }
 
 // PreviewDeployData validates a deploy-data edit and returns the YAML and commit preview.
