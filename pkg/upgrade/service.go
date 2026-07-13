@@ -5,58 +5,143 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
+const (
+	serviceStartTimeout      = 30 * time.Second
+	serviceStartPollInterval = 200 * time.Millisecond
+)
+
+// systemctlClient runs systemctl for unit control.
+type systemctlClient interface {
+	Run(args ...string) error
+	Output(args ...string) (string, error)
+}
+
 // SystemdServiceManager controls a systemd unit during upgrade.
-type SystemdServiceManager struct{}
+type SystemdServiceManager struct {
+	ctl   systemctlClient
+	now   func() time.Time
+	sleep func(time.Duration)
+}
 
 // State reports whether a systemd unit exists and is active.
-func (SystemdServiceManager) State(serviceName string) (exists bool, active bool, err error) {
+func (m SystemdServiceManager) State(serviceName string) (exists bool, active bool, err error) {
 	if strings.TrimSpace(serviceName) == "" {
 		return false, false, nil
 	}
 
 	unit := serviceName + ".service"
-	loadState, err := runSystemctlOutput("show", "-p", "LoadState", "--value", unit)
-	if err != nil {
-		return false, false, err
-	}
-	if !unitExistsFromLoadState(loadState) {
-		return false, false, nil
+	exists, err = m.unitExists(unit)
+	if err != nil || !exists {
+		return exists, false, err
 	}
 
-	output, err := runSystemctlOutput("is-active", unit)
+	activeState, err := m.unitActiveState(unit)
 	if err != nil {
-		if isInactiveUnit(err) {
-			return true, false, nil
-		}
 		return true, false, err
 	}
-	return true, strings.TrimSpace(output) == "active", nil
+	return true, isUnitActive(activeState), nil
 }
 
 // Stop stops a systemd unit when it exists.
-func (SystemdServiceManager) Stop(serviceName string) error {
-	exists, _, err := SystemdServiceManager{}.State(serviceName)
+func (m SystemdServiceManager) Stop(serviceName string) error {
+	if strings.TrimSpace(serviceName) == "" {
+		return nil
+	}
+	unit := serviceName + ".service"
+	exists, err := m.unitExists(unit)
 	if err != nil {
 		return err
 	}
 	if !exists {
 		return nil
 	}
-	return runSystemctl("stop", serviceName+".service")
+	return m.client().Run("stop", unit)
 }
 
-// Start starts a systemd unit when it exists.
-func (SystemdServiceManager) Start(serviceName string) error {
-	exists, _, err := SystemdServiceManager{}.State(serviceName)
+// Start starts a systemd unit when it exists and waits until it is active.
+func (m SystemdServiceManager) Start(serviceName string) error {
+	if strings.TrimSpace(serviceName) == "" {
+		return nil
+	}
+	unit := serviceName + ".service"
+	exists, err := m.unitExists(unit)
 	if err != nil {
 		return err
 	}
 	if !exists {
 		return nil
 	}
-	return runSystemctl("start", serviceName+".service")
+	if err := m.client().Run("start", unit); err != nil {
+		return err
+	}
+	return m.waitUntilActive(unit, serviceStartTimeout, serviceStartPollInterval)
+}
+
+func (m SystemdServiceManager) client() systemctlClient {
+	if m.ctl != nil {
+		return m.ctl
+	}
+	return execSystemctl{}
+}
+
+func (m SystemdServiceManager) unitExists(unit string) (bool, error) {
+	loadState, err := m.client().Output("show", "-p", "LoadState", "--value", unit)
+	if err != nil {
+		return false, err
+	}
+	return unitExistsFromLoadState(loadState), nil
+}
+
+func (m SystemdServiceManager) unitActiveState(unit string) (string, error) {
+	activeState, err := m.client().Output("show", "-p", "ActiveState", "--value", unit)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(activeState), nil
+}
+
+func (m SystemdServiceManager) waitUntilActive(unit string, timeout, interval time.Duration) error {
+	now := m.now
+	if now == nil {
+		now = time.Now
+	}
+	sleep := m.sleep
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+
+	deadline := now().Add(timeout)
+	var lastState string
+	for {
+		activeState, err := m.unitActiveState(unit)
+		if err != nil {
+			return err
+		}
+		lastState = activeState
+		switch startWaitOutcome(activeState) {
+		case startWaitActive:
+			return nil
+		case startWaitFailed:
+			return fmt.Errorf("unit %s failed to start (ActiveState=%s)", unit, activeState)
+		}
+		if !now().Before(deadline) {
+			return fmt.Errorf("unit %s did not become active (ActiveState=%s)", unit, lastState)
+		}
+		sleep(interval)
+	}
+}
+
+type execSystemctl struct{}
+
+func (execSystemctl) Run(args ...string) error {
+	return runSystemctl(args...)
+}
+
+func (execSystemctl) Output(args ...string) (string, error) {
+	return runSystemctlOutput(args...)
 }
 
 func runSystemctl(args ...string) error {
@@ -93,9 +178,25 @@ func unitExistsFromLoadState(loadState string) bool {
 	return loadState != "" && loadState != "not-found"
 }
 
-func isInactiveUnit(err error) bool {
-	message := err.Error()
-	return strings.Contains(message, "inactive") ||
-		strings.Contains(message, "failed") ||
-		strings.Contains(message, "deactivating")
+func isUnitActive(activeState string) bool {
+	return strings.TrimSpace(activeState) == "active"
+}
+
+type startWaitResult int
+
+const (
+	startWaitContinue startWaitResult = iota
+	startWaitActive
+	startWaitFailed
+)
+
+func startWaitOutcome(activeState string) startWaitResult {
+	switch strings.TrimSpace(activeState) {
+	case "active":
+		return startWaitActive
+	case "failed":
+		return startWaitFailed
+	default:
+		return startWaitContinue
+	}
 }
