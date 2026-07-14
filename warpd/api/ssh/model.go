@@ -9,7 +9,6 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/pangobit/warpgate/warpd/internal/audit"
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
 	"github.com/pangobit/warpgate/warpd/internal/identity"
@@ -88,21 +87,23 @@ type model struct {
 	actor   identity.User
 	refresh func()
 
-	view            string
-	confirm         string
-	busy            bool
-	busyWhat        string
-	spinner         spinner.Model
-	data            *overview
-	audit           []audit.Event
-	notice          string
-	loadErr         error
-	width           int
-	height          int
-	compact         bool
-	scrollDashboard bool
-	panel           viewport.Model
-	bodyPanel       viewport.Model
+	view              string
+	confirm           string
+	busy              bool
+	busyWhat          string
+	spinner           spinner.Model
+	data              *overview
+	audit             []audit.Event
+	notice            string
+	loadErr           error
+	width             int
+	height            int
+	compact           bool
+	scrollDashboard   bool
+	panel             viewport.Model
+	bodyPanel         viewport.Model
+	hasDarkBackground bool
+	styles            uiStyles
 }
 
 func newModel(service *usecase.Service, actor identity.User, refresh func()) model {
@@ -111,21 +112,23 @@ func newModel(service *usecase.Service, actor identity.User, refresh func()) mod
 	bodyPanel := viewport.New(viewport.WithWidth(defaultWidth), viewport.WithHeight(defaultHeight))
 	bodyPanel.SoftWrap = true
 	return model{
-		service:   service,
-		actor:     actor,
-		refresh:   refresh,
-		view:      viewDashboard,
-		spinner:   spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		width:     defaultWidth,
-		height:    defaultHeight,
-		panel:     panel,
-		bodyPanel: bodyPanel,
+		service:           service,
+		actor:             actor,
+		refresh:           refresh,
+		view:              viewDashboard,
+		spinner:           spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		width:             defaultWidth,
+		height:            defaultHeight,
+		panel:             panel,
+		bodyPanel:         bodyPanel,
+		hasDarkBackground: true,
+		styles:            newUIStyles(true),
 	}
 }
 
 // Init loads the first overview snapshot.
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, m.loadOverview())
+	return tea.Batch(m.spinner.Tick, m.loadOverview(), func() tea.Msg { return tea.RequestBackgroundColor() })
 }
 
 // Update handles TUI messages.
@@ -133,6 +136,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+	case tea.BackgroundColorMsg:
+		m.hasDarkBackground = msg.IsDark()
+		m.styles = newUIStyles(m.hasDarkBackground)
+		m.updatePanelContent()
+		m.resizePanel()
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -296,34 +305,34 @@ func (m model) View() tea.View {
 }
 
 func (m model) header() string {
-	title := titleStyle.Render("Warpgate")
+	title := m.styles.Title.Render("Warpgate")
 	if m.data != nil && m.data.attached {
 		repo := m.data.repo.Owner + "/" + m.data.repo.Repo + "@" + m.data.repo.Branch
 		if m.data.repo.Path != "" {
 			repo += " (" + m.data.repo.Path + ")"
 		}
-		title += dimStyle.Render(" — " + repo)
+		title += m.styles.Dim.Render(" — " + repo)
 	}
 	return title + "\n\n"
 }
 
 func (m model) footer() string {
 	if m.confirm == confirmDeploy {
-		return confirmStyle.Render(m.deployConfirmPrompt()) + "\n"
+		return m.styles.Confirm.Render(m.deployConfirmPrompt()) + "\n"
 	}
 	if m.confirm == confirmRollback {
-		return confirmStyle.Render("Roll back to the last healthy baseline? [y/n]") + "\n"
+		return m.styles.Confirm.Render("Roll back to the last healthy baseline? [y/n]") + "\n"
 	}
 	if m.busy {
-		return dimStyle.Render("  operation in progress — quitting is disabled") + "\n"
+		return m.styles.Dim.Render("  operation in progress — quitting is disabled") + "\n"
 	}
 	if m.view == viewAudit {
-		return dimStyle.Render("  [j/k] scroll  [pgup/pgdn] page  [a/esc] back  [u] reload  [q] quit") + "\n"
+		return m.styles.Dim.Render("  [j/k] scroll  [pgup/pgdn] page  [a/esc] back  [u] reload  [q] quit") + "\n"
 	}
 	if m.scrollDashboard || m.hasDetailPanel() {
-		return dimStyle.Render("  [j/k] scroll details  [d] deploy stack  [r] rollback  [s] sync now  [a] audit  [u] reload  [q] quit") + "\n"
+		return m.styles.Dim.Render("  [j/k] scroll details  [d] deploy stack  [r] rollback  [s] sync now  [a] audit  [u] reload  [q] quit") + "\n"
 	}
-	return dimStyle.Render("  [d] deploy stack  [r] rollback  [s] sync now  [a] audit  [u] reload  [q] quit") + "\n"
+	return m.styles.Dim.Render("  [d] deploy stack  [r] rollback  [s] sync now  [a] audit  [u] reload  [q] quit") + "\n"
 }
 
 func (m model) dashboardView() string {
@@ -340,13 +349,13 @@ func (m model) dashboardView() string {
 
 func (m model) configSection() string {
 	if !m.data.attached {
-		return errStyle.Render("No repository attached. Set WARPGATE_REPO and restart the daemon.") + "\n\n"
+		return m.styles.Err.Render("No repository attached. Set WARPGATE_REPO and restart the daemon.") + "\n\n"
 	}
 	line := "  commit " + shortSHA(m.data.cursor.LastObservedCommit) + "  checked " + relativeTime(m.data.cursor.LastCheckedAt)
 	if m.data.cursor.LastError != "" {
-		line += "\n" + errStyle.Render(syncErrorPrefix+m.shortText(m.data.cursor.LastError, m.contentWidth()-len(syncErrorPrefix)))
+		line += "\n" + m.styles.Err.Render(syncErrorPrefix+m.shortText(m.data.cursor.LastError, m.contentWidth()-len(syncErrorPrefix)))
 	}
-	return headerStyle.Render("Config") + "\n" + line + "\n\n"
+	return m.styles.Header.Render("Config") + "\n" + line + "\n\n"
 }
 
 func (m model) stackSection() string {
@@ -363,24 +372,24 @@ func (m model) stackSection() string {
 
 func (m model) stackSummary() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("Stack") + "\n")
+	b.WriteString(m.styles.Header.Render("Stack") + "\n")
 	stack := m.data.stack
 	if len(stack.LastHealthy.Releases) == 0 {
-		b.WriteString("  baseline: " + dimStyle.Render("none — first successful stack deploy records it") + "\n")
+		b.WriteString("  baseline: " + m.styles.Dim.Render("none — first successful stack deploy records it") + "\n")
 	} else {
 		b.WriteString(fmt.Sprintf("  baseline: %d apps, advanced %s\n", len(stack.LastHealthy.Releases), relativeTime(stack.LastHealthy.UpdatedAt)))
 	}
 	if stack.LastAttempt != nil {
 		attempt := stack.LastAttempt
-		line := "  last attempt: " + styleAttemptStatus(attempt.Status) + dimStyle.Render("  by "+attempt.ActorEmail+" "+relativeTime(attempt.StartedAt))
+		line := "  last attempt: " + m.styleAttemptStatus(attempt.Status) + m.styles.Dim.Render("  by "+attempt.ActorEmail+" "+relativeTime(attempt.StartedAt))
 		b.WriteString(line + "\n")
 		if !m.compact {
 			if attempt.FailedApp != "" {
 				failedAppWidth := m.contentWidth() - len(failedAppLinePrefix) - len(failedAppLineSeparator) - len(attempt.FailedApp)
-				b.WriteString(errStyle.Render(failedAppLinePrefix+attempt.FailedApp+failedAppLineSeparator+m.shortText(attempt.Error, failedAppWidth)) + "\n")
+				b.WriteString(m.styles.Err.Render(failedAppLinePrefix+attempt.FailedApp+failedAppLineSeparator+m.shortText(attempt.Error, failedAppWidth)) + "\n")
 			}
 			if attempt.RevertError != "" {
-				b.WriteString(errStyle.Render(revertFailedPrefix+m.shortText(attempt.RevertError, m.contentWidth()-len(revertFailedPrefix))) + "\n")
+				b.WriteString(m.styles.Err.Render(revertFailedPrefix+m.shortText(attempt.RevertError, m.contentWidth()-len(revertFailedPrefix))) + "\n")
 			}
 		}
 	}
@@ -389,7 +398,7 @@ func (m model) stackSummary() string {
 
 func (m model) updatesSection() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("Pending updates") + "\n")
+	b.WriteString(m.styles.Header.Render("Pending updates") + "\n")
 	updatePending := 0
 	invalid := 0
 	for _, cursor := range m.data.cursors {
@@ -401,22 +410,22 @@ func (m model) updatesSection() string {
 			if !m.compact {
 				prefix := fmt.Sprintf("%-*s ", pendingUpdateNameWidth, cursor.App+"/"+cursor.Service)
 				linePrefix := strings.Repeat(" ", pendingUpdateLineIndent) + prefix
-				b.WriteString(errStyle.Render(linePrefix+m.shortText(cursor.LastError, m.contentWidth()-len(linePrefix))) + "\n")
+				b.WriteString(m.styles.Err.Render(linePrefix+m.shortText(cursor.LastError, m.contentWidth()-len(linePrefix))) + "\n")
 			}
 		}
 	}
 	if invalid == 1 {
-		b.WriteString("  " + dimStyle.Render("1 invalid image constraint — see Details") + "\n")
+		b.WriteString("  " + m.styles.Dim.Render("1 invalid image constraint — see Details") + "\n")
 	} else if invalid > 1 {
-		b.WriteString("  " + dimStyle.Render(fmt.Sprintf("%d invalid image constraints — see Details", invalid)) + "\n")
+		b.WriteString("  " + m.styles.Dim.Render(fmt.Sprintf("%d invalid image constraints — see Details", invalid)) + "\n")
 	}
 	if updatePending == 1 {
-		b.WriteString("  " + dimStyle.Render("1 semver update pending — see Apps section") + "\n")
+		b.WriteString("  " + m.styles.Dim.Render("1 semver update pending — see Apps section") + "\n")
 	} else if updatePending > 1 {
-		b.WriteString("  " + dimStyle.Render(fmt.Sprintf("%d semver updates pending — see Apps section", updatePending)) + "\n")
+		b.WriteString("  " + m.styles.Dim.Render(fmt.Sprintf("%d semver updates pending — see Apps section", updatePending)) + "\n")
 	}
 	if updatePending == 0 && invalid == 0 {
-		b.WriteString("  " + dimStyle.Render("none — stack matches the registry") + "\n")
+		b.WriteString("  " + m.styles.Dim.Render("none — stack matches the registry") + "\n")
 	}
 	b.WriteString("\n")
 	return b.String()
@@ -453,13 +462,13 @@ func (m model) appsSectionLookups() appsSectionLookups {
 
 func (m model) appsSection() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render(fmt.Sprintf("Apps (%d)", len(m.data.apps))) + "\n")
+	b.WriteString(m.styles.Header.Render(fmt.Sprintf("Apps (%d)", len(m.data.apps))) + "\n")
 	if len(m.data.apps) == 0 {
-		b.WriteString("  " + dimStyle.Render("no apps synced") + "\n")
+		b.WriteString("  " + m.styles.Dim.Render("no apps synced") + "\n")
 		return b.String()
 	}
 	if m.compact {
-		b.WriteString("  " + dimStyle.Render("collapsed — scroll Details for per-app output") + "\n")
+		b.WriteString("  " + m.styles.Dim.Render("collapsed — scroll Details for per-app output") + "\n")
 		return b.String() + "\n"
 	}
 	lookups := m.appsSectionLookups()
@@ -475,11 +484,11 @@ func (m model) appsSection() string {
 
 func (m model) formatBaselineAppLabel(baseline usecase.AppBaselineRelease) string {
 	if baseline.ReleaseMissing {
-		return errStyle.Render("release record missing")
+		return m.styles.Err.Render("release record missing")
 	}
 	if baseline.ManifestError != "" {
 		manifestWidth := m.contentWidth() - appRowIndent - appNameColumnWidth - len(manifestErrorPrefix)
-		return errStyle.Render(manifestErrorPrefix + m.shortText(baseline.ManifestError, manifestWidth))
+		return m.styles.Err.Render(manifestErrorPrefix + m.shortText(baseline.ManifestError, manifestWidth))
 	}
 	return usecase.BaselineReleaseLabel(baseline)
 }
@@ -490,7 +499,7 @@ func (m model) writeBaselineApp(b *strings.Builder, appName string, baseline use
 		return
 	}
 	if len(baseline.Services) == 0 {
-		b.WriteString("    " + dimStyle.Render("no release services") + "\n")
+		b.WriteString("    " + m.styles.Dim.Render("no release services") + "\n")
 		return
 	}
 	rows := make([]appServiceRow, len(baseline.Services))
@@ -501,17 +510,17 @@ func (m model) writeBaselineApp(b *strings.Builder, appName string, baseline use
 }
 
 func (m model) writeDesiredApp(b *strings.Builder, appName string, entry usecase.AppReleaseServices, lookups appsSectionLookups) {
-	b.WriteString(fmt.Sprintf("  %-*s %s\n", appNameColumnWidth, appName, dimStyle.Render("not in baseline")))
+	b.WriteString(fmt.Sprintf("  %-*s %s\n", appNameColumnWidth, appName, m.styles.Dim.Render("not in baseline")))
 	if entry.Name == "" {
-		b.WriteString("    " + dimStyle.Render("no release services") + "\n")
+		b.WriteString("    " + m.styles.Dim.Render("no release services") + "\n")
 		return
 	}
 	if entry.ParseError != "" {
-		b.WriteString(errStyle.Render(configErrorPrefix+m.shortText(entry.ParseError, m.contentWidth()-len(configErrorPrefix))) + "\n")
+		b.WriteString(m.styles.Err.Render(configErrorPrefix+m.shortText(entry.ParseError, m.contentWidth()-len(configErrorPrefix))) + "\n")
 		return
 	}
 	if len(entry.Services) == 0 {
-		b.WriteString("    " + dimStyle.Render("no release services") + "\n")
+		b.WriteString("    " + m.styles.Dim.Render("no release services") + "\n")
 		return
 	}
 	rows := make([]appServiceRow, len(entry.Services))
@@ -526,7 +535,7 @@ func (m model) writeDesiredApp(b *strings.Builder, appName string, entry usecase
 
 func (m model) writeAppServiceRows(b *strings.Builder, appName string, rows []appServiceRow, lookups appsSectionLookups) {
 	for _, row := range rows {
-		imageRef := dimStyle.Render(row.ImageRef)
+		imageRef := m.styles.Dim.Render(row.ImageRef)
 		suffix := ""
 		if cursor, ok := lookups.cursorsByAppService[appName+"/"+row.Name]; ok {
 			suffix = m.formatServicePendingSuffix(cursor, row)
@@ -537,9 +546,9 @@ func (m model) writeAppServiceRows(b *strings.Builder, appName string, rows []ap
 
 func (m model) auditView() string {
 	if len(m.audit) == 0 {
-		return headerStyle.Render("Audit log") + "\n  " + dimStyle.Render("no events") + "\n"
+		return m.styles.Header.Render("Audit log") + "\n  " + m.styles.Dim.Render("no events") + "\n"
 	}
-	return headerStyle.Render("Audit log") + "\n" + m.panel.View() + "\n"
+	return m.styles.Header.Render("Audit log") + "\n" + m.panel.View() + "\n"
 }
 
 func (m *model) resizePanel() {
@@ -616,18 +625,18 @@ func (m model) loadErrorBlock() string {
 	if m.loadErr == nil {
 		return ""
 	}
-	return errStyle.Render(loadErrorPrefix+m.shortText(m.loadErr.Error(), m.contentWidth()-len(loadErrorPrefix))) + "\n\n"
+	return m.styles.Err.Render(loadErrorPrefix+m.shortText(m.loadErr.Error(), m.contentWidth()-len(loadErrorPrefix))) + "\n\n"
 }
 
 func (m model) noticeBlock() string {
 	if m.notice == "" {
 		return ""
 	}
-	return noticeStyle.Render(m.shortText(m.notice, m.contentWidth())) + "\n\n"
+	return m.styles.Notice.Render(m.shortText(m.notice, m.contentWidth())) + "\n\n"
 }
 
 func (m model) detailPanelHeader() string {
-	return headerStyle.Render("Details") + "\n"
+	return m.styles.Header.Render("Details") + "\n"
 }
 
 func (m model) auditContent() string {
@@ -859,25 +868,25 @@ func (m model) rollbackStack() tea.Cmd {
 func (m model) formatServicePendingSuffix(cursor imagewatch.Cursor, row appServiceRow) string {
 	switch cursor.Status {
 	case imagewatch.StatusUpdateAvailable:
-		return noticeStyle.Render(" → " + cursor.CandidateTag + " (commit pending)")
+		return m.styles.Notice.Render(" → " + cursor.CandidateTag + " (commit pending)")
 	case imagewatch.StatusUntracked:
-		return dimStyle.Render(" [untracked]")
+		return m.styles.Dim.Render(" [untracked]")
 	case imagewatch.StatusInvalid:
 		fixed := serviceRowIndent + serviceNameColumnWidth + len(serviceImageSeparator) + len(row.ImageRef) + len(invalidStatusPrefix)
-		return errStyle.Render(invalidStatusPrefix + m.shortText(cursor.LastError, m.contentWidth()-fixed))
+		return m.styles.Err.Render(invalidStatusPrefix + m.shortText(cursor.LastError, m.contentWidth()-fixed))
 	default:
 		return ""
 	}
 }
 
-func styleAttemptStatus(status stackstate.Status) string {
+func (m model) styleAttemptStatus(status stackstate.Status) string {
 	switch status {
 	case stackstate.StatusSucceeded:
-		return okStyle.Render(string(status))
+		return m.styles.OK.Render(string(status))
 	case stackstate.StatusRunning:
-		return noticeStyle.Render(string(status))
+		return m.styles.Notice.Render(string(status))
 	default:
-		return errStyle.Render(string(status))
+		return m.styles.Err.Render(string(status))
 	}
 }
 
@@ -901,13 +910,3 @@ func relativeTime(at time.Time) string {
 	}
 	return elapsed.String() + " ago"
 }
-
-var (
-	titleStyle   = lipgloss.NewStyle().Bold(true)
-	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#04B575"))
-	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#606060"))
-	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4672"))
-	okStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
-	noticeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700"))
-	confirmStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD700"))
-)
