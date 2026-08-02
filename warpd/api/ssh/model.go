@@ -61,7 +61,8 @@ type overview struct {
 	deployPlan       usecase.StackDeployPlan
 	apps             []configrepo.AppSnapshot
 	appServices      []usecase.AppReleaseServices
-	baselineReleases []usecase.AppBaselineRelease
+	baselineReleases []usecase.AppReleaseMetadata
+	targetReleases   []usecase.AppReleaseMetadata
 }
 
 type overviewMsg struct {
@@ -434,7 +435,8 @@ func (m model) updatesSection() string {
 type appsSectionLookups struct {
 	servicesByApp       map[string]usecase.AppReleaseServices
 	cursorsByAppService map[string]imagewatch.Cursor
-	baselineByApp       map[string]usecase.AppBaselineRelease
+	baselineByApp       map[string]usecase.AppReleaseMetadata
+	targetByApp         map[string]usecase.AppReleaseMetadata
 }
 
 type appServiceRow struct {
@@ -446,7 +448,8 @@ func (m model) appsSectionLookups() appsSectionLookups {
 	lookups := appsSectionLookups{
 		servicesByApp:       make(map[string]usecase.AppReleaseServices, len(m.data.appServices)),
 		cursorsByAppService: make(map[string]imagewatch.Cursor, len(m.data.cursors)),
-		baselineByApp:       make(map[string]usecase.AppBaselineRelease, len(m.data.baselineReleases)),
+		baselineByApp:       make(map[string]usecase.AppReleaseMetadata, len(m.data.baselineReleases)),
+		targetByApp:         make(map[string]usecase.AppReleaseMetadata, len(m.data.targetReleases)),
 	}
 	for _, entry := range m.data.appServices {
 		lookups.servicesByApp[entry.Name] = entry
@@ -456,6 +459,9 @@ func (m model) appsSectionLookups() appsSectionLookups {
 	}
 	for _, entry := range m.data.baselineReleases {
 		lookups.baselineByApp[entry.Name] = entry
+	}
+	for _, entry := range m.data.targetReleases {
+		lookups.targetByApp[entry.Name] = entry
 	}
 	return lookups
 }
@@ -482,19 +488,20 @@ func (m model) appsSection() string {
 	return b.String()
 }
 
-func (m model) formatBaselineAppLabel(baseline usecase.AppBaselineRelease) string {
-	if baseline.ReleaseMissing {
+func (m model) formatAppReleaseLabel(release usecase.AppReleaseMetadata) string {
+	if release.ReleaseMissing {
 		return m.styles.Err.Render("release record missing")
 	}
-	if baseline.ManifestError != "" {
+	if release.ManifestError != "" {
 		manifestWidth := m.contentWidth() - appRowIndent - appNameColumnWidth - len(manifestErrorPrefix)
-		return m.styles.Err.Render(manifestErrorPrefix + m.shortText(baseline.ManifestError, manifestWidth))
+		return m.styles.Err.Render(manifestErrorPrefix + m.shortText(release.ManifestError, manifestWidth))
 	}
-	return usecase.BaselineReleaseLabel(baseline)
+	return usecase.AppReleaseLabel(release)
 }
 
-func (m model) writeBaselineApp(b *strings.Builder, appName string, baseline usecase.AppBaselineRelease, lookups appsSectionLookups) {
-	b.WriteString(fmt.Sprintf("  %-*s %s\n", appNameColumnWidth, appName, m.formatBaselineAppLabel(baseline)))
+func (m model) writeBaselineApp(b *strings.Builder, appName string, baseline usecase.AppReleaseMetadata, lookups appsSectionLookups) {
+	label := m.formatAppReleaseLabel(baseline) + m.formatPendingTargetLabel(appName, lookups)
+	b.WriteString(fmt.Sprintf("  %-*s %s\n", appNameColumnWidth, appName, label))
 	if baseline.ReleaseMissing || baseline.ManifestError != "" {
 		return
 	}
@@ -510,7 +517,8 @@ func (m model) writeBaselineApp(b *strings.Builder, appName string, baseline use
 }
 
 func (m model) writeDesiredApp(b *strings.Builder, appName string, entry usecase.AppReleaseServices, lookups appsSectionLookups) {
-	b.WriteString(fmt.Sprintf("  %-*s %s\n", appNameColumnWidth, appName, m.styles.Dim.Render("not in baseline")))
+	label := m.styles.Dim.Render("not in baseline") + m.formatPendingTargetLabel(appName, lookups)
+	b.WriteString(fmt.Sprintf("  %-*s %s\n", appNameColumnWidth, appName, label))
 	if entry.Name == "" {
 		b.WriteString("    " + m.styles.Dim.Render("no release services") + "\n")
 		return
@@ -531,6 +539,14 @@ func (m model) writeDesiredApp(b *strings.Builder, appName string, entry usecase
 		}
 	}
 	m.writeAppServiceRows(b, appName, rows, lookups)
+}
+
+func (m model) formatPendingTargetLabel(appName string, lookups appsSectionLookups) string {
+	target, ok := lookups.targetByApp[appName]
+	if !ok {
+		return ""
+	}
+	return m.styles.Notice.Render(" → " + m.formatAppReleaseLabel(target) + " (deploy pending)")
 }
 
 func (m model) writeAppServiceRows(b *strings.Builder, appName string, rows []appServiceRow, lookups appsSectionLookups) {
@@ -788,6 +804,10 @@ func (m model) loadOverview() tea.Cmd {
 			return loadErrMsg{err: err}
 		}
 		data.deployPlan, err = service.StackDeployPlan(ctx, false)
+		if err != nil {
+			return loadErrMsg{err: err}
+		}
+		data.targetReleases, err = service.ResolveAppReleases(ctx, data.deployPlan.ToDeploy)
 		if err != nil {
 			return loadErrMsg{err: err}
 		}
