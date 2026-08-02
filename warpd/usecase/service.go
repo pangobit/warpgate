@@ -973,15 +973,20 @@ func shortDigest(digest string) string {
 
 // ResolveBaselineReleases resolves deployed release metadata for a stack baseline.
 func (s *Service) ResolveBaselineReleases(ctx context.Context, baseline map[string]string) ([]AppBaselineRelease, error) {
-	apps := make([]string, 0, len(baseline))
-	for app := range baseline {
+	return s.ResolveAppReleases(ctx, baseline)
+}
+
+// ResolveAppReleases resolves release metadata for app release IDs.
+func (s *Service) ResolveAppReleases(ctx context.Context, releases map[string]string) ([]AppReleaseMetadata, error) {
+	apps := make([]string, 0, len(releases))
+	for app := range releases {
 		apps = append(apps, app)
 	}
 	sort.Strings(apps)
-	entries := make([]AppBaselineRelease, 0, len(apps))
+	entries := make([]AppReleaseMetadata, 0, len(apps))
 	for _, app := range apps {
-		entry := AppBaselineRelease{Name: app}
-		record, ok, err := s.store.Release(ctx, baseline[app])
+		entry := AppReleaseMetadata{Name: app}
+		record, ok, err := s.store.Release(ctx, releases[app])
 		if err != nil {
 			return nil, err
 		}
@@ -1004,8 +1009,8 @@ func (s *Service) ResolveBaselineReleases(ctx context.Context, baseline map[stri
 	return entries, nil
 }
 
-// AppBaselineRelease is deployed release metadata for one baseline app.
-type AppBaselineRelease struct {
+// AppReleaseMetadata describes one app release for operator display.
+type AppReleaseMetadata struct {
 	// Name is the app name.
 	Name string
 	// ConfigCommit is the Git commit SHA that produced the deployed release.
@@ -1020,6 +1025,9 @@ type AppBaselineRelease struct {
 	ManifestError string
 }
 
+// AppBaselineRelease is the release metadata type used for stack baselines.
+type AppBaselineRelease = AppReleaseMetadata
+
 // AppDeployedService is one deployed release service from a release manifest.
 type AppDeployedService struct {
 	// Name is the release service name.
@@ -1030,6 +1038,11 @@ type AppDeployedService struct {
 
 // BaselineReleaseLabel formats the deployed release label for operator display.
 func BaselineReleaseLabel(release AppBaselineRelease) string {
+	return AppReleaseLabel(release)
+}
+
+// AppReleaseLabel formats release metadata for operator display.
+func AppReleaseLabel(release AppReleaseMetadata) string {
 	tag := release.PrimaryImageTag
 	if tag == "" {
 		tag = "-"

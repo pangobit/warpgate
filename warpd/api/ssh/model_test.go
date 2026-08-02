@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/pangobit/warpgate/warpd/internal/configrepo"
 	"github.com/pangobit/warpgate/warpd/internal/identity"
 	"github.com/pangobit/warpgate/warpd/internal/imagewatch"
+	"github.com/pangobit/warpgate/warpd/internal/release"
 	"github.com/pangobit/warpgate/warpd/internal/stackstate"
 	"github.com/pangobit/warpgate/warpd/usecase"
 )
@@ -72,6 +74,11 @@ func testOverview() overview {
 			Targets:  map[string]string{"api": "rel-api-2"},
 			ToDeploy: map[string]string{"api": "rel-api-2"},
 		},
+		targetReleases: []usecase.AppBaselineRelease{{
+			Name:            "api",
+			ConfigCommit:    "fedcba9876543210",
+			PrimaryImageTag: "v1.2.5",
+		}},
 	}
 }
 
@@ -117,6 +124,102 @@ func TestDashboardRendersOverviewSections(t *testing.T) {
 		}
 	}
 }
+
+func TestAppsSectionShowsPendingTargetRelease(t *testing.T) {
+	m := updated(t, newTestModel(), overviewMsg{data: testOverview()})
+	content := m.View().Content
+	if !strings.Contains(content, "commit fedcba98 · v1.2.5 (deploy pending)") {
+		t.Fatalf("expected pending target release in apps section:\n%s", content)
+	}
+}
+
+func TestAppsSectionShowsPendingTargetReleaseWithoutBaseline(t *testing.T) {
+	data := testOverview()
+	data.stack.LastHealthy.Releases = nil
+	m := updated(t, newTestModel(), overviewMsg{data: data})
+	content := m.View().Content
+	for _, want := range []string{"not in baseline", "commit fedcba98 · v1.2.5 (deploy pending)"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("view missing %q for first deploy:\n%s", want, content)
+		}
+	}
+}
+
+func TestLoadOverviewResolvesOnlyPendingTargetReleases(t *testing.T) {
+	ctx := context.Background()
+	store := tursoconn.NewMemoryStore()
+	if err := store.SaveClusterConfig(ctx, configrepo.ClusterSnapshot{FileSHA: "cluster-sha", RawYAML: testClusterYAML}); err != nil {
+		t.Fatalf("SaveClusterConfig() error = %v", err)
+	}
+	for _, app := range []string{"api", "web"} {
+		if err := store.UpsertApp(ctx, configrepo.AppSnapshot{Name: app, FileSHA: app + "-sha", RawYAML: testAppYAML(app)}); err != nil {
+			t.Fatalf("UpsertApp(%s) error = %v", app, err)
+		}
+	}
+	for _, record := range []release.Record{
+		testRelease("rel-api-1", "api", "old-api-commit", "v1.0.0"),
+		testRelease("rel-api-2", "api", "pending-api-commit", "v1.1.0"),
+		testRelease("rel-web-1", "web", "current-web-commit", "v2.0.0"),
+	} {
+		if err := store.CreateRelease(ctx, record); err != nil {
+			t.Fatalf("CreateRelease(%s) error = %v", record.ID, err)
+		}
+	}
+	if err := store.SaveStackState(ctx, stackstate.State{LastHealthy: stackstate.Snapshot{
+		Releases:       map[string]string{"api": "rel-api-1", "web": "rel-web-1"},
+		ClusterFileSHA: "cluster-sha",
+		AppConfigSHAs:  map[string]string{"api": "api-sha", "web": "web-sha"},
+	}}); err != nil {
+		t.Fatalf("SaveStackState() error = %v", err)
+	}
+
+	service := usecase.NewService(store, nil, nil, nil)
+	msg := newModel(service, testOperator(), func() {}).loadOverview()()
+	overviewResult, ok := msg.(overviewMsg)
+	if !ok {
+		t.Fatalf("loadOverview() message = %T, want overviewMsg", msg)
+	}
+	if len(overviewResult.data.targetReleases) != 1 || overviewResult.data.targetReleases[0].Name != "api" {
+		t.Fatalf("target releases = %#v, want only api", overviewResult.data.targetReleases)
+	}
+	m := updated(t, newTestModel(), overviewResult)
+	content := m.View().Content
+	if !strings.Contains(content, "pending- · v1.1.0 (deploy pending)") {
+		t.Fatalf("expected resolved pending api release:\n%s", content)
+	}
+	if strings.Contains(content, "current- · v2.0.0 (deploy pending)") {
+		t.Fatalf("unchanged web release must not appear pending:\n%s", content)
+	}
+}
+
+func testRelease(id string, app string, commit string, tag string) release.Record {
+	return release.Record{
+		ID:           id,
+		App:          app,
+		ConfigCommit: commit,
+		ManifestJSON: fmt.Sprintf(`{"id":%q,"app":%q,"image_tag":%q,"services":{%q:{"image_ref":%q,"image_tag":%q}}}`, id, app, tag, app, "ghcr.io/acme/"+app+":"+tag, tag),
+	}
+}
+
+func testAppYAML(app string) string {
+	return "kind: warpgate/app\ntargets: [node-1]\nrelease:\n  services:\n    " + app + ":\n      image: ghcr.io/acme/" + app + "\n      image_tag: v1.0.0\n"
+}
+
+const testClusterYAML = `version: "2"
+project: acme
+nodes:
+  - id: node-1
+    host: 10.0.0.1
+networking:
+  private_network: example.ts.net
+  dns:
+    provider: cloudflare
+    zone: example.com
+  traefik:
+    entry_points: [web]
+registry:
+  server: ghcr.io
+`
 
 func TestAppsSectionShowsMissingBaselineRelease(t *testing.T) {
 	data := testOverview()
