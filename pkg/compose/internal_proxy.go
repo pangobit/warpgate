@@ -18,6 +18,8 @@ var reservedInternalProxyPorts = map[int]bool{
 type InternalProxyConfig struct {
 	// PrivateIP is the node's private network IP to bind entrypoints to.
 	PrivateIP string
+	// ProxyNetwork is the optional Docker network shared with trusted public services.
+	ProxyNetwork string
 	// Entrypoints maps entrypoint names to port numbers.
 	Entrypoints map[string]int
 }
@@ -58,7 +60,6 @@ func GenerateInternalProxyCompose(cfg *InternalProxyConfig) (string, error) {
 		"--providers.file.watch=true",
 	}
 
-	// Sort entrypoint names for deterministic output
 	var epNames []string
 	for name := range cfg.Entrypoints {
 		epNames = append(epNames, name)
@@ -87,6 +88,15 @@ func GenerateInternalProxyCompose(cfg *InternalProxyConfig) (string, error) {
 		Networks map[string]Network      `yaml:"networks"`
 	}
 
+	networks := map[string]Network{
+		"warpgate": {External: true},
+	}
+	proxyNetworks := []string{"warpgate"}
+	if cfg.ProxyNetwork != "" {
+		networks[cfg.ProxyNetwork] = Network{External: true}
+		proxyNetworks = append(proxyNetworks, cfg.ProxyNetwork)
+	}
+
 	compose := proxyCompose{
 		Services: map[string]proxyService{
 			"traefik": {
@@ -98,15 +108,13 @@ func GenerateInternalProxyCompose(cfg *InternalProxyConfig) (string, error) {
 					"/var/run/docker.sock:/var/run/docker.sock:ro",
 					"/opt/warpgate/traefik/dynamic:/etc/traefik/dynamic:ro",
 				},
-				Networks: []string{"warpgate"},
+				Networks: proxyNetworks,
 				Environment: []string{
 					"DOCKER_API_VERSION=1.45",
 				},
 			},
 		},
-		Networks: map[string]Network{
-			"warpgate": {External: true},
-		},
+		Networks: networks,
 	}
 
 	yamlBytes, err := yaml.Marshal(compose)

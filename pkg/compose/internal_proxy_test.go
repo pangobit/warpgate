@@ -273,3 +273,23 @@ func TestGenerateInternalProxyComposeMultipleEntrypoints(t *testing.T) {
 		t.Error("expected admin entrypoint definition")
 	}
 }
+
+func TestGenerateInternalProxyComposeWithProxyNetwork(t *testing.T) {
+	cfg := &InternalProxyConfig{
+		PrivateIP:    "100.95.115.81",
+		ProxyNetwork: "warpgate-proxy",
+		Entrypoints:  map[string]int{"internal": 8080},
+	}
+
+	output, err := GenerateInternalProxyCompose(cfg)
+	if err != nil {
+		t.Fatalf("GenerateInternalProxyCompose() error: %v", err)
+	}
+
+	if !strings.Contains(output, "- warpgate-proxy") {
+		t.Error("expected internal Traefik to join proxy network")
+	}
+	if !strings.Contains(output, "warpgate-proxy:\n        external: true") {
+		t.Error("expected proxy network declaration")
+	}
+}

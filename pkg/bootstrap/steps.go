@@ -107,7 +107,7 @@ func BuildSteps(client *ssh.Client, cfg *StepConfig) []tui.StepDef {
 		{
 			Name: "Setting up Internal Proxy",
 			Run: func() (string, error) {
-				return setupInternalProxy(client, cfg.PrivateIP)
+				return setupInternalProxy(client, cfg.PrivateIP, cfg.Networking)
 			},
 		},
 		{

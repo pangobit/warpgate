@@ -279,6 +279,15 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 		Volumes  map[string]struct{}       `yaml:"volumes"`
 	}
 
+	networks := map[string]Network{
+		"warpgate": {External: true},
+	}
+	traefikNetworks := []string{"warpgate"}
+	if networking.Traefik.ProxyNetwork.Name != "" {
+		networks[networking.Traefik.ProxyNetwork.Name] = Network{External: true}
+		traefikNetworks = append(traefikNetworks, networking.Traefik.ProxyNetwork.Name)
+	}
+
 	compose := traefikCompose{
 		Services: map[string]traefikService{
 			"traefik": {
@@ -290,15 +299,13 @@ func GenerateTraefikCompose(networking *config.NetworkingConfig) (string, error)
 					"/var/run/docker.sock:/var/run/docker.sock:ro",
 					"traefik-acme:/letsencrypt",
 				},
-				Networks: []string{"warpgate"},
+				Networks: traefikNetworks,
 				Environment: []string{
 					"DOCKER_API_VERSION=1.45",
 				},
 			},
 		},
-		Networks: map[string]Network{
-			"warpgate": {External: true},
-		},
+		Networks: networks,
 		Volumes: map[string]struct{}{
 			"traefik-acme": {},
 		},

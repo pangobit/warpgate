@@ -435,6 +435,19 @@ func setupWarpgate(client *ssh.Client, networking *config.NetworkingConfig) (str
 	}
 
 	run(client, "docker network create warpgate 2>/dev/null || true")
+	if networking != nil && networking.Traefik.ProxyNetwork.Name != "" {
+		proxyNetwork := networking.Traefik.ProxyNetwork
+		if err := run(client, "docker network inspect '"+shellSingleQuote(proxyNetwork.Name)+"' >/dev/null 2>&1 || docker network create --subnet '"+shellSingleQuote(proxyNetwork.Subnet)+"' '"+shellSingleQuote(proxyNetwork.Name)+"'"); err != nil {
+			return "", fmt.Errorf("create Traefik proxy network: %w", err)
+		}
+		actualSubnet, _, err := client.RunCommand("docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' '" + shellSingleQuote(proxyNetwork.Name) + "'")
+		if err != nil {
+			return "", fmt.Errorf("inspect Traefik proxy network: %w", err)
+		}
+		if strings.TrimSpace(actualSubnet) != proxyNetwork.Subnet {
+			return "", fmt.Errorf("Traefik proxy network %s has subnet %s, want %s", proxyNetwork.Name, strings.TrimSpace(actualSubnet), proxyNetwork.Subnet)
+		}
+	}
 
 	if networking != nil && len(networking.Traefik.EntryPoints) > 0 {
 		traefikYAML, err := compose.GenerateTraefikCompose(networking)
@@ -490,7 +503,7 @@ func setupTraefikACMECredentials(client *ssh.Client, networking *config.Networki
 	return "stored in SecretSauce and root-only env file", nil
 }
 
-func setupInternalProxy(client *ssh.Client, privateIP string) (string, error) {
+func setupInternalProxy(client *ssh.Client, privateIP string, networking *config.NetworkingConfig) (string, error) {
 	if privateIP == "" {
 		return "skipped (no private IP)", nil
 	}
@@ -502,6 +515,9 @@ func setupInternalProxy(client *ssh.Client, privateIP string) (string, error) {
 	cfg := &compose.InternalProxyConfig{
 		PrivateIP:   privateIP,
 		Entrypoints: map[string]int{"internal": 8080},
+	}
+	if networking != nil {
+		cfg.ProxyNetwork = networking.Traefik.ProxyNetwork.Name
 	}
 
 	proxyYAML, err := compose.GenerateInternalProxyCompose(cfg)

@@ -70,8 +70,18 @@ type DNSConfig struct {
 type TraefikConfig struct {
 	// EntryPoints is the list of Traefik entrypoints (e.g. web, websecure).
 	EntryPoints []string `yaml:"entry_points"`
+	// ProxyNetwork identifies the Docker network Traefik uses for trusted application traffic.
+	ProxyNetwork ProxyNetworkConfig `yaml:"proxy_network,omitempty"`
 	// ACME holds automatic HTTPS certificate settings.
 	ACME ACMEConfig `yaml:"acme,omitempty"`
+}
+
+// ProxyNetworkConfig declares the Docker network used between Traefik and trusted applications.
+type ProxyNetworkConfig struct {
+	// Name is the Docker network name.
+	Name string `yaml:"name,omitempty"`
+	// Subnet is the CIDR assigned to the Docker network.
+	Subnet string `yaml:"subnet,omitempty"`
 }
 
 // ACMEConfig holds Let's Encrypt / ZeroSSL certificate settings.
@@ -374,6 +384,24 @@ func (c *ClusterConfig) Validate() error {
 				return fmt.Errorf("node %s: private_ip must be an IP address: %s", node.ID, node.PrivateIP)
 			}
 		}
+	}
+
+	proxyNetwork := c.Networking.Traefik.ProxyNetwork
+	if proxyNetwork.Name == "" && proxyNetwork.Subnet == "" {
+		return nil
+	}
+	if proxyNetwork.Name == "" || proxyNetwork.Subnet == "" {
+		return fmt.Errorf("traefik proxy_network requires name and subnet")
+	}
+	if !validAppName.MatchString(proxyNetwork.Name) {
+		return fmt.Errorf("traefik proxy_network name must be Docker-compatible: %s", proxyNetwork.Name)
+	}
+	prefix, err := netip.ParsePrefix(proxyNetwork.Subnet)
+	if err != nil {
+		return fmt.Errorf("traefik proxy_network subnet must be a CIDR: %w", err)
+	}
+	if !prefix.Addr().Is4() || prefix != prefix.Masked() {
+		return fmt.Errorf("traefik proxy_network subnet must be a canonical IPv4 CIDR")
 	}
 
 	return nil

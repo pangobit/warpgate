@@ -189,6 +189,51 @@ func TestClusterValidate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "proxy network requires both fields",
+			config: ClusterConfig{
+				Project:    "test",
+				Nodes:      []NodeConfig{{ID: "n", Host: "h"}},
+				Networking: NetworkingConfig{Traefik: TraefikConfig{ProxyNetwork: ProxyNetworkConfig{Name: "warpgate-proxy"}}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "proxy network requires valid CIDR",
+			config: ClusterConfig{
+				Project:    "test",
+				Nodes:      []NodeConfig{{ID: "n", Host: "h"}},
+				Networking: NetworkingConfig{Traefik: TraefikConfig{ProxyNetwork: ProxyNetworkConfig{Name: "warpgate-proxy", Subnet: "not-a-cidr"}}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid proxy network",
+			config: ClusterConfig{
+				Project:    "test",
+				Nodes:      []NodeConfig{{ID: "n", Host: "h"}},
+				Networking: NetworkingConfig{Traefik: TraefikConfig{ProxyNetwork: ProxyNetworkConfig{Name: "warpgate-proxy", Subnet: "172.31.255.0/29"}}},
+			},
+			wantErr: false,
+		},
+		{
+			name: "proxy network rejects IPv6 subnet",
+			config: ClusterConfig{
+				Project:    "test",
+				Nodes:      []NodeConfig{{ID: "n", Host: "h"}},
+				Networking: NetworkingConfig{Traefik: TraefikConfig{ProxyNetwork: ProxyNetworkConfig{Name: "warpgate-proxy", Subnet: "fd00::/64"}}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "proxy network rejects unmasked subnet",
+			config: ClusterConfig{
+				Project:    "test",
+				Nodes:      []NodeConfig{{ID: "n", Host: "h"}},
+				Networking: NetworkingConfig{Traefik: TraefikConfig{ProxyNetwork: ProxyNetworkConfig{Name: "warpgate-proxy", Subnet: "172.31.255.1/29"}}},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

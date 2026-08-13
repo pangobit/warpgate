@@ -300,6 +300,30 @@ func TestGenerateTraefikCompose(t *testing.T) {
 	}
 }
 
+func TestGenerateTraefikComposeWithProxyNetwork(t *testing.T) {
+	networking := &config.NetworkingConfig{
+		Traefik: config.TraefikConfig{
+			EntryPoints: []string{"websecure"},
+			ProxyNetwork: config.ProxyNetworkConfig{
+				Name:   "warpgate-proxy",
+				Subnet: "172.31.255.0/29",
+			},
+		},
+	}
+
+	output, err := GenerateTraefikCompose(networking)
+	if err != nil {
+		t.Fatalf("GenerateTraefikCompose() error: %v", err)
+	}
+
+	if !strings.Contains(output, "- warpgate-proxy") {
+		t.Error("expected Traefik to join proxy network")
+	}
+	if !strings.Contains(output, "warpgate-proxy:\n        external: true") {
+		t.Error("expected proxy network declaration")
+	}
+}
+
 func TestGenerateTraefikComposeDNSChallenge(t *testing.T) {
 	networking := &config.NetworkingConfig{
 		DNS: config.DNSConfig{

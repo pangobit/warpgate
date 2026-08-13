@@ -246,6 +246,10 @@ func (d *Deployer) deployToNode(app *config.AppConfig, manifest *release.Manifes
 	}
 	defer client.Close()
 
+	if err := d.reconcileTraefikProxyNetwork(client, node); err != nil {
+		return fmt.Errorf("configure Traefik proxy network: %w", err)
+	}
+
 	remoteDir := remoteAppsDir + "/" + app.Name
 
 	if _, _, err := client.RunCommand("mkdir -p " + remoteDir); err != nil {
@@ -298,6 +302,56 @@ func (d *Deployer) deployToNode(app *config.AppConfig, manifest *release.Manifes
 		d.log.Infof("Node %s: %s release %s deployed", node.ID, app.Name, manifest.ID)
 	} else {
 		d.log.Infof("Node %s: %s slot active, %s release %s deployed", node.ID, result.ActiveSlot, app.Name, manifest.ID)
+	}
+	return nil
+}
+
+func (d *Deployer) reconcileTraefikProxyNetwork(client *ssh.Client, node *config.NodeConfig) error {
+	proxyNetwork := d.Repo.Cluster.Networking.Traefik.ProxyNetwork
+	if proxyNetwork.Name == "" {
+		return nil
+	}
+	command := "docker network inspect " + shellQuote(proxyNetwork.Name) + " >/dev/null 2>&1 || docker network create --subnet " + shellQuote(proxyNetwork.Subnet) + " " + shellQuote(proxyNetwork.Name)
+	if _, _, err := client.RunCommand(command); err != nil {
+		return fmt.Errorf("create network: %w", err)
+	}
+	actualSubnet, _, err := client.RunCommand("docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' " + shellQuote(proxyNetwork.Name))
+	if err != nil {
+		return fmt.Errorf("inspect network: %w", err)
+	}
+	if strings.TrimSpace(actualSubnet) != proxyNetwork.Subnet {
+		return fmt.Errorf("network %s has subnet %s, want %s", proxyNetwork.Name, strings.TrimSpace(actualSubnet), proxyNetwork.Subnet)
+	}
+
+	traefikCompose, err := compose.GenerateTraefikCompose(&d.Repo.Cluster.Networking)
+	if err != nil {
+		return fmt.Errorf("generate Traefik compose: %w", err)
+	}
+	if err := client.WriteFile("/opt/warpgate/traefik/compose.yml", traefikCompose); err != nil {
+		return fmt.Errorf("write Traefik compose: %w", err)
+	}
+	if _, _, err := client.RunCommand("cd /opt/warpgate/traefik && docker compose up -d"); err != nil {
+		return fmt.Errorf("start Traefik: %w", err)
+	}
+	if node.PrivateIP == "" {
+		return nil
+	}
+	proxyYAML, err := compose.GenerateInternalProxyCompose(&compose.InternalProxyConfig{
+		PrivateIP:    node.PrivateIP,
+		ProxyNetwork: proxyNetwork.Name,
+		Entrypoints:  compose.CollectInternalEntrypoints(d.Repo.GetAppsForNode(node.ID)),
+	})
+	if err != nil {
+		return fmt.Errorf("generate internal Traefik compose: %w", err)
+	}
+	if _, _, err := client.RunCommand("mkdir -p /opt/warpgate/internal-proxy"); err != nil {
+		return fmt.Errorf("create internal Traefik directory: %w", err)
+	}
+	if err := client.WriteFile("/opt/warpgate/internal-proxy/compose.yml", proxyYAML); err != nil {
+		return fmt.Errorf("write internal Traefik compose: %w", err)
+	}
+	if _, _, err := client.RunCommand("cd /opt/warpgate/internal-proxy && docker compose -p warpgate-internal-proxy up -d"); err != nil {
+		return fmt.Errorf("start internal Traefik: %w", err)
 	}
 	return nil
 }
@@ -772,8 +826,9 @@ func (d *Deployer) updateInternalProxy(app *config.AppConfig) error {
 		entrypoints := compose.CollectInternalEntrypoints(apps)
 
 		proxyCfg := &compose.InternalProxyConfig{
-			PrivateIP:   node.PrivateIP,
-			Entrypoints: entrypoints,
+			PrivateIP:    node.PrivateIP,
+			ProxyNetwork: d.Repo.Cluster.Networking.Traefik.ProxyNetwork.Name,
+			Entrypoints:  entrypoints,
 		}
 
 		proxyYAML, err := compose.GenerateInternalProxyCompose(proxyCfg)
