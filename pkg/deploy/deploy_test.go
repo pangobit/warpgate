@@ -960,6 +960,118 @@ func TestLoginRegistry(t *testing.T) {
 	}
 }
 
+func TestReconcileTraefikProxyNetwork(t *testing.T) {
+	node := &config.NodeConfig{ID: "node-0", Host: "node-0", PrivateIP: "100.95.30.69"}
+	proxyNetwork := config.ProxyNetworkConfig{Name: "warpgate-proxy", Subnet: "172.31.255.0/29"}
+	d := NewDeployer(&config.RepoConfig{
+		Cluster: &config.ClusterConfig{
+			Project: "test",
+			Nodes:   []config.NodeConfig{*node},
+			Networking: config.NetworkingConfig{
+				Traefik: config.TraefikConfig{ProxyNetwork: proxyNetwork},
+			},
+		},
+	}, "")
+
+	createNetwork := "docker network inspect 'warpgate-proxy' >/dev/null 2>&1 || docker network create --subnet '172.31.255.0/29' 'warpgate-proxy'"
+	inspectNetwork := "docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 'warpgate-proxy'"
+	startPublicTraefik := "cd /opt/warpgate/traefik && docker compose up -d"
+	startInternalTraefik := "cd /opt/warpgate/internal-proxy && docker compose -p warpgate-internal-proxy up -d"
+
+	tests := []struct {
+		name         string
+		commandErrs  map[string]error
+		wantErr      string
+		wantCommands []string
+		wantWrites   int
+	}{
+		{
+			name: "stops before proxy updates when network creation fails",
+			commandErrs: map[string]error{
+				createNetwork: errors.New("network create failed"),
+			},
+			wantErr: "create network: network create failed",
+			wantCommands: []string{
+				createNetwork,
+			},
+			wantWrites: 0,
+		},
+		{
+			name:         "stops before proxy updates when network subnet differs",
+			commandErrs:  map[string]error{},
+			wantErr:      "network warpgate-proxy has subnet 172.31.254.0/29, want 172.31.255.0/29",
+			wantCommands: []string{createNetwork, inspectNetwork},
+			wantWrites:   0,
+		},
+		{
+			name:        "reconciles both proxies before application deployment",
+			commandErrs: map[string]error{},
+			wantCommands: []string{
+				createNetwork,
+				inspectNetwork,
+				startPublicTraefik,
+				"mkdir -p /opt/warpgate/internal-proxy",
+				startInternalTraefik,
+			},
+			wantWrites: 2,
+		},
+		{
+			name: "stops before internal proxy when public proxy fails",
+			commandErrs: map[string]error{
+				startPublicTraefik: errors.New("public proxy failed"),
+			},
+			wantErr: "start Traefik: public proxy failed",
+			wantCommands: []string{
+				createNetwork,
+				inspectNetwork,
+				startPublicTraefik,
+			},
+			wantWrites: 1,
+		},
+		{
+			name: "stops before application deployment when internal proxy fails",
+			commandErrs: map[string]error{
+				startInternalTraefik: errors.New("internal proxy failed"),
+			},
+			wantErr: "start internal Traefik: internal proxy failed",
+			wantCommands: []string{
+				createNetwork,
+				inspectNetwork,
+				startPublicTraefik,
+				"mkdir -p /opt/warpgate/internal-proxy",
+				startInternalTraefik,
+			},
+			wantWrites: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actualSubnet := proxyNetwork.Subnet
+			if tt.name == "stops before proxy updates when network subnet differs" {
+				actualSubnet = "172.31.254.0/29"
+			}
+			runner := &fakeRemote{
+				commandStdout: map[string]string{inspectNetwork: actualSubnet},
+				commandErrs:   tt.commandErrs,
+			}
+			err := d.reconcileTraefikProxyNetwork(runner, node)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("reconcileTraefikProxyNetwork() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || err.Error() != tt.wantErr) {
+				t.Fatalf("reconcileTraefikProxyNetwork() error = %v, want %q", err, tt.wantErr)
+			}
+			if !reflect.DeepEqual(runner.commands, tt.wantCommands) {
+				t.Errorf("commands = %v, want %v", runner.commands, tt.wantCommands)
+			}
+			if got := len(runner.writes); got != tt.wantWrites {
+				t.Errorf("writes = %d, want %d", got, tt.wantWrites)
+			}
+		})
+	}
+}
+
 type fakeRemote struct {
 	commands      []string
 	commandStdout map[string]string

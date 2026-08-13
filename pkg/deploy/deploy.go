@@ -306,7 +306,7 @@ func (d *Deployer) deployToNode(app *config.AppConfig, manifest *release.Manifes
 	return nil
 }
 
-func (d *Deployer) reconcileTraefikProxyNetwork(client *ssh.Client, node *config.NodeConfig) error {
+func (d *Deployer) reconcileTraefikProxyNetwork(client deploymentRunner, node *config.NodeConfig) error {
 	proxyNetwork := d.Repo.Cluster.Networking.Traefik.ProxyNetwork
 	if proxyNetwork.Name == "" {
 		return nil

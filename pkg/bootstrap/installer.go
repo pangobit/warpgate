@@ -434,7 +434,9 @@ func setupWarpgate(client *ssh.Client, networking *config.NetworkingConfig) (str
 		return "", fmt.Errorf("mkdir failed: %w", err)
 	}
 
-	run(client, "docker network create warpgate 2>/dev/null || true")
+	if err := run(client, "docker network inspect warpgate >/dev/null 2>&1 || docker network create warpgate"); err != nil {
+		return "", fmt.Errorf("create shared Docker network: %w", err)
+	}
 	if networking != nil && networking.Traefik.ProxyNetwork.Name != "" {
 		proxyNetwork := networking.Traefik.ProxyNetwork
 		if err := run(client, "docker network inspect '"+shellSingleQuote(proxyNetwork.Name)+"' >/dev/null 2>&1 || docker network create --subnet '"+shellSingleQuote(proxyNetwork.Subnet)+"' '"+shellSingleQuote(proxyNetwork.Name)+"'"); err != nil {
