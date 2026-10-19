@@ -941,12 +941,15 @@ func releaseEnvFileMap(manifest *release.Manifest, secretsServer string) map[str
 	return envFiles
 }
 
-func (d *Deployer) composeUpCommand(app *config.AppConfig, projectFlag, composeFiles string, hasEnvFile bool) string {
+func (d *Deployer) composeUpCommand(app *config.AppConfig, projectFlag, composeFiles string, hasEnvFile bool, upFlags ...string) string {
 	base := "docker compose " + projectFlag + " " + composeFiles
 	if hasEnvFile {
 		base += " --env-file .env"
 	}
 	base += " up -d"
+	for _, flag := range upFlags {
+		base += " " + flag
+	}
 	return base
 }
 
@@ -1412,17 +1415,24 @@ func restoreCapturedEnvFiles(runner deploymentRunner, remoteDir string, files ma
 	return nil
 }
 
+// runRecreateDeployment pulls images, stops any leftover blue-green slot
+// projects, and replaces the stable project's containers with a single
+// `up -d --force-recreate --remove-orphans`. Compose stops every old container
+// of the project before it starts any new one.
 func (d *Deployer) runRecreateDeployment(runner commandRunner, remoteDir string, app *config.AppConfig, composeFiles string, hasEnvFile bool, plan deployPlan, waitForHealth healthWaitFunc) (deployResult, error) {
 	if err := d.pullProject(runner, remoteDir, plan.projectFlag, composeFiles); err != nil {
 		return deployResult{}, err
 	}
 
-	d.log.Infof("Recreate strategy: stopping existing deployment before starting %s...", app.Name)
 	for _, projectFlag := range allDeploymentProjectFlags(app.Name) {
+		if projectFlag == plan.projectFlag {
+			continue
+		}
 		d.stopProject(runner, remoteDir, projectFlag, composeFiles, fmt.Sprintf("Failed to stop old deployment %s", projectFlag))
 	}
 
-	if err := d.startAndVerifyProject(runner, remoteDir, app, plan.projectFlag, composeFiles, hasEnvFile, app.Name, waitForHealth); err != nil {
+	d.log.Infof("Recreate strategy: replacing %s containers...", app.Name)
+	if err := d.startAndVerifyProject(runner, remoteDir, app, plan.projectFlag, composeFiles, hasEnvFile, app.Name, waitForHealth, "--force-recreate", "--remove-orphans"); err != nil {
 		return deployResult{}, err
 	}
 	return deployResult{}, nil
@@ -1455,8 +1465,8 @@ func (d *Deployer) pullProject(runner commandRunner, remoteDir, projectFlag, com
 	return nil
 }
 
-func (d *Deployer) startAndVerifyProject(runner commandRunner, remoteDir string, app *config.AppConfig, projectFlag, composeFiles string, hasEnvFile bool, label string, waitForHealth healthWaitFunc) error {
-	upCmd := d.composeUpCommand(app, projectFlag, composeFiles, hasEnvFile)
+func (d *Deployer) startAndVerifyProject(runner commandRunner, remoteDir string, app *config.AppConfig, projectFlag, composeFiles string, hasEnvFile bool, label string, waitForHealth healthWaitFunc, upFlags ...string) error {
+	upCmd := d.composeUpCommand(app, projectFlag, composeFiles, hasEnvFile, upFlags...)
 	fullCmd := fmt.Sprintf("cd %s && %s", remoteDir, upCmd)
 	d.log.Infof("Starting %s...", label)
 	if _, stderr, err := runner.RunCommand(fullCmd); err != nil {

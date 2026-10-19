@@ -99,7 +99,7 @@ release:
 ```
 
 - `image_semver`: `*`, exact `1.2.3`, `~1.2`, or `^1`. Prereleases excluded unless named.
-- `strategy`: `blue-green` (default) or `recreate` (host port bindings, single-writer volumes).
+- `strategy`: `blue-green` (default) or `recreate` (host port bindings, single-writer volumes). `recreate` replaces the app's containers with one `docker compose up -d --force-recreate --remove-orphans`: Compose (v2.16+) creates each new container while the old one still runs, then stops every old container before it starts any new one. Two containers of the same service never run at once. Old containers stop in dependency order rather than `down`'s reverse order, so a service's downtime can include the stop time of the services that depend on it. Anonymous volumes carry over to the new containers. Compose older than v2.31 does not apply changes to project-owned network definitions.
 - `source` + `compose_ref`: fetch compose from another GitHub repo instead of local `compose.yml`.
 - `persistent_volumes`: stable Docker volume names across blue/green slots.
 
