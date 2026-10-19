@@ -391,7 +391,7 @@ func TestDeployWithStrategy(t *testing.T) {
 		wantWaitFlags []string
 	}{
 		{
-			name: "recreate uses stable project and cleans legacy slots",
+			name: "recreate cleans legacy slots then replaces containers in one up",
 			app: &config.AppConfig{
 				Name:     "probe",
 				Strategy: config.StrategyRecreate,
@@ -402,10 +402,27 @@ func TestDeployWithStrategy(t *testing.T) {
 			wantResult: deployResult{},
 			wantCommands: []string{
 				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml pull",
-				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml down",
 				"cd /remote && docker compose -p probe-blue -f compose.yml -f docker-compose.override.yml down",
 				"cd /remote && docker compose -p probe-green -f compose.yml -f docker-compose.override.yml down",
-				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml up -d",
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml up -d --force-recreate --remove-orphans",
+			},
+			wantWaitFlags: []string{"-p probe"},
+		},
+		{
+			name: "recreate health failure tears down the stable project",
+			app: &config.AppConfig{
+				Name:     "probe",
+				Strategy: config.StrategyRecreate,
+			},
+			state:   &DeployState{},
+			waitErr: errors.New("unhealthy"),
+			wantErr: "health check failed: unhealthy",
+			wantCommands: []string{
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml pull",
+				"cd /remote && docker compose -p probe-blue -f compose.yml -f docker-compose.override.yml down",
+				"cd /remote && docker compose -p probe-green -f compose.yml -f docker-compose.override.yml down",
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml up -d --force-recreate --remove-orphans",
+				"cd /remote && docker compose -p probe -f compose.yml -f docker-compose.override.yml down",
 			},
 			wantWaitFlags: []string{"-p probe"},
 		},
